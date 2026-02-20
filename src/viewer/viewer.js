@@ -1,5 +1,6 @@
 import * as pdfjsLib from "../vendor/pdfjs/pdf.mjs";
 import { createLogger, getDebugInfo } from "../shared/diagnostics.js";
+import { initSelectionSystem } from "./selection.js";
 import {
   clearOpenAIKey,
   getSettings,
@@ -81,6 +82,7 @@ let currentSettings = null;
 let renderChain = Promise.resolve();
 let scrollTicking = false;
 let fitResizeFrame = null;
+let selectionSystem = null;
 const sidebarState = {
   width: SIDEBAR_DEFAULT_WIDTH,
   collapsed: false,
@@ -355,6 +357,25 @@ function setApiStatus(text) {
     apiStatusTimer = null;
     setApiPresenceStatus(currentSettings);
   }, 1400);
+}
+
+function ensureSelectionSystemInitialized() {
+  if (selectionSystem) {
+    return;
+  }
+
+  selectionSystem = initSelectionSystem({
+    pdfRoot,
+    onAction: (payload) => {
+      logger.info("Selection action:", payload.type);
+      console.log("[CLARIFY][VIEWER] Selection payload", {
+        type: payload.type,
+        selectedText: payload.selectedText,
+        pageIndex: payload.pageIndex,
+        contextWindowLength: payload.contextWindow?.length ?? 0
+      });
+    }
+  });
 }
 
 function applySettingsToUi(settings) {
@@ -879,6 +900,7 @@ async function renderAllPages(targetPageNumber, loadToken) {
 
   connectPageObserver();
   applyVisualScale();
+  ensureSelectionSystemInitialized();
 
   if (renderState.fitWidthEnabled) {
     const correctedFitScale = await computeFitWidthScale(loadToken);
@@ -939,6 +961,11 @@ function handleLoadFailure(sourceType, error) {
 async function loadPdfSource(source, documentParams) {
   const loadToken = ++renderState.loadToken;
   setFitWidthEnabled(false);
+
+  if (selectionSystem) {
+    selectionSystem.destroy();
+    selectionSystem = null;
+  }
 
   await disposeCurrentDocument();
   if (loadToken !== renderState.loadToken) {
