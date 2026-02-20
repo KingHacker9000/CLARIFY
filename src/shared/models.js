@@ -52,6 +52,16 @@ function normalizeList(value, maxItems = 6, maxLength = 180) {
     .slice(0, maxItems)
 }
 
+function normalizeTruncatedList(value, maxItems = 6, maxLength = 180) {
+  if (!Array.isArray(value)) {
+    return []
+  }
+  return value
+    .map((item) => truncateText(item, maxLength))
+    .filter(Boolean)
+    .slice(0, maxItems)
+}
+
 function normalizeNumberList(value, maxItems = 6) {
   if (!Array.isArray(value)) {
     return []
@@ -84,7 +94,7 @@ export function normalizeCard(card) {
   const input = card && typeof card === "object" ? card : {}
   const type = CARD_TYPES.has(input.type) ? input.type : "explanation"
 
-  const quote = clampText(input.grounding?.quote, 300)
+  const quote = truncateText(input.grounding?.quote, 300)
   const sectionTitle = sanitizeText(input.grounding?.sectionTitle, "Unknown section")
   const pageIndex = Number.isFinite(input.grounding?.pageIndex)
     ? Math.max(0, Number(input.grounding.pageIndex))
@@ -114,7 +124,7 @@ export function normalizeCard(card) {
       sectionTitle,
       quote,
       citationPages: normalizeNumberList(input.grounding?.citationPages, 6),
-      citationQuotes: normalizeList(input.grounding?.citationQuotes, 6, 260),
+      citationQuotes: normalizeTruncatedList(input.grounding?.citationQuotes, 6, 260),
       textRange: input.grounding?.textRange ?? null
     },
     locator: {

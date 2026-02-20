@@ -130,6 +130,99 @@ const sidebarUiState = {
   glossaryTerms: [],
   activeTab: "orientation"
 };
+let recentJumpState = null;
+
+const RETRIEVAL_BLOCK_MIN_CHARS = 50;
+const RETRIEVAL_BLOCK_MAX_CHARS = 420;
+const RETRIEVAL_PRIMARY_QUOTE_MAX = 300;
+const RETRIEVAL_CITATION_QUOTE_MAX = 260;
+const RETRIEVAL_MAX_CITATIONS = 4;
+const RETRIEVAL_STOP_WORDS = new Set([
+  "a",
+  "about",
+  "after",
+  "all",
+  "also",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "been",
+  "being",
+  "between",
+  "both",
+  "but",
+  "by",
+  "can",
+  "could",
+  "did",
+  "do",
+  "does",
+  "done",
+  "during",
+  "each",
+  "for",
+  "from",
+  "had",
+  "has",
+  "have",
+  "if",
+  "in",
+  "into",
+  "is",
+  "it",
+  "its",
+  "may",
+  "might",
+  "more",
+  "most",
+  "no",
+  "not",
+  "of",
+  "on",
+  "or",
+  "other",
+  "our",
+  "out",
+  "over",
+  "same",
+  "should",
+  "so",
+  "some",
+  "such",
+  "than",
+  "that",
+  "the",
+  "their",
+  "them",
+  "then",
+  "there",
+  "these",
+  "they",
+  "this",
+  "to",
+  "under",
+  "use",
+  "used",
+  "using",
+  "very",
+  "was",
+  "we",
+  "were",
+  "what",
+  "when",
+  "where",
+  "which",
+  "while",
+  "who",
+  "will",
+  "with",
+  "within",
+  "without",
+  "would"
+]);
 
 function sanitizeText(value) {
   return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : ""
@@ -897,6 +990,561 @@ function buildGrounding(payload) {
   }
 }
 
+function normalizeRetrievalText(value) {
+  return sanitizeText(value)
+    .toLowerCase()
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, "\"")
+    .replace(/\u2026/g, "...")
+}
+
+function tokenizeForRetrieval(value) {
+  const normalized = normalizeRetrievalText(value).replace(/[^a-z0-9]+/g, " ").trim()
+  if (!normalized) {
+    return []
+  }
+  return normalized
+    .split(" ")
+    .filter((token) => token.length >= 2 && !RETRIEVAL_STOP_WORDS.has(token))
+}
+
+function buildParagraphsFromLines(rawText) {
+  const lines = String(rawText || "")
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  if (lines.length === 0) {
+    return []
+  }
+
+  const paragraphs = []
+  let current = ""
+  for (const line of lines) {
+    current = current ? `${current} ${line}` : line
+    const closesSentence = /[.!?;:]\)?$/.test(line)
+    if (closesSentence || current.length >= RETRIEVAL_BLOCK_MAX_CHARS - 40) {
+      paragraphs.push(current.trim())
+      current = ""
+    }
+  }
+  if (current) {
+    paragraphs.push(current.trim())
+  }
+  return paragraphs
+}
+
+function splitParagraphIntoBlocks(paragraphText) {
+  const paragraph = sanitizeText(paragraphText)
+  if (!paragraph || paragraph.length < RETRIEVAL_BLOCK_MIN_CHARS) {
+    return []
+  }
+  if (paragraph.length <= RETRIEVAL_BLOCK_MAX_CHARS) {
+    return [paragraph]
+  }
+
+  const sentences =
+    paragraph
+      .match(/[^.!?]+(?:[.!?]+|$)/g)
+      ?.map((sentence) => sentence.trim())
+      .filter(Boolean) ?? [paragraph]
+  if (sentences.length <= 1) {
+    const chunks = []
+    let cursor = 0
+    while (cursor < paragraph.length) {
+      const next = paragraph.slice(cursor, cursor + RETRIEVAL_BLOCK_MAX_CHARS).trim()
+      if (next.length >= RETRIEVAL_BLOCK_MIN_CHARS) {
+        chunks.push(next)
+      }
+      cursor += RETRIEVAL_BLOCK_MAX_CHARS - 40
+    }
+    return chunks
+  }
+
+  const chunks = []
+  let current = ""
+  for (const sentence of sentences) {
+    const candidate = current ? `${current} ${sentence}` : sentence
+    if (candidate.length <= RETRIEVAL_BLOCK_MAX_CHARS) {
+      current = candidate
+      continue
+    }
+    if (current.length >= RETRIEVAL_BLOCK_MIN_CHARS) {
+      chunks.push(current.trim())
+    }
+    current = sentence
+  }
+  if (current.length >= RETRIEVAL_BLOCK_MIN_CHARS) {
+    chunks.push(current.trim())
+  }
+  return chunks
+}
+
+function splitPageTextIntoBlocks(rawPageText) {
+  const source = String(rawPageText || "")
+  const paragraphCandidates = source
+    .split(/\n\s*\n+/)
+    .map((part) => sanitizeText(part))
+    .filter(Boolean)
+  const paragraphs = paragraphCandidates.length > 1 ? paragraphCandidates : buildParagraphsFromLines(source)
+  const blocks = []
+  for (const paragraph of paragraphs) {
+    blocks.push(...splitParagraphIntoBlocks(paragraph))
+  }
+  return blocks
+}
+
+function getDocumentTextBlocks() {
+  if (!currentPdf || !Array.isArray(renderState.pageNodes) || renderState.pageNodes.length === 0) {
+    return []
+  }
+
+  const cache = currentPdf.retrievalBlockCache
+  if (
+    cache &&
+    cache.renderToken === renderState.renderToken &&
+    cache.loadToken === renderState.loadToken &&
+    Array.isArray(cache.blocks)
+  ) {
+    return cache.blocks
+  }
+
+  const blocks = []
+  const dedupe = new Set()
+  for (const pageNode of renderState.pageNodes) {
+    const pageIndex = Number(pageNode?.dataset?.pageIndex)
+    const textLayer = pageNode?.querySelector?.(".textLayer")
+    if (!Number.isFinite(pageIndex) || !(textLayer instanceof HTMLElement)) {
+      continue
+    }
+    const rawText = textLayer.innerText || textLayer.textContent || ""
+    const pageBlocks = splitPageTextIntoBlocks(rawText)
+    for (const blockText of pageBlocks) {
+      const normalized = normalizeRetrievalText(blockText)
+      if (!normalized) {
+        continue
+      }
+      const dedupeKey = `${pageIndex}:${normalized.slice(0, 420)}`
+      if (dedupe.has(dedupeKey)) {
+        continue
+      }
+      dedupe.add(dedupeKey)
+
+      const tokens = tokenizeForRetrieval(normalized)
+      blocks.push({
+        pageIndex,
+        text: blockText,
+        textLower: normalized,
+        tokenSet: new Set(tokens)
+      })
+    }
+  }
+
+  currentPdf.retrievalBlockCache = {
+    renderToken: renderState.renderToken,
+    loadToken: renderState.loadToken,
+    blocks
+  }
+  return blocks
+}
+
+function appendUniqueAnchor(list, dedupe, value, minLength = 6) {
+  const text = sanitizeText(value)
+  if (!text || text.length < minLength) {
+    return
+  }
+  const key = text.toLowerCase()
+  if (dedupe.has(key)) {
+    return
+  }
+  dedupe.add(key)
+  list.push(text)
+}
+
+function extractCitationMarkers(texts) {
+  const markers = new Set()
+  const source = Array.isArray(texts) ? texts : []
+  for (const text of source) {
+    const matches = String(text || "").match(/\[\d{1,3}(?:\s*,\s*\d{1,3})*\]/g)
+    if (!matches) {
+      continue
+    }
+    for (const marker of matches) {
+      markers.add(marker)
+    }
+  }
+  return markers
+}
+
+function detectAcronymToken(value) {
+  const source = sanitizeText(value)
+  if (!source) {
+    return ""
+  }
+  const compact = source.replace(/[^A-Za-z0-9]/g, "")
+  if (!/^[A-Z0-9]{2,10}$/.test(compact)) {
+    return ""
+  }
+  if (!/[A-Z]/.test(compact)) {
+    return ""
+  }
+  return compact
+}
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+function containsAcronymDefinitionPattern(text, acronym) {
+  const source = sanitizeText(text)
+  const token = sanitizeText(acronym)
+  if (!source || !token) {
+    return false
+  }
+  const escaped = escapeRegExp(token)
+  const patterns = [
+    new RegExp(`\\b[A-Za-z][A-Za-z\\-]*(?:\\s+[A-Za-z][A-Za-z\\-]*){1,8}\\s*\\(${escaped}\\)`, "i"),
+    new RegExp(`\\b${escaped}\\s*\\([A-Za-z][A-Za-z\\-]*(?:\\s+[A-Za-z][A-Za-z\\-]*){1,8}\\)`, "i")
+  ]
+  return patterns.some((pattern) => pattern.test(source))
+}
+
+function makeSnippetAroundAnchor(text, anchor, maxLength) {
+  const source = sanitizeText(text)
+  if (!source) {
+    return ""
+  }
+  if (source.length <= maxLength) {
+    return source
+  }
+
+  const anchorText = sanitizeText(anchor).toLowerCase()
+  const sourceLower = source.toLowerCase()
+  let anchorIndex = anchorText ? sourceLower.indexOf(anchorText) : -1
+  if (anchorIndex < 0 && anchorText) {
+    const anchorTokens = tokenizeForRetrieval(anchorText)
+    for (const token of anchorTokens.slice(0, 3)) {
+      const tokenIndex = sourceLower.indexOf(token)
+      if (tokenIndex >= 0) {
+        anchorIndex = tokenIndex
+        break
+      }
+    }
+  }
+  if (anchorIndex < 0) {
+    anchorIndex = 0
+  }
+
+  const padding = Math.floor((maxLength - 24) / 2)
+  let start = Math.max(anchorIndex - padding, 0)
+  let end = Math.min(start + maxLength, source.length)
+  if (end - start < maxLength) {
+    start = Math.max(end - maxLength, 0)
+  }
+
+  let snippet = source.slice(start, end).trim()
+  if (start > 0) {
+    snippet = `...${snippet}`
+  }
+  if (end < source.length) {
+    snippet = `${snippet}...`
+  }
+  return snippet
+}
+
+function buildGroundingAnchorsFromResponse({ selectedText, contextWindow, response, details }) {
+  const anchors = []
+  const dedupe = new Set()
+
+  appendUniqueAnchor(anchors, dedupe, selectedText, 4)
+  appendUniqueAnchor(anchors, dedupe, response?.shortAnswer, 12)
+  appendUniqueAnchor(anchors, dedupe, response?.eli5, 12)
+  appendUniqueAnchor(anchors, dedupe, response?.whatItShows, 10)
+  appendUniqueAnchor(anchors, dedupe, response?.takeaway, 10)
+
+  const supportsClaim = Array.isArray(response?.supportsClaim) ? response.supportsClaim : []
+  for (const support of supportsClaim) {
+    appendUniqueAnchor(anchors, dedupe, support, 10)
+  }
+
+  const groundingQuotes = Array.isArray(response?.groundingQuotes) ? response.groundingQuotes : []
+  for (const groundingQuote of groundingQuotes) {
+    appendUniqueAnchor(anchors, dedupe, groundingQuote, 8)
+  }
+
+  const detailTextItems = Array.isArray(details) ? details : []
+  for (const detailText of detailTextItems) {
+    appendUniqueAnchor(anchors, dedupe, detailText, 10)
+  }
+
+  const contextSnippet = truncateText(contextWindow, 320)
+  appendUniqueAnchor(anchors, dedupe, contextSnippet, 20)
+  return anchors.slice(0, 14)
+}
+
+function buildDetailsRetrievalTexts(cardType, response) {
+  if (cardType === "quant") {
+    const items = []
+    const whatItShows = sanitizeText(response?.whatItShows)
+    const takeaway = sanitizeText(response?.takeaway)
+    if (whatItShows) {
+      items.push(whatItShows)
+    }
+    if (takeaway) {
+      items.push(takeaway)
+    }
+    const supportsClaim = Array.isArray(response?.supportsClaim) ? response.supportsClaim : []
+    for (const support of supportsClaim) {
+      const normalized = sanitizeText(support)
+      if (normalized) {
+        items.push(normalized)
+      }
+    }
+    return items
+  }
+
+  const items = []
+  const eli5 = sanitizeText(response?.eli5)
+  if (eli5) {
+    items.push(eli5)
+  }
+  const steps = Array.isArray(response?.steps) ? response.steps : []
+  for (const step of steps) {
+    const normalized = sanitizeText(step)
+    if (normalized) {
+      items.push(normalized)
+    }
+  }
+  const paperUsage = Array.isArray(response?.paperUsage) ? response.paperUsage : []
+  for (const usage of paperUsage) {
+    const normalized = sanitizeText(usage)
+    if (normalized) {
+      items.push(normalized)
+    }
+  }
+  return items
+}
+
+function scoreBlockAgainstAnchors(block, anchors, options = {}) {
+  const normalizedAnchors = Array.isArray(anchors) ? anchors : []
+  if (!block || normalizedAnchors.length === 0) {
+    return { score: 0, bestAnchor: "" }
+  }
+
+  let score = 0
+  let bestAnchor = ""
+  let bestAnchorScore = 0
+  for (const anchor of normalizedAnchors) {
+    const anchorText = sanitizeText(anchor)
+    if (!anchorText) {
+      continue
+    }
+    const anchorLower = anchorText.toLowerCase()
+    let anchorScore = 0
+
+    if (anchorLower.length >= 24 && block.textLower.includes(anchorLower)) {
+      anchorScore += 8
+    }
+
+    const anchorTokens = tokenizeForRetrieval(anchorText).slice(0, 14)
+    if (anchorTokens.length > 0) {
+      let matched = 0
+      for (const token of anchorTokens) {
+        if (block.tokenSet.has(token)) {
+          matched += 1
+        }
+      }
+      const coverage = matched / Math.max(Math.min(anchorTokens.length, 14), 1)
+      anchorScore += coverage * 6
+      anchorScore += Math.min(matched, 8) * 0.18
+    }
+
+    if (anchorScore > bestAnchorScore) {
+      bestAnchorScore = anchorScore
+      bestAnchor = anchorText
+    }
+    score += Math.min(anchorScore, 8)
+  }
+
+  const selectedTextNormalized = normalizeRetrievalText(options.selectedText || "")
+  if (selectedTextNormalized && selectedTextNormalized.length >= 18 && block.textLower.includes(selectedTextNormalized)) {
+    score -= 2.6
+  }
+
+  const preferredPageIndex = Number(options.preferredPageIndex)
+  if (Number.isFinite(preferredPageIndex) && preferredPageIndex >= 0) {
+    const distance = Math.abs(block.pageIndex - preferredPageIndex)
+    if (distance === 0) {
+      score += 0.45
+    } else if (distance === 1) {
+      score += 0.2
+    }
+  }
+
+  const acronym = sanitizeText(options.acronym || "")
+  if (acronym) {
+    if (containsAcronymDefinitionPattern(block.text, acronym)) {
+      score += 6.5
+    } else if (block.textLower.includes(acronym.toLowerCase())) {
+      score += 1.3
+    }
+  }
+
+  const citationMarkers = options.citationMarkers instanceof Set ? options.citationMarkers : new Set()
+  if (citationMarkers.size > 0) {
+    for (const marker of citationMarkers) {
+      if (block.text.includes(marker)) {
+        score += 1.8
+      }
+    }
+  }
+
+  return { score, bestAnchor }
+}
+
+function retrieveRelevantDocumentBlocks({
+  anchors,
+  selectedText,
+  preferredPageIndex,
+  acronym,
+  citationMarkers,
+  maxResults = RETRIEVAL_MAX_CITATIONS + 1
+}) {
+  const documentBlocks = getDocumentTextBlocks()
+  const normalizedAnchors = Array.isArray(anchors) ? anchors.filter(Boolean) : []
+  if (documentBlocks.length === 0 || normalizedAnchors.length === 0) {
+    return []
+  }
+
+  const scored = []
+  for (const block of documentBlocks) {
+    const result = scoreBlockAgainstAnchors(block, normalizedAnchors, {
+      selectedText,
+      preferredPageIndex,
+      acronym,
+      citationMarkers
+    })
+    if (result.score < 0.7) {
+      continue
+    }
+    scored.push({
+      ...block,
+      score: result.score,
+      bestAnchor: result.bestAnchor
+    })
+  }
+
+  scored.sort((a, b) => b.score - a.score)
+  const unique = []
+  const dedupe = new Set()
+  for (const item of scored) {
+    const dedupeKey = `${item.pageIndex}:${item.text.slice(0, 160).toLowerCase()}`
+    if (dedupe.has(dedupeKey)) {
+      continue
+    }
+    dedupe.add(dedupeKey)
+    unique.push(item)
+    if (unique.length >= maxResults) {
+      break
+    }
+  }
+
+  return unique
+}
+
+function resolveGroundingFromDocument({
+  selectedText,
+  contextWindow,
+  response,
+  cardType,
+  preferredPageIndex,
+  baseGrounding
+}) {
+  const details = buildDetailsRetrievalTexts(cardType, response)
+  const anchors = buildGroundingAnchorsFromResponse({
+    selectedText,
+    contextWindow,
+    response,
+    details
+  })
+  const citationMarkers = extractCitationMarkers(anchors)
+  const acronym = detectAcronymToken(selectedText)
+  const rankedBlocks = retrieveRelevantDocumentBlocks({
+    anchors,
+    selectedText,
+    preferredPageIndex,
+    acronym,
+    citationMarkers,
+    maxResults: RETRIEVAL_MAX_CITATIONS + 3
+  })
+
+  if (rankedBlocks.length === 0) {
+    return {
+      pageIndex: baseGrounding.pageIndex,
+      sectionTitle: baseGrounding.sectionTitle,
+      quote: baseGrounding.quote,
+      citationPages: Array.isArray(response?.groundingPages) ? response.groundingPages : [],
+      citationQuotes: Array.isArray(response?.groundingQuotes) ? response.groundingQuotes : []
+    }
+  }
+
+  const primary = rankedBlocks[0]
+  const citations = rankedBlocks.slice(1, RETRIEVAL_MAX_CITATIONS + 1)
+  const citationPages = []
+  const citationQuotes = []
+  const seenCitationKeys = new Set()
+  for (const block of citations) {
+    const snippet = makeSnippetAroundAnchor(block.text, block.bestAnchor, RETRIEVAL_CITATION_QUOTE_MAX)
+    if (!snippet) {
+      continue
+    }
+    const key = `${block.pageIndex}:${snippet.toLowerCase()}`
+    if (seenCitationKeys.has(key)) {
+      continue
+    }
+    seenCitationKeys.add(key)
+    citationPages.push(block.pageIndex)
+    citationQuotes.push(snippet)
+  }
+
+  const modelGroundingQuotes = Array.isArray(response?.groundingQuotes) ? response.groundingQuotes : []
+  for (const modelQuote of modelGroundingQuotes) {
+    if (citationQuotes.length >= RETRIEVAL_MAX_CITATIONS) {
+      break
+    }
+    const mapped = retrieveRelevantDocumentBlocks({
+      anchors: [modelQuote],
+      selectedText,
+      preferredPageIndex,
+      acronym,
+      citationMarkers,
+      maxResults: 1
+    })
+    const block = mapped[0]
+    if (!block) {
+      continue
+    }
+    const snippet = makeSnippetAroundAnchor(block.text, modelQuote, RETRIEVAL_CITATION_QUOTE_MAX)
+    if (!snippet) {
+      continue
+    }
+    const key = `${block.pageIndex}:${snippet.toLowerCase()}`
+    if (seenCitationKeys.has(key)) {
+      continue
+    }
+    seenCitationKeys.add(key)
+    citationPages.push(block.pageIndex)
+    citationQuotes.push(snippet)
+  }
+
+  return {
+    pageIndex: primary.pageIndex,
+    sectionTitle: resolveSectionTitle(primary.pageIndex),
+    quote: makeSnippetAroundAnchor(primary.text, primary.bestAnchor, RETRIEVAL_PRIMARY_QUOTE_MAX),
+    citationPages,
+    citationQuotes
+  }
+}
+
 function buildLocatorContextHint(selectedText, contextWindow) {
   const selected = sanitizeText(selectedText)
   const context = sanitizeText(contextWindow)
@@ -1164,6 +1812,14 @@ async function buildCardFromSelection(payload) {
     selectedText,
     contextWindow
   })
+  const retrievedGrounding = resolveGroundingFromDocument({
+    selectedText,
+    contextWindow,
+    response,
+    cardType,
+    preferredPageIndex: payload?.pageIndex,
+    baseGrounding: grounding
+  })
 
   return normalizeCard({
     id: makeId("card"),
@@ -1172,9 +1828,19 @@ async function buildCardFromSelection(payload) {
     shortAnswer: response.shortAnswer,
     details,
     grounding: {
-      ...grounding,
-      citationPages: response.groundingPages,
-      citationQuotes: response.groundingQuotes
+      pageIndex: Number.isFinite(retrievedGrounding.pageIndex)
+        ? Math.max(0, Number(retrievedGrounding.pageIndex))
+        : grounding.pageIndex,
+      sectionTitle: sanitizeText(retrievedGrounding.sectionTitle || grounding.sectionTitle),
+      quote: clampText(retrievedGrounding.quote || grounding.quote, 300),
+      citationPages:
+        Array.isArray(retrievedGrounding.citationPages) && retrievedGrounding.citationPages.length > 0
+          ? retrievedGrounding.citationPages
+          : response.groundingPages,
+      citationQuotes:
+        Array.isArray(retrievedGrounding.citationQuotes) && retrievedGrounding.citationQuotes.length > 0
+          ? retrievedGrounding.citationQuotes
+          : response.groundingQuotes
     },
     locator,
     meta: {
@@ -1265,6 +1931,12 @@ function waitForHighlightTiming() {
     requestAnimationFrame(() => {
       setTimeout(resolve, SOURCE_HIGHLIGHT_DELAY_MS)
     })
+  })
+}
+
+function waitForNextFrame() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => resolve())
   })
 }
 
@@ -1385,6 +2057,188 @@ function tryHighlightNeedles(pageIndex, needleCandidates) {
   }
 }
 
+function getHighlightFocusRect(pageNode) {
+  if (!(pageNode instanceof HTMLElement)) {
+    return null
+  }
+  const textLayer = pageNode.querySelector(".textLayer")
+  if (!(textLayer instanceof HTMLElement)) {
+    return null
+  }
+
+  const focusElements = [
+    ...Array.from(textLayer.querySelectorAll(".clarify-highlight")),
+    ...Array.from(textLayer.querySelectorAll(".clarify-highlight-overlay"))
+  ]
+  if (focusElements.length === 0) {
+    return null
+  }
+
+  let top = Number.POSITIVE_INFINITY
+  let bottom = Number.NEGATIVE_INFINITY
+  for (const element of focusElements) {
+    const rect = element.getBoundingClientRect()
+    if (!Number.isFinite(rect.top) || !Number.isFinite(rect.bottom)) {
+      continue
+    }
+    top = Math.min(top, rect.top)
+    bottom = Math.max(bottom, rect.bottom)
+  }
+
+  if (!Number.isFinite(top) || !Number.isFinite(bottom) || bottom <= top) {
+    return null
+  }
+  return { top, bottom, height: Math.max(bottom - top, 1) }
+}
+
+function centerPageRegionInViewport(pageNode, focusRect, behavior = "smooth") {
+  if (!(pageNode instanceof HTMLElement)) {
+    return
+  }
+
+  const rootRect = pdfRoot.getBoundingClientRect()
+  const focusCenter =
+    focusRect && Number.isFinite(focusRect.top)
+      ? pdfRoot.scrollTop + (focusRect.top - rootRect.top) + focusRect.height / 2
+      : pageNode.offsetTop + pageNode.offsetHeight / 2
+  const targetTop = focusCenter - pdfRoot.clientHeight / 2
+
+  const pageTop = pageNode.offsetTop
+  const pageBottom = pageTop + pageNode.offsetHeight
+  const minPageTop = Math.max(pageTop - 12, 0)
+  const maxPageTop = Math.max(minPageTop, pageBottom - pdfRoot.clientHeight + 12)
+  const constrainedToPage = Math.min(maxPageTop, Math.max(minPageTop, targetTop))
+  const maxScrollTop = Math.max(pdfRoot.scrollHeight - pdfRoot.clientHeight, 0)
+  const clampedTop = Math.min(maxScrollTop, Math.max(0, constrainedToPage))
+
+  pdfRoot.scrollTo({
+    top: clampedTop,
+    behavior
+  })
+}
+
+async function centerPageOnHighlight(pageNode, behavior = "smooth") {
+  await waitForNextFrame()
+  await waitForNextFrame()
+  const focusRect = getHighlightFocusRect(pageNode)
+  centerPageRegionInViewport(pageNode, focusRect, behavior)
+}
+
+function rememberRecentJump(pageIndex, needleCandidates) {
+  const normalizedNeedles = []
+  const dedupe = new Set()
+  for (const needle of Array.isArray(needleCandidates) ? needleCandidates : []) {
+    const normalized = normalizeNeedleText(needle)
+    if (!normalized) {
+      continue
+    }
+    const key = normalized.toLowerCase()
+    if (dedupe.has(key)) {
+      continue
+    }
+    dedupe.add(key)
+    normalizedNeedles.push(normalized)
+    if (normalizedNeedles.length >= 12) {
+      break
+    }
+  }
+
+  recentJumpState = {
+    pageIndex: Number.isFinite(pageIndex) ? Math.max(0, Number(pageIndex)) : 0,
+    needleCandidates: normalizedNeedles,
+    timestamp: Date.now()
+  }
+}
+
+function clearRecentJump() {
+  recentJumpState = null
+}
+
+function hasRecentJump(maxAgeMs = 7000) {
+  return Boolean(
+    recentJumpState &&
+      Number.isFinite(recentJumpState.pageIndex) &&
+      Array.isArray(recentJumpState.needleCandidates) &&
+      recentJumpState.needleCandidates.length > 0 &&
+      Date.now() - Number(recentJumpState.timestamp || 0) <= maxAgeMs
+  )
+}
+
+function buildCardGroundingRepairAnchors(card) {
+  const anchors = []
+  const dedupe = new Set()
+  appendUniqueAnchor(anchors, dedupe, card?.grounding?.quote, 8)
+  appendUniqueAnchor(anchors, dedupe, card?.shortAnswer, 10)
+  appendUniqueAnchor(anchors, dedupe, card?.title, 4)
+  appendUniqueAnchor(anchors, dedupe, card?.selectedText, 4)
+  appendUniqueAnchor(anchors, dedupe, card?.locator?.contextHint, 10)
+
+  const citationQuotes = Array.isArray(card?.grounding?.citationQuotes)
+    ? card.grounding.citationQuotes
+    : []
+  for (const quote of citationQuotes) {
+    appendUniqueAnchor(anchors, dedupe, quote, 8)
+  }
+
+  const details = card?.details && typeof card.details === "object" ? card.details : {}
+  appendUniqueAnchor(anchors, dedupe, details.eli5, 10)
+  appendUniqueAnchor(anchors, dedupe, details.whatItShows, 10)
+  appendUniqueAnchor(anchors, dedupe, details.takeaway, 10)
+
+  const listFields = [details.steps, details.paperUsage, details.whatToLookAt]
+  for (const listField of listFields) {
+    if (!Array.isArray(listField)) {
+      continue
+    }
+    for (const item of listField) {
+      appendUniqueAnchor(anchors, dedupe, item, 10)
+    }
+  }
+
+  return anchors.slice(0, 14)
+}
+
+function findRetrievedJumpTargets(card, preferredPageIndex) {
+  const anchors = buildCardGroundingRepairAnchors(card)
+  if (anchors.length === 0) {
+    return []
+  }
+
+  const acronym = detectAcronymToken(card?.selectedText || card?.title || "")
+  const citationMarkers = extractCitationMarkers(anchors)
+  const blocks = retrieveRelevantDocumentBlocks({
+    anchors,
+    selectedText: card?.selectedText || card?.title || "",
+    preferredPageIndex,
+    acronym,
+    citationMarkers,
+    maxResults: 4
+  })
+
+  const targets = []
+  const seen = new Set()
+  for (const block of blocks) {
+    const needle = makeSnippetAroundAnchor(
+      block.text,
+      block.bestAnchor || anchors[0],
+      RETRIEVAL_PRIMARY_QUOTE_MAX
+    )
+    if (!needle) {
+      continue
+    }
+    const key = `${block.pageIndex}:${needle.toLowerCase()}`
+    if (seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    targets.push({
+      pageIndex: block.pageIndex,
+      needle
+    })
+  }
+  return targets
+}
+
 async function jumpToCardSource(card, options = {}) {
   const preferredPageIndex = parseOptionalPageIndex(options?.preferredPageIndex)
   const pageIndex = resolveCardPageIndex(card, preferredPageIndex)
@@ -1397,21 +2251,94 @@ async function jumpToCardSource(card, options = {}) {
     return
   }
 
-  scrollToPage(pageIndex + 1, "smooth")
+  scrollToPage(pageIndex + 1, "instant")
   await waitForPageInView(pageNode)
   await waitForHighlightTiming()
 
-  const needleCandidates = buildCardNeedleCandidates(card, options?.preferredText, {
+  const initialNeedleCandidates = buildCardNeedleCandidates(card, options?.preferredText, {
     strictSource: options?.strictSource
   })
-  const highlightResult = tryHighlightNeedles(pageIndex, needleCandidates)
+  let activePageIndex = pageIndex
+  let activePageNode = pageNode
+  let highlightResult = tryHighlightNeedles(pageIndex, initialNeedleCandidates)
+  if (options?.strictSource && highlightResult.success && !highlightResult.preferExact) {
+    highlightResult = { ...highlightResult, success: false }
+  }
+
+  if (!highlightResult.success) {
+    const retrievedTargets = findRetrievedJumpTargets(card, pageIndex)
+    for (const target of retrievedTargets) {
+      const targetPageNode = getPageNodeByIndex(target.pageIndex)
+      if (!targetPageNode) {
+        continue
+      }
+      if (target.pageIndex !== activePageIndex) {
+        scrollToPage(target.pageIndex + 1, "instant")
+        await waitForPageInView(targetPageNode)
+        await waitForHighlightTiming()
+      }
+
+      const fallbackResult = tryHighlightNeedles(target.pageIndex, [target.needle])
+      if (
+        fallbackResult.success &&
+        (!options?.strictSource || fallbackResult.preferExact)
+      ) {
+        activePageIndex = target.pageIndex
+        activePageNode = targetPageNode
+        highlightResult = fallbackResult
+        break
+      }
+    }
+  }
+
   logger.info("Jump-to-source highlight result", {
     success: highlightResult.success,
     matchesCount: highlightResult.matchesCount,
     preferExact: highlightResult.preferExact,
-    candidateCount: needleCandidates.length
+    candidateCount: initialNeedleCandidates.length,
+    pageIndex: activePageIndex
   })
 
+  if (highlightResult.success) {
+    rememberRecentJump(activePageIndex, [highlightResult.needleText, ...initialNeedleCandidates])
+  } else {
+    clearRecentJump()
+  }
+
+  await centerPageOnHighlight(activePageNode, "smooth")
+}
+
+async function restoreRecentJumpHighlightAfterRender() {
+  if (!hasRecentJump()) {
+    return false
+  }
+
+  const pageIndex = Number(recentJumpState.pageIndex)
+  const needleCandidates = Array.isArray(recentJumpState.needleCandidates)
+    ? recentJumpState.needleCandidates
+    : []
+  if (!Number.isFinite(pageIndex) || pageIndex < 0 || needleCandidates.length === 0) {
+    clearRecentJump()
+    return false
+  }
+
+  const pageNode = getPageNodeByIndex(pageIndex)
+  if (!pageNode) {
+    clearRecentJump()
+    return false
+  }
+
+  scrollToPage(pageIndex + 1, "instant")
+  await waitForPageInView(pageNode)
+  await waitForHighlightTiming()
+  const result = tryHighlightNeedles(pageIndex, needleCandidates)
+  if (!result.success) {
+    clearRecentJump()
+    return false
+  }
+
+  await centerPageOnHighlight(pageNode, "auto")
+  return true
 }
 
 async function loadCardsForCurrentDocument() {
@@ -1821,10 +2748,14 @@ function clearRenderedPages() {
   disconnectPageObserver();
   renderState.pageNodes = [];
   pdfRoot.innerHTML = "";
+  if (currentPdf && typeof currentPdf === "object") {
+    currentPdf.retrievalBlockCache = null
+  }
 }
 
 async function disposeCurrentDocument() {
   clearRenderedPages();
+  clearRecentJump()
 
   if (fitResizeFrame) {
     cancelAnimationFrame(fitResizeFrame);
@@ -1980,10 +2911,15 @@ function scrollToPage(pageNumber, behavior = "smooth") {
     return;
   }
 
-  pdfRoot.scrollTo({
-    top: Math.max(pageNode.offsetTop - 8, 0),
-    behavior
-  });
+  const targetTop = Math.max(pageNode.offsetTop - 8, 0)
+  if (behavior === "instant") {
+    pdfRoot.scrollTop = targetTop
+  } else {
+    pdfRoot.scrollTo({
+      top: targetTop,
+      behavior
+    });
+  }
   setCurrentPage(clamped);
 }
 
@@ -2170,7 +3106,17 @@ async function renderAllPages(targetPageNumber, loadToken) {
     }
   }
 
-  scrollToPage(targetPageNumber, "auto");
+  let restoredJump = false
+  if (hasRecentJump()) {
+    restoredJump = await restoreRecentJumpHighlightAfterRender()
+    if (loadToken !== renderState.loadToken || renderToken !== renderState.renderToken) {
+      return;
+    }
+  }
+
+  if (!restoredJump) {
+    scrollToPage(targetPageNumber, "instant");
+  }
   setStatus(getLoadedStatusText());
   updatePdfControls();
 }
@@ -2260,7 +3206,8 @@ async function loadPdfSource(source, documentParams) {
     numPages: 0,
     scale: DEFAULT_SCALE,
     renderedScale: DEFAULT_SCALE,
-    pageNumber: 1
+    pageNumber: 1,
+    retrievalBlockCache: null
   };
   clearContextScopeTransientStatus();
   sidebarUiState.docId = deriveDocId(currentPdf);
