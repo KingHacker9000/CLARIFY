@@ -451,6 +451,284 @@ body.resizingSidebar .sidebarResizeHandle::before,
   scrollbar-width: thin;
 }
 
+.panelTitle {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.panelEmpty {
+  min-height: 100%;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  color: var(--muted);
+  padding: 4px 2px;
+}
+
+.panelEmptyMessage {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.cardList {
+  display: grid;
+  gap: 12px;
+}
+
+.sidebarCard {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.sidebarCard.pinned {
+  border-color: #c9c9b8;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.05);
+}
+
+.cardHeader {
+  display: grid;
+  gap: 2px;
+}
+
+.cardTitle {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.cardMeta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.cardShortAnswer {
+  margin: 0;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.cardGrounding {
+  border: 1px solid #deded2;
+  border-radius: 10px;
+  background: #f8f8f4;
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.cardGroundingLabel {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.cardQuote {
+  margin: 0;
+  padding: 6px 8px;
+  border-left: 2px solid #cfcfbf;
+  background: #fff;
+  color: #45453f;
+  line-height: 1.35;
+  max-height: 3.1em;
+  overflow: hidden;
+}
+
+.cardDetails {
+  border-top: 1px solid #efefe8;
+  padding-top: 6px;
+}
+
+.cardDetails summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.cardDetailSection {
+  margin-top: 8px;
+  display: grid;
+  gap: 4px;
+}
+
+.cardDetailSection h5 {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.cardDetailSection p {
+  margin: 0;
+  line-height: 1.35;
+}
+
+.cardListBullets {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.35;
+}
+
+.cardListBullets li + li {
+  margin-top: 4px;
+}
+
+.cardFooter {
+  border-top: 1px solid #efefe8;
+  padding-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cardActionButton {
+  border: 1px solid var(--border);
+  background: var(--toolbarButtonBg);
+  border-radius: 8px;
+  padding: 5px 8px;
+  font: inherit;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.cardActionButton:hover {
+  background: #f2f2eb;
+}
+
+.cardActionButton.danger {
+  color: #7a2c2c;
+}
+
+.glossaryList {
+  display: grid;
+  gap: 10px;
+}
+
+.glossaryTerm {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.glossaryHeader {
+  display: grid;
+  gap: 2px;
+}
+
+.glossaryTitle {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.3;
+}
+
+.glossaryMeta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.glossarySummary {
+  margin: 0;
+  line-height: 1.35;
+}
+
+.glossaryQuote {
+  margin: 0;
+  padding: 6px 8px;
+  border-left: 2px solid #d8d8cb;
+  background: #f7f7f2;
+  line-height: 1.35;
+  max-height: 3.1em;
+  overflow: hidden;
+}
+
+.glossaryFooter {
+  border-top: 1px solid #efefe8;
+  padding-top: 8px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.pdfPageShell.sourceFlash .pdfPageSurface,
+.textLayer.sourceFlash {
+  animation: sourceFlashPulse 0.8s ease-out;
+}
+
+.textLayer .clarify-highlight {
+  background: rgba(255, 222, 111, 0.62);
+  border-radius: 3px;
+  box-shadow: inset 0 -1px 0 rgba(190, 145, 22, 0.35);
+}
+
+.textLayer .clarify-highlight-pulse {
+  animation: clarifyHighlightPulse 1s ease-out;
+}
+
+.textLayer .clarify-highlight-overlay {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  border-radius: 4px;
+  background: rgba(255, 221, 105, 0.3);
+  outline: 1px solid rgba(188, 141, 10, 0.45);
+  animation: clarifyOverlayFade 0.7s ease-out forwards;
+}
+
+.textLayer .clarify-highlight-overlay-approx {
+  background: rgba(103, 170, 255, 0.2);
+  outline-color: rgba(80, 138, 226, 0.52);
+}
+
+.textLayer .sourceTextFlash {
+  animation: sourceTextFlashPulse 1s ease-out;
+}
+
+@keyframes sourceFlashPulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(108, 148, 255, 0.45);
+    background-color: rgba(108, 148, 255, 0.08);
+  }
+  100% {
+    box-shadow: none;
+    background-color: transparent;
+  }
+}
+
+@keyframes sourceTextFlashPulse {
+  0% {
+    background-color: rgba(255, 226, 107, 0.92);
+    outline: 1px solid rgba(194, 150, 23, 0.9);
+  }
+  100% {
+    background-color: transparent;
+    outline: 1px solid transparent;
+  }
+}
+
+@keyframes clarifyHighlightPulse {
+  0% {
+    background: rgba(255, 233, 136, 0.92);
+  }
+  100% {
+    background: rgba(255, 222, 111, 0.62);
+  }
+}
+
+@keyframes clarifyOverlayFade {
+  0% {
+    opacity: 0.95;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
 .pdfRoot::-webkit-scrollbar,
 .panel::-webkit-scrollbar {
   width: 12px;
