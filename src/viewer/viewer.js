@@ -8,16 +8,20 @@ import {
   clearOpenAIKey,
   getCards,
   getGlossaryTerms,
+  getOpenAIFileId,
   getSettings,
   getVerbose,
   removeCard,
+  setOpenAIFileId,
   removeGlossaryTerm,
   setSettings,
   setVerbose,
   togglePin
 } from "../shared/storage.js";
 import { deriveDocId, makeId, normalizeCard } from "../shared/models.js";
-import { mockExplain } from "../shared/llm/mock.js";
+import { generateLLM } from "../shared/llm/index.js";
+import { uploadPdfToOpenAI } from "../shared/openai/files.js";
+import { getPdfBytes, REMOTE_BYTES_BLOCKED } from "./pdf_bytes.js";
 
 const logger = createLogger("VIEWER");
 const DEFAULT_SCALE = 1.2;
@@ -36,6 +40,8 @@ const MAX_CONTEXT_LENGTH = 800;
 const PAGE_VISIBILITY_THRESHOLD = 0.6;
 const REMOTE_LOAD_ERROR_MESSAGE =
   "This PDF could not be loaded due to site restrictions (CORS/login). Try downloading and opening it locally.";
+const WHOLE_PDF_LOCAL_REQUIRED_MESSAGE =
+  "Whole PDF requires local access. Download this PDF and open it locally.";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   "../vendor/pdfjs/pdf.worker.mjs",
@@ -48,6 +54,7 @@ const sidebarResizeHandle = document.getElementById("sidebarResizeHandle");
 const panel = document.getElementById("panel");
 const statusEl = document.getElementById("status");
 const readingModeStatusEl = document.getElementById("readingModeStatus");
+const contextScopeStatusEl = document.getElementById("contextScopeStatus");
 const pdfRoot = document.getElementById("pdfRoot");
 const fileInput = document.getElementById("fileInput");
 const openFileBtn = document.getElementById("openFile");
@@ -74,6 +81,15 @@ const saveApiKeyBtn = document.getElementById("saveApiKey");
 const clearApiKeyBtn = document.getElementById("clearApiKey");
 const apiKeyStatusEl = document.getElementById("apiKeyStatus");
 const autoOpenPdfToggle = document.getElementById("autoOpenPdfToggle");
+const contextScopeSelect = document.getElementById("contextScopeSelect");
+const wholePdfSettings = document.getElementById("wholePdfSettings");
+const wholePdfUploadEnabled = document.getElementById("wholePdfUploadEnabled");
+const wholePdfUploadBehavior = document.getElementById("wholePdfUploadBehavior");
+const wholePdfUploadSession = document.getElementById("wholePdfUploadSession");
+const wholePdfUploadRemember = document.getElementById("wholePdfUploadRemember");
+const promptCacheDefault = document.getElementById("promptCacheDefault");
+const promptCache24h = document.getElementById("promptCache24h");
+const wholePdfHelpText = document.getElementById("wholePdfHelpText");
 
 const renderState = {
   pdfDoc: null,
@@ -97,6 +113,9 @@ let renderChain = Promise.resolve();
 let scrollTicking = false;
 let fitResizeFrame = null;
 let selectionSystem = null;
+const sessionFileIdByDocId = new Map();
+const uploadPromiseByDocId = new Map();
+let contextScopeTransientStatus = "";
 const sidebarState = {
   width: SIDEBAR_DEFAULT_WIDTH,
   collapsed: false,
@@ -253,13 +272,27 @@ function createCardNode(card) {
   const quote = document.createElement("blockquote")
   quote.className = "cardQuote"
   quote.textContent = clampText(card.grounding?.quote, 300) || "No quote available."
+  const citationQuotes = Array.isArray(card.grounding?.citationQuotes)
+    ? card.grounding.citationQuotes.filter(Boolean).slice(0, 2)
+    : []
+  const citationPages = Array.isArray(card.grounding?.citationPages)
+    ? card.grounding.citationPages
+    : []
+  const citationsFragment = document.createDocumentFragment()
+  citationQuotes.forEach((citationQuote, index) => {
+    const citation = document.createElement("blockquote")
+    citation.className = "cardQuote cardCitationQuote"
+    const citationPage = Number.isFinite(citationPages[index]) ? ` (p. ${Number(citationPages[index]) + 1})` : ""
+    citation.textContent = `Citation${citationPage}: ${clampText(citationQuote, 260)}`
+    citationsFragment.append(citation)
+  })
   const jumpButton = document.createElement("button")
   jumpButton.type = "button"
   jumpButton.className = "cardActionButton"
   jumpButton.dataset.cardAction = "jump"
   jumpButton.dataset.cardId = card.id
   jumpButton.textContent = "Jump to source"
-  grounding.append(groundingLabel, quote, jumpButton)
+  grounding.append(groundingLabel, quote, citationsFragment, jumpButton)
   article.append(grounding)
 
   const details = document.createElement("details")
@@ -648,6 +681,38 @@ function updateReadingModeStatus(mode) {
   readingModeStatusEl.textContent = `Mode: ${getReadingModeLabel(mode)}`;
 }
 
+function getContextScopeLabel(scope) {
+  if (scope === "whole_pdf") {
+    return "Whole PDF"
+  }
+  if (scope === "page") {
+    return "Page"
+  }
+  return "Selection"
+}
+
+function setContextScopeTransientStatus(text) {
+  contextScopeTransientStatus = sanitizeText(text)
+  updateContextScopeStatus()
+}
+
+function clearContextScopeTransientStatus() {
+  contextScopeTransientStatus = ""
+  updateContextScopeStatus()
+}
+
+function updateContextScopeStatus() {
+  if (!contextScopeStatusEl) {
+    return
+  }
+  if (contextScopeTransientStatus) {
+    contextScopeStatusEl.textContent = `Context: ${contextScopeTransientStatus}`
+    return
+  }
+  const scope = currentSettings?.contextScope || "selection"
+  contextScopeStatusEl.textContent = `Context: ${getContextScopeLabel(scope)}`
+}
+
 function maskApiKey(apiKey) {
   if (!apiKey) {
     return "";
@@ -685,6 +750,18 @@ function setApiStatus(text) {
     apiStatusTimer = null;
     setApiPresenceStatus(currentSettings);
   }, 1400);
+}
+
+function getWholePdfHelpMessage(settings) {
+  const baseWarning =
+    "Whole PDF sends the document to the LLM provider. Use only for documents you're OK sharing."
+  if (settings?.llmMode === "mock") {
+    return "Mock mode ignores upload and uses selection/page context."
+  }
+  if (!settings?.openaiApiKey && (settings?.llmMode === "auto" || settings?.llmMode === "openai")) {
+    return "Set API key to enable Whole PDF mode."
+  }
+  return baseWarning
 }
 
 function resolveSectionTitle(pageIndex) {
@@ -805,6 +882,136 @@ function buildCardLocator(payload) {
   }
 }
 
+function getPageContextWindow(pageIndex, fallbackContext = "") {
+  if (!Number.isFinite(pageIndex) || pageIndex < 0) {
+    return clampText(fallbackContext, MAX_CONTEXT_LENGTH)
+  }
+  const pageNode = getPageNodeByIndex(pageIndex)
+  const textLayer = pageNode?.querySelector?.(".textLayer")
+  const pageText = sanitizeText(textLayer?.innerText || "")
+  if (!pageText) {
+    return clampText(fallbackContext, MAX_CONTEXT_LENGTH)
+  }
+  return clampText(pageText, MAX_CONTEXT_LENGTH)
+}
+
+function getEffectiveContextWindow(payload, settings) {
+  const baseContext = clampText(payload?.contextWindow, MAX_CONTEXT_LENGTH)
+  const contextScope = settings?.contextScope || "selection"
+  if (contextScope === "page") {
+    return getPageContextWindow(payload?.pageIndex, baseContext)
+  }
+  return baseContext
+}
+
+function getWholePdfUploadMode(settings) {
+  if (settings?.wholePdfUpload === "remember") {
+    return "remember"
+  }
+  if (settings?.wholePdfUpload === "session") {
+    return "session"
+  }
+  return "off"
+}
+
+async function syncWholePdfStatusFromCache(docId, settings) {
+  if (settings?.contextScope !== "whole_pdf" || getWholePdfUploadMode(settings) === "off") {
+    return
+  }
+
+  const normalizedDocId = sanitizeText(docId)
+  if (!normalizedDocId || normalizedDocId === "unknown") {
+    return
+  }
+
+  if (sessionFileIdByDocId.has(normalizedDocId)) {
+    setContextScopeTransientStatus("Whole PDF (ready)")
+    return
+  }
+
+  if (getWholePdfUploadMode(settings) === "remember") {
+    const rememberedFileId = await getOpenAIFileId(normalizedDocId)
+    if (rememberedFileId) {
+      sessionFileIdByDocId.set(normalizedDocId, rememberedFileId)
+      setContextScopeTransientStatus("Whole PDF (ready)")
+    }
+  }
+}
+
+async function ensureOpenAIFileId({ docId, currentPdf: pdfState, settings, apiKey }) {
+  if (settings?.contextScope !== "whole_pdf") {
+    return { fileId: null, warnings: [] }
+  }
+  if (!apiKey) {
+    return { fileId: null, warnings: ["OpenAI key missing"] }
+  }
+  if (getWholePdfUploadMode(settings) === "off") {
+    return { fileId: null, warnings: ["Whole PDF upload is off"] }
+  }
+
+  const normalizedDocId = sanitizeText(docId)
+  if (!normalizedDocId || normalizedDocId === "unknown") {
+    return { fileId: null, warnings: ["Document id unavailable for Whole PDF upload"] }
+  }
+
+  const fromSession = sessionFileIdByDocId.get(normalizedDocId)
+  if (fromSession) {
+    setContextScopeTransientStatus("Whole PDF (ready)")
+    return { fileId: fromSession, warnings: [] }
+  }
+
+  if (getWholePdfUploadMode(settings) === "remember") {
+    const rememberedFileId = await getOpenAIFileId(normalizedDocId)
+    if (rememberedFileId) {
+      sessionFileIdByDocId.set(normalizedDocId, rememberedFileId)
+      setContextScopeTransientStatus("Whole PDF (ready)")
+      return { fileId: rememberedFileId, warnings: [] }
+    }
+  }
+
+  const inFlight = uploadPromiseByDocId.get(normalizedDocId)
+  if (inFlight) {
+    return inFlight
+  }
+
+  const uploadPromise = (async () => {
+    try {
+      setContextScopeTransientStatus("Whole PDF (uploading...)")
+      const { bytes, filename } = await getPdfBytes(pdfState)
+      const { fileId } = await uploadPdfToOpenAI({ apiKey, filename, bytes })
+      sessionFileIdByDocId.set(normalizedDocId, fileId)
+      if (getWholePdfUploadMode(settings) === "remember") {
+        await setOpenAIFileId(normalizedDocId, fileId)
+      }
+      setContextScopeTransientStatus("Whole PDF (ready)")
+      return { fileId, warnings: [] }
+    } catch (error) {
+      const code = sanitizeText(error?.code || error?.message || "")
+      if (code === REMOTE_BYTES_BLOCKED) {
+        setContextScopeTransientStatus("Whole PDF (needs local file)")
+        return {
+          fileId: null,
+          warnings: [
+            "Cannot access remote PDF bytes due to site restrictions. Download and open locally for Whole PDF mode."
+          ]
+        }
+      }
+      const message = sanitizeText(error?.message || "Unknown upload error")
+      return {
+        fileId: null,
+        warnings: [`Whole PDF upload failed. Used selection/page context. (${clampText(message, 120)})`]
+      }
+    }
+  })()
+
+  uploadPromiseByDocId.set(normalizedDocId, uploadPromise)
+  try {
+    return await uploadPromise
+  } finally {
+    uploadPromiseByDocId.delete(normalizedDocId)
+  }
+}
+
 function mapSelectionActionToCardType(actionType) {
   if (actionType === "define") {
     return "definition"
@@ -818,41 +1025,81 @@ function mapSelectionActionToCardType(actionType) {
   return null
 }
 
-function buildCardFromSelection(payload) {
+async function buildCardFromSelection(payload) {
   const cardType = mapSelectionActionToCardType(payload?.type)
   if (!cardType) {
     return null
   }
 
+  const settings = currentSettings ?? (await getSettings())
+  const contextScope = settings?.contextScope || "selection"
   const selectedText = clampText(payload?.selectedText, 500) || "Selected text"
-  const contextWindow = clampText(payload?.contextWindow, MAX_CONTEXT_LENGTH)
-  const mock = mockExplain({
-    type: cardType,
-    selectedText,
-    contextWindow
-  })
-
-  const details =
-    cardType === "quant"
-      ? {
-          eli5: mock.eli5,
-          steps: mock.steps,
-          paperUsage: mock.paperUsage,
-          whatItShows: mock.whatItShows,
-          takeaway: mock.takeaway,
-          supportsClaim: mock.supportsClaim,
-          whatToLookAt: mock.whatToLookAt
-        }
-      : {
-          eli5: mock.eli5,
-          steps: mock.steps,
-          paperUsage: mock.paperUsage
-        }
+  const contextWindow = getEffectiveContextWindow(payload, settings)
   const grounding = buildGrounding({
     pageIndex: payload?.pageIndex,
     selectedText,
     contextWindow
   })
+  const docId = deriveDocId(currentPdf)
+  const preWarnings = []
+  const llmInput = {
+    selectedText: clampText(selectedText, 200),
+    contextWindow: clampText(contextWindow, 800),
+    title: clampText(selectedText, 180),
+    grounding: {
+      pageIndex: grounding.pageIndex,
+      sectionTitle: grounding.sectionTitle,
+      quote: clampText(grounding.quote, 300)
+    }
+  }
+
+  if (contextScope === "whole_pdf") {
+    if (settings?.llmMode === "mock") {
+      preWarnings.push("Whole PDF mode is ignored in Mock mode. Used selection/page context.")
+    } else if (!settings?.openaiApiKey) {
+      preWarnings.push("Set API key to enable Whole PDF mode. Used selection/page context.")
+    } else if (getWholePdfUploadMode(settings) === "off") {
+      preWarnings.push("Enable 'Upload PDF to OpenAI' to use Whole PDF mode. Used selection/page context.")
+    } else {
+      const fileResolution = await ensureOpenAIFileId({
+        docId,
+        currentPdf,
+        settings,
+        apiKey: settings.openaiApiKey
+      })
+      if (fileResolution.fileId) {
+        llmInput.openaiFileId = fileResolution.fileId
+      }
+      if (Array.isArray(fileResolution.warnings) && fileResolution.warnings.length > 0) {
+        preWarnings.push(...fileResolution.warnings)
+      }
+      if (fileResolution.warnings?.some((warning) => warning.includes("Cannot access remote PDF bytes"))) {
+        setStatus(WHOLE_PDF_LOCAL_REQUIRED_MESSAGE)
+      }
+    }
+  }
+
+  const { providerUsed, response, warnings } = await generateLLM(cardType, llmInput)
+  const allWarnings = [...preWarnings, ...(Array.isArray(warnings) ? warnings : [])]
+
+  const details =
+    cardType === "quant"
+      ? {
+          eli5: "",
+          steps: [],
+          paperUsage: [],
+          whatItShows: response.whatItShows,
+          takeaway: response.takeaway,
+          supportsClaim: Array.isArray(response.supportsClaim)
+            ? response.supportsClaim.join(" ")
+            : "",
+          whatToLookAt: response.whatToLookAt
+        }
+      : {
+          eli5: response.eli5,
+          steps: response.steps,
+          paperUsage: response.paperUsage
+        }
   const locator = buildCardLocator({
     pageIndex: payload?.pageIndex,
     selectedText,
@@ -863,10 +1110,18 @@ function buildCardFromSelection(payload) {
     id: makeId("card"),
     type: cardType,
     title: selectedText,
-    shortAnswer: mock.shortAnswer,
+    shortAnswer: response.shortAnswer,
     details,
-    grounding,
+    grounding: {
+      ...grounding,
+      citationPages: response.groundingPages,
+      citationQuotes: response.groundingQuotes
+    },
     locator,
+    meta: {
+      provider: providerUsed,
+      warnings: allWarnings
+    },
     createdAt: Date.now(),
     pinned: false,
     selectedText,
@@ -1095,10 +1350,13 @@ async function loadCardsForCurrentDocument() {
     cardCount: sidebarUiState.cards.length,
     glossaryCount: sidebarUiState.glossaryTerms.length
   })
+  if (currentSettings) {
+    void syncWholePdfStatusFromCache(docId, currentSettings)
+  }
 }
 
 async function handleSelectionAction(payload) {
-  const card = buildCardFromSelection(payload)
+  const card = await buildCardFromSelection(payload)
   if (!card) {
     return
   }
@@ -1229,9 +1487,9 @@ function ensureSelectionSystemInitialized() {
     pdfRoot,
     onAction: (payload) => {
       logger.info("Selection action:", payload.type);
-      console.log("[CLARIFY][VIEWER] Selection payload", {
+      logger.debug("Selection payload", {
         type: payload.type,
-        selectedText: payload.selectedText,
+        selectedTextLength: payload.selectedText?.length ?? 0,
         pageIndex: payload.pageIndex,
         contextWindowLength: payload.contextWindow?.length ?? 0
       });
@@ -1252,8 +1510,28 @@ function applySettingsToUi(settings) {
   llmModeHelpEl.hidden = hasOpenAIKey;
   llmModeSelect.value = hasOpenAIKey || settings.llmMode !== "openai" ? settings.llmMode : "auto";
 
+  contextScopeSelect.value = settings.contextScope;
+  wholePdfSettings.hidden = settings.contextScope !== "whole_pdf";
+  wholePdfUploadEnabled.checked = settings.wholePdfUpload !== "off";
+  wholePdfUploadBehavior.hidden = settings.wholePdfUpload === "off";
+  wholePdfUploadSession.checked = settings.wholePdfUpload !== "remember";
+  wholePdfUploadRemember.checked = settings.wholePdfUpload === "remember";
+  promptCacheDefault.checked = settings.promptCacheRetention !== "24h";
+  promptCache24h.checked = settings.promptCacheRetention === "24h";
+  wholePdfHelpText.textContent = getWholePdfHelpMessage(settings);
+  if (
+    settings.contextScope !== "whole_pdf" ||
+    settings.wholePdfUpload === "off" ||
+    settings.llmMode === "mock" ||
+    !settings.openaiApiKey
+  ) {
+    contextScopeTransientStatus = "";
+  }
+
   autoOpenPdfToggle.checked = settings.autoOpenPdf;
   setApiPresenceStatus(settings);
+  updateContextScopeStatus();
+  void syncWholePdfStatusFromCache(sidebarUiState.docId, settings);
 }
 
 async function loadVerboseState() {
@@ -1274,6 +1552,9 @@ async function loadSettingsState() {
   logger.info("Settings loaded", {
     llmMode: settings.llmMode,
     hasOpenAIKey: Boolean(settings.openaiApiKey),
+    contextScope: settings.contextScope,
+    wholePdfUpload: settings.wholePdfUpload,
+    promptCacheRetention: settings.promptCacheRetention,
     defaultReadingMode: settings.defaultReadingMode,
     autoOpenPdf: settings.autoOpenPdf
   });
@@ -1837,6 +2118,7 @@ function scheduleRender(targetPageNumber, loadToken = renderState.loadToken) {
 
 function handleLoadFailure(sourceType, error) {
   currentPdf = null;
+  clearContextScopeTransientStatus();
   renderState.pdfDoc = null;
   renderState.loadingTask = null;
   renderState.baseViewportWidth = null;
@@ -1878,6 +2160,7 @@ async function loadPdfSource(source, documentParams) {
   currentPdf = {
     sourceType: source.sourceType,
     filename: source.filename,
+    localFile: source.localFile ?? null,
     url: source.url,
     fileSize: source.fileSize,
     fileLastModified: source.fileLastModified,
@@ -1886,6 +2169,7 @@ async function loadPdfSource(source, documentParams) {
     renderedScale: DEFAULT_SCALE,
     pageNumber: 1
   };
+  clearContextScopeTransientStatus();
   sidebarUiState.docId = deriveDocId(currentPdf);
   sidebarUiState.cards = [];
   sidebarUiState.glossaryTerms = [];
@@ -1957,6 +2241,7 @@ async function loadPdfFromLocalFile(file) {
       {
         sourceType: "local",
         filename: file.name,
+        localFile: file,
         fileSize: file.size,
         fileLastModified: file.lastModified
       },
@@ -2071,6 +2356,40 @@ async function handleLlmModeChange() {
   const settings = await setSettings({ llmMode: nextMode });
   applySettingsToUi(settings);
   logger.info(`LLM mode changed to ${settings.llmMode}`);
+}
+
+async function handleContextScopeChange() {
+  const nextScope = contextScopeSelect.value;
+  const settings = await setSettings({ contextScope: nextScope });
+  if (nextScope !== "whole_pdf") {
+    clearContextScopeTransientStatus();
+  }
+  applySettingsToUi(settings);
+}
+
+async function handleWholePdfUploadToggleChange() {
+  const enabled = wholePdfUploadEnabled.checked;
+  const nextMode = enabled ? (wholePdfUploadRemember.checked ? "remember" : "session") : "off";
+  const settings = await setSettings({ wholePdfUpload: nextMode });
+  if (!enabled) {
+    clearContextScopeTransientStatus();
+  }
+  applySettingsToUi(settings);
+}
+
+async function handleWholePdfUploadBehaviorChange() {
+  if (!wholePdfUploadEnabled.checked) {
+    return;
+  }
+  const nextMode = wholePdfUploadRemember.checked ? "remember" : "session";
+  const settings = await setSettings({ wholePdfUpload: nextMode });
+  applySettingsToUi(settings);
+}
+
+async function handlePromptCacheRetentionChange() {
+  const nextRetention = promptCache24h.checked ? "24h" : "default";
+  const settings = await setSettings({ promptCacheRetention: nextRetention });
+  applySettingsToUi(settings);
 }
 
 async function handleSaveApiKey() {
@@ -2204,6 +2523,24 @@ copyDebugInfoBtn.addEventListener("click", async () => {
 readingModeFlowRadio.addEventListener("change", handleReadingModeChange);
 readingModeStructureRadio.addEventListener("change", handleReadingModeChange);
 llmModeSelect.addEventListener("change", handleLlmModeChange);
+contextScopeSelect.addEventListener("change", () => {
+  void handleContextScopeChange();
+});
+wholePdfUploadEnabled.addEventListener("change", () => {
+  void handleWholePdfUploadToggleChange();
+});
+wholePdfUploadSession.addEventListener("change", () => {
+  void handleWholePdfUploadBehaviorChange();
+});
+wholePdfUploadRemember.addEventListener("change", () => {
+  void handleWholePdfUploadBehaviorChange();
+});
+promptCacheDefault.addEventListener("change", () => {
+  void handlePromptCacheRetentionChange();
+});
+promptCache24h.addEventListener("change", () => {
+  void handlePromptCacheRetentionChange();
+});
 saveApiKeyBtn.addEventListener("click", handleSaveApiKey);
 clearApiKeyBtn.addEventListener("click", handleClearApiKey);
 
@@ -2232,3 +2569,4 @@ if (src) {
 } else {
   setStatus("No PDF loaded");
 }
+

@@ -23,6 +23,7 @@
           </div>
           <span id="status">No PDF loaded</span>
           <span id="readingModeStatus" class="readingModeStatus">Mode: Flow</span>
+          <span id="contextScopeStatus" class="contextScopeStatus">Context: Selection</span>
           <button id="toggleSidebar" type="button" aria-pressed="false">Hide Panel</button>
           <div class="toolbarRight">
             <button
@@ -67,6 +68,45 @@
                   <option id="llmModeOpenAIOption" value="openai">OpenAI</option>
                 </select>
                 <span id="llmModeHelp" class="helperText" hidden>Set key to enable.</span>
+
+                <div class="settingGroup">
+                  <label class="settingLabel" for="contextScopeSelect">Context Scope</label>
+                  <select id="contextScopeSelect">
+                    <option value="selection">Selection</option>
+                    <option value="page">Page</option>
+                    <option value="whole_pdf">Whole PDF (Upload)</option>
+                  </select>
+                  <div id="wholePdfSettings" class="settingGroup" hidden>
+                    <label class="diagRow">
+                      <input id="wholePdfUploadEnabled" type="checkbox" />
+                      Upload PDF to OpenAI (required)
+                    </label>
+                    <div id="wholePdfUploadBehavior" class="settingGroup" hidden>
+                      <label class="diagRow">
+                        <input id="wholePdfUploadSession" name="wholePdfUploadMode" type="radio" value="session" />
+                        Session only
+                      </label>
+                      <label class="diagRow">
+                        <input id="wholePdfUploadRemember" name="wholePdfUploadMode" type="radio" value="remember" />
+                        Remember for this document
+                      </label>
+                    </div>
+                    <div class="settingGroup">
+                      <span class="settingLabel">Prompt cache retention</span>
+                      <label class="diagRow">
+                        <input id="promptCacheDefault" name="promptCacheRetention" type="radio" value="default" />
+                        Default
+                      </label>
+                      <label class="diagRow">
+                        <input id="promptCache24h" name="promptCacheRetention" type="radio" value="24h" />
+                        24h
+                      </label>
+                    </div>
+                    <span id="wholePdfHelpText" class="helperText">
+                      Whole PDF sends the document to the LLM provider. Use only for documents you're OK sharing.
+                    </span>
+                  </div>
+                </div>
 
                 <label class="settingLabel" for="openaiApiKeyInput">OpenAI API key</label>
                 <input

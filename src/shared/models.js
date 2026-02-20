@@ -41,6 +41,28 @@ function normalizeList(value, maxItems = 6, maxLength = 180) {
     .slice(0, maxItems)
 }
 
+function normalizeNumberList(value, maxItems = 6) {
+  if (!Array.isArray(value)) {
+    return []
+  }
+  return value
+    .map((item) => Number(item))
+    .filter((item) => Number.isFinite(item) && item >= 0)
+    .map((item) => Math.floor(item))
+    .slice(0, maxItems)
+}
+
+function normalizeMeta(meta) {
+  const input = meta && typeof meta === "object" ? meta : {}
+  const warnings = Array.isArray(input.warnings)
+    ? input.warnings.map((warning) => clampText(warning, 200)).filter(Boolean).slice(0, 6)
+    : []
+  return {
+    provider: sanitizeText(input.provider),
+    warnings
+  }
+}
+
 export function makeId(prefix = "id") {
   const now = Date.now().toString(36)
   const random = Math.random().toString(36).slice(2, 8)
@@ -80,6 +102,8 @@ export function normalizeCard(card) {
       pageIndex,
       sectionTitle,
       quote,
+      citationPages: normalizeNumberList(input.grounding?.citationPages, 6),
+      citationQuotes: normalizeList(input.grounding?.citationQuotes, 6, 260),
       textRange: input.grounding?.textRange ?? null
     },
     locator: {
@@ -92,6 +116,7 @@ export function normalizeCard(card) {
         ? input.createdAt
         : Date.now(),
     pinned: Boolean(input.pinned),
+    meta: normalizeMeta(input.meta),
     selectedText: clampText(input.selectedText || input.title, 500),
     contextWindow: clampText(input.contextWindow, 800)
   }

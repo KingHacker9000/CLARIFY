@@ -5,6 +5,7 @@ const DIAGNOSTICS_VERBOSE_KEY = "diagnostics.verbose";
 const SETTINGS_KEY = "settings";
 const CARDS_BY_DOC_ID_KEY = "cardsByDocId";
 const GLOSSARY_BY_DOC_ID_KEY = "glossaryByDocId";
+const OPENAI_FILE_IDS_BY_DOC_ID_KEY = "openaiFileIdsByDocId";
 
 function getStorageArea() {
   try {
@@ -143,6 +144,11 @@ function normalizeGlossaryList(value) {
   return value.map((term) => normalizeGlossaryTerm(term))
 }
 
+async function getOpenAIFileIdsByDocIdMap() {
+  const values = await get({ [OPENAI_FILE_IDS_BY_DOC_ID_KEY]: {} })
+  return ensureObjectMap(values?.[OPENAI_FILE_IDS_BY_DOC_ID_KEY])
+}
+
 async function getCardsByDocIdMap() {
   const values = await get({ [CARDS_BY_DOC_ID_KEY]: {} })
   return ensureObjectMap(values?.[CARDS_BY_DOC_ID_KEY])
@@ -227,4 +233,32 @@ export async function removeGlossaryTerm(docId, termId) {
   glossaryByDocId[normalizedDocId] = nextGlossary
   await set({ [GLOSSARY_BY_DOC_ID_KEY]: glossaryByDocId })
   return nextGlossary
+}
+
+export async function getOpenAIFileId(docId) {
+  const normalizedDocId = normalizeDocId(docId)
+  const mapping = await getOpenAIFileIdsByDocIdMap()
+  const fileId = typeof mapping[normalizedDocId] === "string" ? mapping[normalizedDocId].trim() : ""
+  return fileId || null
+}
+
+export async function setOpenAIFileId(docId, fileId) {
+  const normalizedDocId = normalizeDocId(docId)
+  const normalizedFileId = typeof fileId === "string" ? fileId.trim() : ""
+  if (!normalizedFileId) {
+    return false
+  }
+  const mapping = await getOpenAIFileIdsByDocIdMap()
+  mapping[normalizedDocId] = normalizedFileId
+  return set({ [OPENAI_FILE_IDS_BY_DOC_ID_KEY]: mapping })
+}
+
+export async function clearOpenAIFileId(docId) {
+  const normalizedDocId = normalizeDocId(docId)
+  const mapping = await getOpenAIFileIdsByDocIdMap()
+  if (!(normalizedDocId in mapping)) {
+    return true
+  }
+  delete mapping[normalizedDocId]
+  return set({ [OPENAI_FILE_IDS_BY_DOC_ID_KEY]: mapping })
 }

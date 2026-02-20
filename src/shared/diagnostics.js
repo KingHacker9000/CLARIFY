@@ -40,22 +40,31 @@ function normalizeOpenedPdfSource(value) {
 
 export function createLogger(scope) {
   const prefix = `[CLARIFY][${scope}]`;
+  const alwaysInfo = scope === "OPENAI";
+
+  function logIfVerbose(method, args) {
+    void (async () => {
+      try {
+        const verbose = await getVerbose();
+        if (verbose) {
+          writeLog(method, prefix, args);
+        }
+      } catch (_error) {
+        // Skip output if verbose state cannot be read.
+      }
+    })();
+  }
 
   return {
     debug(...args) {
-      void (async () => {
-        try {
-          const verbose = await getVerbose();
-          if (verbose) {
-            writeLog("debug", prefix, args);
-          }
-        } catch (_error) {
-          // Skip debug output if verbose state cannot be read.
-        }
-      })();
+      logIfVerbose("debug", args);
     },
     info(...args) {
-      writeLog("info", prefix, args);
+      if (alwaysInfo) {
+        writeLog("info", prefix, args);
+        return;
+      }
+      logIfVerbose("info", args);
     },
     warn(...args) {
       writeLog("warn", prefix, args);
@@ -88,6 +97,11 @@ export async function getDebugInfo(context = {}) {
     diagnosticsVerbose,
     llmMode: settings.llmMode,
     hasOpenAIKey: Boolean(settings.openaiApiKey),
+    contextScope: settings.contextScope,
+    wholePdfUpload: settings.wholePdfUpload,
+    promptCacheRetention: settings.promptCacheRetention,
+    maxQuoteChars: settings.maxQuoteChars,
+    maxCitations: settings.maxCitations,
     defaultReadingMode: settings.defaultReadingMode,
     autoOpenPdf: settings.autoOpenPdf,
     userAgent,
