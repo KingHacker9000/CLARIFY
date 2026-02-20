@@ -43,6 +43,9 @@ const FILE_URL_LOAD_HINT_MESSAGE =
   "If this file URL doesn't load, open it locally using the Open PDF button.";
 const WHOLE_PDF_LOCAL_REQUIRED_MESSAGE =
   "Whole PDF requires local access. Download this PDF and open it locally.";
+const ICON_PIN = "\uD83D\uDCCC";
+const ICON_COPY = "\uD83D\uDCCB";
+const ICON_DELETE = "\uD83D\uDDD1\uFE0F";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   "../vendor/pdfjs/pdf.worker.mjs",
@@ -426,7 +429,7 @@ function createCardNode(card) {
   const citationPages = Array.isArray(card.grounding?.citationPages)
     ? card.grounding.citationPages
     : []
-  const citationsFragment = document.createDocumentFragment()
+  const sourceNodes = [quote]
   citationQuotes.forEach((citationQuote, index) => {
     const citationPageIndex = Number.isFinite(citationPages[index])
       ? Number(citationPages[index])
@@ -440,7 +443,7 @@ function createCardNode(card) {
       label: `Citation ${index + 1}`,
       compact: true
     })
-    citationsFragment.append(citation)
+    sourceNodes.push(citation)
   })
   const jumpButton = document.createElement("button")
   jumpButton.type = "button"
@@ -448,7 +451,24 @@ function createCardNode(card) {
   jumpButton.dataset.cardAction = "jump"
   jumpButton.dataset.cardId = card.id
   jumpButton.textContent = "Jump to source"
-  grounding.append(groundingLabel, quote, citationsFragment, jumpButton)
+
+  if (sourceNodes.length > 2) {
+    const alwaysVisibleSources = sourceNodes.slice(0, 2)
+    const hiddenSources = sourceNodes.slice(2)
+    const moreDetails = document.createElement("details")
+    moreDetails.className = "cardGroundingMore"
+    const moreSummary = document.createElement("summary")
+    moreSummary.className = "cardGroundingMoreSummary"
+    const hiddenCount = hiddenSources.length
+    moreSummary.textContent = hiddenCount === 1 ? "Show 1 more source" : `Show ${hiddenCount} more sources`
+    moreDetails.append(moreSummary)
+    for (const sourceNode of hiddenSources) {
+      moreDetails.append(sourceNode)
+    }
+    grounding.append(groundingLabel, ...alwaysVisibleSources, moreDetails, jumpButton)
+  } else {
+    grounding.append(groundingLabel, ...sourceNodes, jumpButton)
+  }
   article.append(grounding)
 
   const details = document.createElement("details")
@@ -500,18 +520,22 @@ function createCardNode(card) {
 
   const pinButton = document.createElement("button")
   pinButton.type = "button"
-  pinButton.className = "cardActionButton"
+  pinButton.className = "cardActionButton iconButton"
   pinButton.dataset.cardAction = "pin"
   pinButton.dataset.cardId = card.id
-  pinButton.textContent = card.pinned ? "Unpin" : "Pin"
+  pinButton.title = card.pinned ? "Unpin" : "Pin"
+  pinButton.setAttribute("aria-label", card.pinned ? "Unpin" : "Pin")
+  pinButton.textContent = ICON_PIN
   footer.append(pinButton)
 
   const copyButton = document.createElement("button")
   copyButton.type = "button"
-  copyButton.className = "cardActionButton"
+  copyButton.className = "cardActionButton iconButton"
   copyButton.dataset.cardAction = "copy"
   copyButton.dataset.cardId = card.id
-  copyButton.textContent = "Copy"
+  copyButton.title = "Copy"
+  copyButton.setAttribute("aria-label", "Copy")
+  copyButton.textContent = ICON_COPY
   footer.append(copyButton)
 
   if (card.type !== "quant") {
@@ -526,10 +550,12 @@ function createCardNode(card) {
 
   const deleteButton = document.createElement("button")
   deleteButton.type = "button"
-  deleteButton.className = "cardActionButton danger"
+  deleteButton.className = "cardActionButton danger iconButton"
   deleteButton.dataset.cardAction = "delete"
   deleteButton.dataset.cardId = card.id
-  deleteButton.textContent = "Delete"
+  deleteButton.title = "Delete"
+  deleteButton.setAttribute("aria-label", "Delete")
+  deleteButton.textContent = ICON_DELETE
   footer.append(deleteButton)
 
   article.append(footer)
