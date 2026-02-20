@@ -311,6 +311,8 @@ html {
   background: var(--panel);
   min-height: 0;
   min-width: 0;
+  width: 100%;
+  max-width: none;
   position: relative;
 }
 
