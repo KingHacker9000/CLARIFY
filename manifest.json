@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "CLARIFY (Prototype)",
+  "version": "0.1.0",
+  "description": "In-context reading assistant for PDFs (prototype).",
+  "action": {
+    "default_title": "CLARIFY",
+    "default_popup": "src/popup/popup.html"
+  },
+  "background": {
+    "service_worker": "src/background/service_worker.js",
+    "type": "module"
+  },
+  "permissions": ["storage", "tabs"],
+  "host_permissions": ["<all_urls>"],
+  "icons": {
+    "48": "assets/icons/icon48.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["src/viewer/*", "assets/*"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

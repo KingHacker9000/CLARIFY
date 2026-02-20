@@ -1,0 +1,86 @@
+:root {
+  --bg: #f6f7fb;
+  --panel: #ffffff;
+  --border: #e7e8ee;
+  --text: #111;
+  --muted: #666;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font: 13px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+.layout {
+  height: 100vh;
+  display: grid;
+  grid-template-columns: 1fr 360px;
+}
+
+.pdfPane {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  border-right: 1px solid var(--border);
+}
+
+.pdfToolbar {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+}
+
+.pdfToolbar button {
+  border: 1px solid var(--border);
+  background: #fff;
+  padding: 8px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+#status { color: var(--muted); }
+
+.pdfRoot {
+  overflow: auto;
+  padding: 16px;
+}
+
+.sidebar {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  background: var(--panel);
+}
+
+.tabs {
+  border-right: 1px solid var(--border);
+  padding: 10px 8px;
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+
+.tab {
+  height: 40px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  font-size: 16px;
+}
+
+.tab.active {
+  background: #f2f3ff;
+  border-color: #d9dbff;
+}
+
+.panel {
+  padding: 14px;
+  overflow: auto;
+}

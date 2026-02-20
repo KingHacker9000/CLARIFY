@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="./viewer.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <main class="pdfPane">
+        <div class="pdfToolbar">
+          <button id="openFile">Open PDF</button>
+          <span id="status">No PDF loaded</span>
+        </div>
+
+        <div id="pdfRoot" class="pdfRoot">
+          <!-- PDF.js will render pages here -->
+        </div>
+      </main>
+
+      <aside class="sidebar">
+        <div class="tabs">
+          <button class="tab active" data-tab="orientation">📘</button>
+          <button class="tab" data-tab="explain">💡</button>
+          <button class="tab" data-tab="glossary">🔖</button>
+          <button class="tab" data-tab="figures">📊</button>
+          <button class="tab" data-tab="walkthrough">🧩</button>
+        </div>
+
+        <section id="panel" class="panel">
+          <!-- JS will render the current panel -->
+        </section>
+      </aside>
+    </div>
+
+    <input id="fileInput" type="file" accept="application/pdf" hidden />
+    <script type="module" src="./viewer.js"></script>
+  </body>
+</html>
