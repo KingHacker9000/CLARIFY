@@ -102,15 +102,76 @@ function makeQuantResponse(seed, selectedText) {
   }
 }
 
+function makeOrientationResponse(seed, title, headings, readingMode) {
+  const normalizedTitle = normalizeText(title) || "this paper"
+  const headingList = Array.isArray(headings) ? headings.filter(Boolean) : []
+  const mode = readingMode === "structure" ? "structure" : "flow"
+  const defaultSectionIntents = headingList.slice(0, 8).map((heading, index) => ({
+    title: heading,
+    intent:
+      index === 0
+        ? "Sets context and frames the paper's main problem."
+        : index % 3 === 1
+          ? "Defines the method and key assumptions to track while reading."
+          : index % 3 === 2
+            ? "Presents results and how they support the core claim."
+            : "Summarizes implications and limits."
+  }))
+
+  return {
+    purpose: `${normalizedTitle} explains the problem setting and the approach used to address it with evidence from the paper.`,
+    contribution:
+      mode === "structure"
+        ? "Its main contribution is a clearly organized method-to-results chain that is easiest to follow section by section."
+        : "Its main contribution is a practical method and evidence pattern you can understand quickly before drilling into details.",
+    focusBullets: [
+      "Read the stated problem and assumptions first.",
+      "Track the exact method components and where they are introduced.",
+      "Compare claims against reported evidence and uncertainty.",
+      mode === "structure"
+        ? "Use section transitions to verify how conclusions are supported."
+        : "Capture one takeaway per section before moving on."
+    ],
+    keyTerms: [
+      "problem setup",
+      "assumptions",
+      "method",
+      "baseline",
+      "evaluation",
+      "results",
+      "limitations",
+      "conclusion"
+    ],
+    sectionIntents:
+      defaultSectionIntents.length > 0
+        ? defaultSectionIntents
+        : [
+            { title: "Introduction", intent: "Frames the problem and why it matters." },
+            { title: "Method", intent: "Describes the proposed approach and design choices." },
+            { title: "Results", intent: "Shows empirical outcomes and comparisons." },
+            { title: "Conclusion", intent: "Summarizes contributions and practical implications." }
+          ]
+  }
+}
+
 export async function generate(task, input = {}) {
   const normalizedTask = normalizeText(task).toLowerCase()
   const selectedText = normalizeText(input.selectedText) || "this selection"
   const title = normalizeText(input.title)
   const sectionTitle = normalizeText(input.grounding?.sectionTitle)
-  const seed = hashString(`${normalizedTask}|${selectedText}|${title}|${sectionTitle}`)
+  const headings = Array.isArray(input.headings)
+    ? input.headings.map((item) => normalizeText(item)).filter(Boolean)
+    : []
+  const readingMode = input.readingMode === "structure" ? "structure" : "flow"
+  const seed = hashString(
+    `${normalizedTask}|${selectedText}|${title}|${sectionTitle}|${headings.join("|")}|${readingMode}`
+  )
 
   if (normalizedTask === "quant") {
     return makeQuantResponse(seed, selectedText)
+  }
+  if (normalizedTask === "orientation") {
+    return makeOrientationResponse(seed, title, headings, readingMode)
   }
   if (normalizedTask === "definition") {
     return makeDefinitionResponse(seed, selectedText)

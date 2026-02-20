@@ -488,6 +488,169 @@ body.resizingSidebar .sidebarResizeHandle::before,
   line-height: 1.45;
 }
 
+.orientationPanel {
+  display: grid;
+  gap: 12px;
+}
+
+.orientationHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.orientationAction,
+.orientationChip,
+.orientationToggleMap {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fdfdfb;
+  color: var(--text);
+  padding: 4px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.orientationAction:hover,
+.orientationChip:hover,
+.orientationToggleMap:hover {
+  background: #f2f2eb;
+}
+
+.orientationChip {
+  justify-self: start;
+}
+
+.orientationSection {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.orientationDetails summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.orientationDetails[open] summary {
+  margin-bottom: 8px;
+}
+
+.orientationSectionTitle {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.orientationParagraph {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.orientationBullets {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.4;
+}
+
+.orientationBullets li + li {
+  margin-top: 4px;
+}
+
+.orientationKeyTerms {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.orientationTermChip {
+  border: 1px solid #d8d8cb;
+  border-radius: 999px;
+  background: #f7f7f2;
+  color: #4e4e46;
+  font-size: 12px;
+  padding: 3px 8px;
+}
+
+.orientationLoading {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.orientationLoadingText {
+  margin: 0;
+  color: var(--muted);
+}
+
+.orientationSkeletonLine {
+  height: 10px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, #efefe8 0%, #e3e3da 50%, #efefe8 100%);
+  background-size: 220% 100%;
+  animation: orientationSkeletonPulse 1.2s ease-in-out infinite;
+}
+
+.orientationSkeletonLine:nth-child(2) {
+  width: 92%;
+}
+
+.orientationSkeletonLine:nth-child(3) {
+  width: 84%;
+}
+
+.orientationSkeletonLine:nth-child(4) {
+  width: 76%;
+}
+
+.orientationMutedText {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.orientationReadingMap {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 8px;
+}
+
+.orientationMapItem {
+  display: grid;
+  gap: 3px;
+}
+
+.orientationMapTitle,
+.orientationMapIntent {
+  margin: 0;
+}
+
+.orientationMapTitle {
+  font-size: 12px;
+  color: #53534b;
+}
+
+.orientationMapIntent {
+  font-size: 12px;
+  color: #2e2e29;
+  line-height: 1.4;
+}
+
+.orientationError {
+  margin: 0;
+  color: #7a2c2c;
+}
+
 .cardList {
   display: grid;
   gap: 12px;
@@ -787,6 +950,15 @@ body.resizingSidebar .sidebarResizeHandle::before,
   100% {
     box-shadow: none;
     background-color: transparent;
+  }
+}
+
+@keyframes orientationSkeletonPulse {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -20% 0;
   }
 }
 

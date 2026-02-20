@@ -41,10 +41,16 @@ function normalizeInput(input) {
   const source = input && typeof input === "object" ? input : {}
   const grounding = source.grounding && typeof source.grounding === "object" ? source.grounding : {}
   const openaiFileId = normalizeText(source.openaiFileId).slice(0, 120)
+  const headings = Array.isArray(source.headings)
+    ? source.headings.map((item) => clampText(item, 140)).filter(Boolean).slice(0, 24)
+    : []
+  const readingMode = source.readingMode === "structure" ? "structure" : "flow"
   return {
     selectedText: clampText(source.selectedText, 200),
-    contextWindow: clampText(source.contextWindow, 800),
-    title: clampText(source.title, 180),
+    contextWindow: clampText(source.contextWindow, 1600),
+    title: clampText(source.title, 220),
+    headings,
+    readingMode,
     openaiFileId,
     grounding: {
       pageIndex: Number.isFinite(grounding.pageIndex) ? Math.max(0, Number(grounding.pageIndex)) : 0,
@@ -102,8 +108,13 @@ export async function generateLLM(task, input, options = {}) {
   logger.info(`LLM generate: task=${normalizedTask}, provider=${providerUsed}`, {
     selectedTextLength: normalizedInput.selectedText.length,
     contextWindowLength: normalizedInput.contextWindow.length,
+    headingCount: normalizedInput.headings.length,
     hasOpenAIFile: Boolean(normalizedInput.openaiFileId)
   })
+
+  const fullRawText = typeof rawResponse?.rawText === "string" ? rawResponse.rawText : ""
+  const extractedJsonText =
+    typeof rawResponse?.extractedJsonText === "string" ? rawResponse.extractedJsonText : ""
 
   return {
     providerUsed,
@@ -111,6 +122,8 @@ export async function generateLLM(task, input, options = {}) {
       maxQuoteChars: settings?.maxQuoteChars,
       maxCitations: settings?.maxCitations
     }),
-    warnings
+    warnings,
+    rawText: fullRawText,
+    extractedJsonText
   }
 }

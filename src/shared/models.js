@@ -96,6 +96,7 @@ export function normalizeCard(card) {
 
   const quote = truncateText(input.grounding?.quote, 300)
   const sectionTitle = sanitizeText(input.grounding?.sectionTitle, "Unknown section")
+  const sectionId = sanitizeText(input.grounding?.sectionId)
   const pageIndex = Number.isFinite(input.grounding?.pageIndex)
     ? Math.max(0, Number(input.grounding.pageIndex))
     : 0
@@ -121,6 +122,7 @@ export function normalizeCard(card) {
     details,
     grounding: {
       pageIndex,
+      sectionId: sectionId || null,
       sectionTitle,
       quote,
       citationPages: normalizeNumberList(input.grounding?.citationPages, 6),

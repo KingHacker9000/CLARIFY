@@ -22,6 +22,8 @@ import { deriveDocId, makeId, normalizeCard } from "../shared/models.js";
 import { generateLLM } from "../shared/llm/index.js";
 import { uploadPdfToOpenAI } from "../shared/openai/files.js";
 import { getPdfBytes, REMOTE_BYTES_BLOCKED } from "./pdf_bytes.js";
+import { extractOutline } from "./outline.js";
+import { buildPageTextCache, getPageText } from "./page_text.js";
 
 const logger = createLogger("VIEWER");
 const DEFAULT_SCALE = 1.2;
@@ -36,6 +38,13 @@ const PDF_PANE_MIN_WIDTH = 280;
 const SIDEBAR_COLLAPSED_WIDTH = 56;
 const SOURCE_HIGHLIGHT_DELAY_MS = 80;
 const MAX_CONTEXT_LENGTH = 800;
+const ORIENTATION_CONTEXT_CHAR_LIMIT = 3000;
+const ORIENTATION_ABSTRACT_CHAR_LIMIT = 1200;
+const ORIENTATION_MAX_KEY_TERMS = 8;
+const ORIENTATION_MAX_FLOW_FOCUS_BULLETS = 4;
+const ORIENTATION_MAX_STRUCTURE_FOCUS_BULLETS = 5;
+const ORIENTATION_MAX_SECTION_INTENTS = 20;
+const ORIENTATION_TEXT_SCAN_PAGES = 8;
 const PAGE_VISIBILITY_THRESHOLD = 0.6;
 const REMOTE_LOAD_ERROR_MESSAGE =
   "This PDF could not be loaded due to site restrictions (CORS/login). Try downloading and opening it locally.";
@@ -127,11 +136,37 @@ const sidebarState = {
   resizeStartX: 0,
   resizeStartWidth: SIDEBAR_DEFAULT_WIDTH
 };
+
+function createEmptyOrientationData() {
+  return {
+    purpose: "",
+    contribution: "",
+    focusBullets: [],
+    keyTerms: [],
+    sectionIntents: [],
+    sections: []
+  }
+}
+
+function createOrientationUiState(readingMode = "flow") {
+  return {
+    status: "idle",
+    loadingMessage: "",
+    errorMessage: "",
+    collapsed: false,
+    mapExpanded: readingMode === "structure",
+    userCollapsed: false,
+    userMapPreference: false,
+    data: createEmptyOrientationData()
+  }
+}
+
 const sidebarUiState = {
   docId: "unknown",
   cards: [],
   glossaryTerms: [],
-  activeTab: "orientation"
+  activeTab: "orientation",
+  orientation: createOrientationUiState("flow")
 };
 let recentJumpState = null;
 
@@ -647,8 +682,342 @@ function renderGlossaryTab() {
   panel.append(list)
 }
 
+function normalizeSectionTitleKey(title) {
+  return sanitizeText(title).toLowerCase()
+}
+
+function getReadingModeOrDefault() {
+  return currentSettings?.defaultReadingMode === "structure" ? "structure" : "flow"
+}
+
+function getOrientationState() {
+  if (!sidebarUiState.orientation || typeof sidebarUiState.orientation !== "object") {
+    sidebarUiState.orientation = createOrientationUiState(getReadingModeOrDefault())
+  }
+  return sidebarUiState.orientation
+}
+
+function applyOrientationModeDefaults(mode, { force = false } = {}) {
+  const orientationState = getOrientationState()
+  const normalizedMode = mode === "structure" ? "structure" : "flow"
+  if (force || !orientationState.userMapPreference) {
+    orientationState.mapExpanded = normalizedMode === "structure"
+  }
+  if (force || !orientationState.userCollapsed) {
+    orientationState.collapsed = false
+  }
+}
+
+function resetOrientationStateForDocument() {
+  sidebarUiState.orientation = createOrientationUiState(getReadingModeOrDefault())
+}
+
+function updateOrientationSections(sections) {
+  const orientationState = getOrientationState()
+  const safeSections = Array.isArray(sections) ? sections : []
+  orientationState.data.sections = safeSections
+}
+
+function setOrientationLoading(message = "Generating orientation...") {
+  const orientationState = getOrientationState()
+  orientationState.status = "loading"
+  orientationState.loadingMessage = sanitizeText(message) || "Generating orientation..."
+  orientationState.errorMessage = ""
+}
+
+function setOrientationError(message) {
+  const orientationState = getOrientationState()
+  orientationState.status = "error"
+  orientationState.loadingMessage = ""
+  orientationState.errorMessage = clampText(message || "Orientation generation failed.", 220)
+}
+
+function setOrientationReady(data) {
+  const orientationState = getOrientationState()
+  orientationState.status = "ready"
+  orientationState.loadingMessage = ""
+  orientationState.errorMessage = ""
+  orientationState.data = {
+    ...createEmptyOrientationData(),
+    ...(data && typeof data === "object" ? data : {})
+  }
+}
+
+function toggleOrientationCollapsed(collapsed) {
+  const orientationState = getOrientationState()
+  orientationState.collapsed = Boolean(collapsed)
+  orientationState.userCollapsed = true
+  renderPanel()
+}
+
+function toggleOrientationMapExpanded(expanded) {
+  const orientationState = getOrientationState()
+  orientationState.mapExpanded = Boolean(expanded)
+  orientationState.userMapPreference = true
+  renderPanel()
+}
+
+function createOrientationHeader({ actionLabel = "Start reading" }) {
+  const header = document.createElement("div")
+  header.className = "orientationHeader"
+
+  const title = document.createElement("h3")
+  title.className = "panelTitle"
+  title.textContent = "Paper Orientation"
+  header.append(title)
+
+  const actionButton = document.createElement("button")
+  actionButton.type = "button"
+  actionButton.className = "orientationAction"
+  actionButton.dataset.orientationAction = "collapse"
+  actionButton.textContent = actionLabel
+  header.append(actionButton)
+
+  return header
+}
+
+function createOrientationParagraph(text) {
+  const paragraph = document.createElement("p")
+  paragraph.className = "orientationParagraph"
+  paragraph.textContent = text
+  return paragraph
+}
+
+function createOrientationBullets(items) {
+  const list = document.createElement("ul")
+  list.className = "orientationBullets"
+  for (const item of items) {
+    const text = clampText(item, 220)
+    if (!text) {
+      continue
+    }
+    const li = document.createElement("li")
+    li.textContent = text
+    list.append(li)
+  }
+  return list
+}
+
+function createOrientationSection(title) {
+  const section = document.createElement("section")
+  section.className = "orientationSection"
+  const heading = document.createElement("h4")
+  heading.className = "orientationSectionTitle"
+  heading.textContent = title
+  section.append(heading)
+  return section
+}
+
+function createOrientationLoading(message) {
+  const container = document.createElement("div")
+  container.className = "orientationLoading"
+
+  const text = document.createElement("p")
+  text.className = "orientationLoadingText"
+  text.textContent = message
+  container.append(text)
+
+  for (let index = 0; index < 3; index += 1) {
+    const line = document.createElement("div")
+    line.className = "orientationSkeletonLine"
+    container.append(line)
+  }
+  return container
+}
+
+function createOrientationKeyTerms(terms) {
+  const wrapper = document.createElement("div")
+  wrapper.className = "orientationKeyTerms"
+  for (const term of terms.slice(0, ORIENTATION_MAX_KEY_TERMS)) {
+    const chipText = clampText(term, 48)
+    if (!chipText) {
+      continue
+    }
+    const chip = document.createElement("span")
+    chip.className = "orientationTermChip"
+    chip.textContent = chipText
+    wrapper.append(chip)
+  }
+  return wrapper
+}
+
+function renderOrientationReadingMap(container, sections, sectionIntents, mapExpanded, readingMode) {
+  const mapSection = createOrientationSection("Reading map")
+  const toggleButton = document.createElement("button")
+  toggleButton.type = "button"
+  toggleButton.className = "orientationToggleMap"
+  toggleButton.dataset.orientationAction = mapExpanded ? "collapse-map" : "expand-map"
+  toggleButton.textContent = mapExpanded ? "Hide map" : "Show map"
+  mapSection.append(toggleButton)
+
+  const normalizedSections = Array.isArray(sections) ? sections : []
+  if (normalizedSections.length === 0) {
+    const empty = document.createElement("p")
+    empty.className = "orientationMutedText"
+    empty.textContent = "No outline detected."
+    mapSection.append(empty)
+    container.append(mapSection)
+    return
+  }
+
+  const intentMap = new Map()
+  for (const item of Array.isArray(sectionIntents) ? sectionIntents : []) {
+    const key = normalizeSectionTitleKey(item?.title)
+    const intent = clampText(item?.intent, 220)
+    if (!key || !intent || intentMap.has(key)) {
+      continue
+    }
+    intentMap.set(key, intent)
+  }
+
+  if (!mapExpanded) {
+    const summary = document.createElement("p")
+    summary.className = "orientationMutedText"
+    summary.textContent = `${normalizedSections.length} sections available.`
+    mapSection.append(summary)
+    container.append(mapSection)
+    return
+  }
+
+  if (readingMode === "structure") {
+    const orderHint = document.createElement("p")
+    orderHint.className = "orientationMutedText"
+    orderHint.textContent = "Suggested reading order follows the section list below."
+    mapSection.append(orderHint)
+  }
+
+  const list = document.createElement("ol")
+  list.className = "orientationReadingMap"
+  const limit = Math.min(normalizedSections.length, ORIENTATION_MAX_SECTION_INTENTS)
+  for (let index = 0; index < limit; index += 1) {
+    const section = normalizedSections[index]
+    const item = document.createElement("li")
+    item.className = "orientationMapItem"
+
+    const titleLine = document.createElement("p")
+    titleLine.className = "orientationMapTitle"
+    const levelPrefix =
+      Number(section?.level) > 1 ? `${"> ".repeat(Math.max(Number(section.level) - 1, 0))}` : ""
+    const pageLabel = Number.isFinite(section?.pageIndex) ? `Page ${Number(section.pageIndex) + 1}` : "Page ?"
+    titleLine.textContent = `${levelPrefix}${clampText(section?.title, 140)} - ${pageLabel}`
+    item.append(titleLine)
+
+    const intent = intentMap.get(normalizeSectionTitleKey(section?.title))
+    if (intent) {
+      const intentLine = document.createElement("p")
+      intentLine.className = "orientationMapIntent"
+      intentLine.textContent = intent
+      item.append(intentLine)
+    }
+
+    list.append(item)
+  }
+  mapSection.append(list)
+  container.append(mapSection)
+}
+
+function renderOrientationTab() {
+  if (!currentPdf || !renderState.pdfDoc) {
+    renderEmpty("orientation")
+    return
+  }
+
+  const readingMode = getReadingModeOrDefault()
+  const orientationState = getOrientationState()
+  panel.innerHTML = ""
+
+  if (orientationState.collapsed) {
+    const chip = document.createElement("button")
+    chip.type = "button"
+    chip.className = "orientationChip"
+    chip.dataset.orientationAction = "expand"
+    chip.textContent = "Orientation"
+    panel.append(chip)
+    return
+  }
+
+  const container = document.createElement("div")
+  container.className = "orientationPanel"
+  container.append(
+    createOrientationHeader({
+      actionLabel: readingMode === "structure" ? "Collapse" : "Start reading"
+    })
+  )
+
+  if (orientationState.status === "loading") {
+    container.append(createOrientationLoading(orientationState.loadingMessage || "Generating orientation..."))
+    if (Array.isArray(orientationState.data?.sections) && orientationState.data.sections.length > 0) {
+      renderOrientationReadingMap(
+        container,
+        orientationState.data.sections,
+        [],
+        orientationState.mapExpanded,
+        readingMode
+      )
+    }
+    panel.append(container)
+    return
+  }
+
+  if (orientationState.status === "error") {
+    const error = document.createElement("p")
+    error.className = "orientationError"
+    error.textContent = orientationState.errorMessage || "Orientation generation failed."
+    container.append(error)
+  }
+
+  const data = orientationState.data || createEmptyOrientationData()
+  const glanceSection = createOrientationSection("Paper at a glance")
+  const purpose = clampText(data.purpose, readingMode === "flow" ? 220 : 320)
+  const contribution = clampText(data.contribution, readingMode === "flow" ? 220 : 320)
+  const glanceText = [purpose, contribution].filter(Boolean).join(" ")
+  glanceSection.append(
+    createOrientationParagraph(
+      glanceText || "Orientation is still building. Start with the introduction and abstract."
+    )
+  )
+  container.append(glanceSection)
+
+  const focusSection = createOrientationSection("What to focus on")
+  const focusLimit =
+    readingMode === "structure" ? ORIENTATION_MAX_STRUCTURE_FOCUS_BULLETS : ORIENTATION_MAX_FLOW_FOCUS_BULLETS
+  const focusBullets =
+    Array.isArray(data.focusBullets) && data.focusBullets.length > 0
+      ? data.focusBullets.slice(0, focusLimit)
+      : ["Identify the main claim, method assumptions, and the evidence supporting conclusions."]
+  focusSection.append(createOrientationBullets(focusBullets))
+  container.append(focusSection)
+
+  const keyTermsSection = createOrientationSection("Key terms")
+  keyTermsSection.append(createOrientationKeyTerms(Array.isArray(data.keyTerms) ? data.keyTerms : []))
+  if (readingMode === "structure") {
+    container.append(keyTermsSection)
+  } else {
+    const keyTermsDetails = document.createElement("details")
+    keyTermsDetails.className = "orientationDetails"
+    const keyTermsSummary = document.createElement("summary")
+    keyTermsSummary.textContent = "Key terms"
+    keyTermsDetails.append(keyTermsSummary, keyTermsSection)
+    container.append(keyTermsDetails)
+  }
+
+  renderOrientationReadingMap(
+    container,
+    data.sections,
+    data.sectionIntents,
+    orientationState.mapExpanded,
+    readingMode
+  )
+
+  panel.append(container)
+}
+
 function renderPanel() {
   const tab = sidebarUiState.activeTab
+  if (tab === "orientation") {
+    renderOrientationTab()
+    return
+  }
   if (tab === "explain" || tab === "figures") {
     renderCardsTab(tab)
     return
@@ -942,32 +1311,358 @@ function getWholePdfHelpMessage(settings) {
   return baseWarning
 }
 
-function resolveSectionTitle(pageIndex) {
-  const candidateMaps = [currentPdf?.outlineByPage, currentPdf?.outlineMap]
-  for (const map of candidateMaps) {
-    if (!map || typeof map !== "object") {
+function createSectionId(title, pageIndex, position) {
+  const slug = sanitizeText(title)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 36)
+  const safeSlug = slug || "section"
+  return `sec_${Math.max(pageIndex, 0)}_${position}_${safeSlug}`
+}
+
+function normalizeReadingMapSections(sections) {
+  if (!Array.isArray(sections)) {
+    return []
+  }
+  const sorted = sections
+    .map((section) => ({
+      title: sanitizeText(section?.title),
+      pageIndex: parseOptionalPageIndex(section?.pageIndex),
+      level: Number.isFinite(Number(section?.level)) ? Math.max(1, Math.floor(Number(section.level))) : 1,
+      source: section?.source === "outline" ? "outline" : "heuristic"
+    }))
+    .filter((section) => section.title && section.pageIndex != null)
+    .sort((a, b) => {
+      if (a.pageIndex !== b.pageIndex) {
+        return a.pageIndex - b.pageIndex
+      }
+      return a.level - b.level
+    })
+
+  const normalized = []
+  let lastTitle = ""
+  let lastPage = -10
+  for (const section of sorted) {
+    const normalizedTitle = section.title.toLowerCase()
+    if (normalizedTitle === lastTitle && section.pageIndex <= lastPage + 1) {
       continue
     }
-    const fromNumberKey = map[pageIndex]
-    const fromStringKey = map[String(pageIndex)]
-    const entry = fromNumberKey ?? fromStringKey
-    if (entry && typeof entry === "string") {
-      const normalized = sanitizeText(entry)
-      if (normalized) {
-        return normalized
-      }
+    normalized.push({
+      id: createSectionId(section.title, section.pageIndex, normalized.length),
+      ...section
+    })
+    lastTitle = normalizedTitle
+    lastPage = section.pageIndex
+  }
+
+  return normalized
+}
+
+function isLoadTokenCurrent(loadToken) {
+  return (
+    loadToken === renderState.loadToken &&
+    Boolean(currentPdf) &&
+    Boolean(renderState.pdfDoc) &&
+    renderState.pdfDoc === currentPdf.pdfDocRef
+  )
+}
+
+function updateOrientationLoadingMessage(message) {
+  setOrientationLoading(message)
+  if (sidebarUiState.activeTab === "orientation") {
+    renderPanel()
+  }
+}
+
+function applyReadingMapToCurrentDocument(sections) {
+  if (!currentPdf || typeof currentPdf !== "object") {
+    return
+  }
+  const normalizedSections = normalizeReadingMapSections(sections)
+  currentPdf.readingMap = { sections: normalizedSections }
+  updateOrientationSections(normalizedSections)
+}
+
+function summarizeFirstPageTopLines(lines) {
+  if (!Array.isArray(lines) || lines.length === 0) {
+    return ""
+  }
+  return lines.map((line) => sanitizeText(line)).filter(Boolean).slice(0, 3).join(" ")
+}
+
+async function getFirstPageTopLines(pdfDoc) {
+  if (!pdfDoc || typeof pdfDoc.getPage !== "function") {
+    return []
+  }
+  const page = await pdfDoc.getPage(1)
+  const viewport = page.getViewport({ scale: 1 })
+  const pageHeight = Math.max(Number(viewport?.height) || 0, 1)
+  const textContent = await page.getTextContent()
+  const items = Array.isArray(textContent?.items) ? textContent.items : []
+
+  const linesByY = new Map()
+  for (const item of items) {
+    const text = sanitizeText(item?.str)
+    if (!text || text.length > 140 || /^(\d+|page\s+\d+)$/i.test(text)) {
+      continue
     }
-    if (entry && typeof entry === "object" && typeof entry.title === "string") {
-      const normalized = sanitizeText(entry.title)
-      if (normalized) {
-        return normalized
-      }
+    const transform = Array.isArray(item?.transform) ? item.transform : null
+    const x = Number(transform?.[4])
+    const y = Number(transform?.[5])
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      continue
     }
+    if (y / pageHeight < 0.58) {
+      continue
+    }
+    const yKey = Math.round(y / 2)
+    let bucket = linesByY.get(yKey)
+    if (!bucket) {
+      bucket = { y, parts: [] }
+      linesByY.set(yKey, bucket)
+    } else {
+      bucket.y = Math.max(bucket.y, y)
+    }
+    bucket.parts.push({ x, text })
+  }
+
+  const lines = [...linesByY.values()]
+    .map((bucket) => {
+      bucket.parts.sort((a, b) => a.x - b.x)
+      return {
+        y: bucket.y,
+        text: sanitizeText(bucket.parts.map((part) => part.text).join(" "))
+      }
+    })
+    .filter((line) => line.text.length > 2)
+    .sort((a, b) => b.y - a.y)
+
+  const unique = []
+  const seen = new Set()
+  for (const line of lines) {
+    const key = line.text.toLowerCase()
+    if (seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    unique.push(line.text)
+    if (unique.length >= 3) {
+      break
+    }
+  }
+  return unique
+}
+
+function extractAbstractSnippet(text) {
+  const normalized = sanitizeText(text)
+  if (!normalized) {
+    return ""
+  }
+  const lower = normalized.toLowerCase()
+  const abstractIndex = lower.indexOf("abstract")
+  if (abstractIndex >= 0) {
+    const fromAbstract = normalized.slice(abstractIndex)
+    const introIndex = fromAbstract.toLowerCase().indexOf("introduction")
+    const snippet = introIndex > 120 ? fromAbstract.slice(0, introIndex) : fromAbstract
+    return truncateText(snippet, ORIENTATION_ABSTRACT_CHAR_LIMIT)
+  }
+  return truncateText(normalized, ORIENTATION_ABSTRACT_CHAR_LIMIT)
+}
+
+function clampOrientationContext({ titleGuess, abstractText, headings }) {
+  let normalizedTitle = truncateText(titleGuess, 240)
+  let normalizedAbstract = truncateText(abstractText, ORIENTATION_ABSTRACT_CHAR_LIMIT)
+  let normalizedHeadings = (Array.isArray(headings) ? headings : [])
+    .map((heading) => truncateText(heading, 120))
+    .filter(Boolean)
+    .slice(0, 20)
+
+  const measureLength = () =>
+    normalizedTitle.length + normalizedAbstract.length + normalizedHeadings.join(" | ").length
+
+  while (measureLength() > ORIENTATION_CONTEXT_CHAR_LIMIT && normalizedHeadings.length > 6) {
+    normalizedHeadings.pop()
+  }
+  if (measureLength() > ORIENTATION_CONTEXT_CHAR_LIMIT) {
+    const targetAbstractLength = Math.max(
+      500,
+      ORIENTATION_CONTEXT_CHAR_LIMIT - normalizedTitle.length - normalizedHeadings.join(" | ").length
+    )
+    normalizedAbstract = truncateText(normalizedAbstract, targetAbstractLength)
+  }
+  if (measureLength() > ORIENTATION_CONTEXT_CHAR_LIMIT) {
+    const targetTitleLength = Math.max(80, 220 - (measureLength() - ORIENTATION_CONTEXT_CHAR_LIMIT))
+    normalizedTitle = truncateText(normalizedTitle, targetTitleLength)
+  }
+  if (measureLength() > ORIENTATION_CONTEXT_CHAR_LIMIT) {
+    const overflow = measureLength() - ORIENTATION_CONTEXT_CHAR_LIMIT
+    normalizedAbstract = truncateText(normalizedAbstract, Math.max(120, normalizedAbstract.length - overflow))
+  }
+  while (measureLength() > ORIENTATION_CONTEXT_CHAR_LIMIT && normalizedHeadings.length > 0) {
+    normalizedHeadings.pop()
+  }
+
+  return {
+    titleGuess: normalizedTitle,
+    abstractText: normalizedAbstract,
+    headings: normalizedHeadings
+  }
+}
+
+async function buildOrientationInput(pdfDoc, sections) {
+  const maxScanPages = Math.min(ORIENTATION_TEXT_SCAN_PAGES, Number(pdfDoc?.numPages) || 0)
+  if (maxScanPages < 1) {
+    return clampOrientationContext({
+      titleGuess: "",
+      abstractText: "",
+      headings: (Array.isArray(sections) ? sections : []).map((section) => section.title).filter(Boolean)
+    })
+  }
+  const pageTextCache = await buildPageTextCache(pdfDoc, { maxPages: maxScanPages })
+  const firstPageText = await getPageText(pdfDoc, 0)
+  const topLines = await getFirstPageTopLines(pdfDoc)
+  const titleGuess = summarizeFirstPageTopLines(topLines) || truncateText(firstPageText, 220)
+
+  let abstractPageIndex = 0
+  for (let pageIndex = 0; pageIndex < maxScanPages; pageIndex += 1) {
+    const text = sanitizeText(pageTextCache.get(pageIndex) || "")
+    if (/\babstract\b/i.test(text)) {
+      abstractPageIndex = pageIndex
+      break
+    }
+  }
+  const abstractSourceText =
+    sanitizeText(pageTextCache.get(abstractPageIndex) || "") || sanitizeText(firstPageText || "")
+  const abstractText = extractAbstractSnippet(abstractSourceText)
+  const headings = (Array.isArray(sections) ? sections : []).map((section) => section.title).filter(Boolean)
+
+  return clampOrientationContext({
+    titleGuess,
+    abstractText,
+    headings
+  })
+}
+
+function normalizeOrientationResult(response, sections) {
+  const source = response && typeof response === "object" ? response : {}
+  const sectionIntents = Array.isArray(source.sectionIntents)
+    ? source.sectionIntents
+        .map((item) => ({
+          title: clampText(item?.title, 140),
+          intent: clampText(item?.intent, 220)
+        }))
+        .filter((item) => item.title && item.intent)
+        .slice(0, ORIENTATION_MAX_SECTION_INTENTS)
+    : []
+
+  return {
+    purpose: clampText(source.purpose, 360),
+    contribution: clampText(source.contribution, 360),
+    focusBullets: Array.isArray(source.focusBullets)
+      ? source.focusBullets.map((item) => clampText(item, 220)).filter(Boolean)
+      : [],
+    keyTerms: Array.isArray(source.keyTerms)
+      ? source.keyTerms.map((item) => clampText(item, 48)).filter(Boolean).slice(0, ORIENTATION_MAX_KEY_TERMS)
+      : [],
+    sectionIntents,
+    sections
+  }
+}
+
+async function generateOrientationForCurrentDocument(loadToken) {
+  if (!isLoadTokenCurrent(loadToken) || !renderState.pdfDoc) {
+    return
+  }
+
+  try {
+    updateOrientationLoadingMessage("Generating orientation...")
+    const outline = await extractOutline(renderState.pdfDoc)
+    if (!isLoadTokenCurrent(loadToken)) {
+      return
+    }
+
+    const sections = normalizeReadingMapSections(outline?.sections)
+    applyReadingMapToCurrentDocument(sections)
+    updateOrientationLoadingMessage("Summarizing purpose and reading map...")
+
+    const orientationInput = await buildOrientationInput(renderState.pdfDoc, sections)
+    if (!isLoadTokenCurrent(loadToken)) {
+      return
+    }
+
+    const { response } = await generateLLM("orientation", {
+      title: orientationInput.titleGuess,
+      contextWindow: orientationInput.abstractText,
+      headings: orientationInput.headings,
+      readingMode: getReadingModeOrDefault()
+    })
+    if (!isLoadTokenCurrent(loadToken)) {
+      return
+    }
+
+    setOrientationReady(normalizeOrientationResult(response, sections))
+    if (sidebarUiState.activeTab === "orientation") {
+      renderPanel()
+    }
+  } catch (error) {
+    if (!isLoadTokenCurrent(loadToken)) {
+      return
+    }
+    logger.warn("Orientation generation failed", {
+      message: error?.message || "Unknown error"
+    })
+    setOrientationError("Orientation is temporarily unavailable.")
+    if (sidebarUiState.activeTab === "orientation") {
+      renderPanel()
+    }
+  }
+}
+
+function getReadingMapSections() {
+  if (!Array.isArray(currentPdf?.readingMap?.sections)) {
+    return []
+  }
+  return currentPdf.readingMap.sections
+}
+
+function resolveSectionForPage(pageIndex) {
+  const normalizedPageIndex = parseOptionalPageIndex(pageIndex)
+  if (normalizedPageIndex == null) {
+    return null
+  }
+  const sections = getReadingMapSections()
+  let latest = null
+  for (const section of sections) {
+    if (!Number.isFinite(section?.pageIndex)) {
+      continue
+    }
+    const sectionPageIndex = Math.max(0, Math.floor(Number(section.pageIndex)))
+    if (sectionPageIndex <= normalizedPageIndex) {
+      latest = section
+      continue
+    }
+    break
+  }
+  return latest
+}
+
+function resolveSectionTitle(pageIndex) {
+  const section = resolveSectionForPage(pageIndex)
+  const title = sanitizeText(section?.title)
+  if (title) {
+    return title
   }
   if (Number.isFinite(pageIndex) && pageIndex >= 0) {
-    return `Page ${pageIndex + 1}`
+    return `Page ${Math.floor(Number(pageIndex)) + 1}`
   }
   return "Unknown section"
+}
+
+function resolveSectionId(pageIndex) {
+  const section = resolveSectionForPage(pageIndex)
+  const sectionId = sanitizeText(section?.id)
+  return sectionId || null
 }
 
 function buildGroundingQuote(selectedText, contextWindow) {
@@ -1010,6 +1705,7 @@ function buildGrounding(payload) {
     : 0
   return {
     pageIndex: resolvedPageIndex,
+    sectionId: resolveSectionId(resolvedPageIndex),
     sectionTitle: resolveSectionTitle(resolvedPageIndex),
     quote: buildGroundingQuote(payload?.selectedText, payload?.contextWindow),
     textRange: null
@@ -1506,6 +2202,7 @@ function resolveGroundingFromDocument({
   if (rankedBlocks.length === 0) {
     return {
       pageIndex: baseGrounding.pageIndex,
+      sectionId: baseGrounding.sectionId,
       sectionTitle: baseGrounding.sectionTitle,
       quote: baseGrounding.quote,
       citationPages: Array.isArray(response?.groundingPages) ? response.groundingPages : [],
@@ -1564,6 +2261,7 @@ function resolveGroundingFromDocument({
 
   return {
     pageIndex: primary.pageIndex,
+    sectionId: resolveSectionId(primary.pageIndex),
     sectionTitle: resolveSectionTitle(primary.pageIndex),
     quote: makeSnippetAroundAnchor(primary.text, primary.bestAnchor, RETRIEVAL_PRIMARY_QUOTE_MAX),
     citationPages,
@@ -1758,6 +2456,31 @@ function mapSelectionActionToCardType(actionType) {
   return null
 }
 
+function normalizeLimitNumber(value, fallback, min, max) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) {
+    return fallback
+  }
+  return Math.min(max, Math.max(min, Math.floor(numeric)))
+}
+
+function clampGroundingCitations(citationPages, citationQuotes, settings) {
+  const maxQuoteChars = normalizeLimitNumber(settings?.maxQuoteChars, 240, 80, 480)
+  const maxCitations = normalizeLimitNumber(settings?.maxCitations, 3, 1, 6)
+  const quotes = Array.isArray(citationQuotes) ? citationQuotes : []
+  const pages = Array.isArray(citationPages) ? citationPages : []
+  return {
+    citationQuotes: quotes
+      .map((quote) => clampText(quote, maxQuoteChars))
+      .filter(Boolean)
+      .slice(0, maxCitations),
+    citationPages: pages
+      .map((page) => parseOptionalPageIndex(page))
+      .filter((page) => page != null)
+      .slice(0, maxCitations)
+  }
+}
+
 async function buildCardFromSelection(payload) {
   const cardType = mapSelectionActionToCardType(payload?.type)
   if (!cardType) {
@@ -1846,6 +2569,24 @@ async function buildCardFromSelection(payload) {
     preferredPageIndex: payload?.pageIndex,
     baseGrounding: grounding
   })
+  const rawCitationPages =
+    Array.isArray(retrievedGrounding.citationPages) && retrievedGrounding.citationPages.length > 0
+      ? retrievedGrounding.citationPages
+      : response.groundingPages
+  const rawCitationQuotes =
+    Array.isArray(retrievedGrounding.citationQuotes) && retrievedGrounding.citationQuotes.length > 0
+      ? retrievedGrounding.citationQuotes
+      : response.groundingQuotes
+  const { citationPages, citationQuotes } = clampGroundingCitations(
+    rawCitationPages,
+    rawCitationQuotes,
+    settings
+  )
+  const resolvedGroundingPageIndex = Number.isFinite(retrievedGrounding.pageIndex)
+    ? Math.max(0, Number(retrievedGrounding.pageIndex))
+    : grounding.pageIndex
+  const resolvedSectionTitle = resolveSectionTitle(resolvedGroundingPageIndex)
+  const resolvedSectionId = resolveSectionId(resolvedGroundingPageIndex)
 
   return normalizeCard({
     id: makeId("card"),
@@ -1854,19 +2595,12 @@ async function buildCardFromSelection(payload) {
     shortAnswer: response.shortAnswer,
     details,
     grounding: {
-      pageIndex: Number.isFinite(retrievedGrounding.pageIndex)
-        ? Math.max(0, Number(retrievedGrounding.pageIndex))
-        : grounding.pageIndex,
-      sectionTitle: sanitizeText(retrievedGrounding.sectionTitle || grounding.sectionTitle),
+      pageIndex: resolvedGroundingPageIndex,
+      sectionId: sanitizeText(resolvedSectionId || retrievedGrounding.sectionId),
+      sectionTitle: sanitizeText(resolvedSectionTitle || retrievedGrounding.sectionTitle || grounding.sectionTitle),
       quote: clampText(retrievedGrounding.quote || grounding.quote, 300),
-      citationPages:
-        Array.isArray(retrievedGrounding.citationPages) && retrievedGrounding.citationPages.length > 0
-          ? retrievedGrounding.citationPages
-          : response.groundingPages,
-      citationQuotes:
-        Array.isArray(retrievedGrounding.citationQuotes) && retrievedGrounding.citationQuotes.length > 0
-          ? retrievedGrounding.citationQuotes
-          : response.groundingQuotes
+      citationPages,
+      citationQuotes
     },
     locator,
     meta: {
@@ -2421,6 +3155,27 @@ async function handlePanelCardAction(event) {
     return
   }
 
+  const orientationButton = eventTarget.closest("button[data-orientation-action]")
+  if (orientationButton && panel.contains(orientationButton)) {
+    const action = orientationButton.dataset.orientationAction
+    if (action === "expand") {
+      toggleOrientationCollapsed(false)
+      return
+    }
+    if (action === "collapse") {
+      toggleOrientationCollapsed(true)
+      return
+    }
+    if (action === "expand-map") {
+      toggleOrientationMapExpanded(true)
+      return
+    }
+    if (action === "collapse-map") {
+      toggleOrientationMapExpanded(false)
+      return
+    }
+  }
+
   const termButton = eventTarget.closest("button[data-term-action]")
   if (termButton && panel.contains(termButton)) {
     const termAction = termButton.dataset.termAction
@@ -2537,6 +3292,7 @@ function applySettingsToUi(settings) {
   readingModeFlowRadio.checked = settings.defaultReadingMode === "flow";
   readingModeStructureRadio.checked = settings.defaultReadingMode === "structure";
   updateReadingModeStatus(settings.defaultReadingMode);
+  applyOrientationModeDefaults(settings.defaultReadingMode);
 
   const hasOpenAIKey = Boolean(settings.openaiApiKey);
   llmModeOpenAIOption.disabled = !hasOpenAIKey;
@@ -2564,6 +3320,9 @@ function applySettingsToUi(settings) {
   autoOpenPdfToggle.checked = settings.autoOpenPdf;
   setApiPresenceStatus(settings);
   updateContextScopeStatus();
+  if (sidebarUiState.activeTab === "orientation") {
+    renderPanel()
+  }
   void syncWholePdfStatusFromCache(sidebarUiState.docId, settings);
 }
 
@@ -3183,6 +3942,7 @@ function handleLoadFailure(sourceType, error) {
   sidebarUiState.docId = "unknown";
   sidebarUiState.cards = [];
   sidebarUiState.glossaryTerms = [];
+  resetOrientationStateForDocument()
   ensureScaleFactor();
   updatePdfControls();
   renderPanel();
@@ -3233,12 +3993,16 @@ async function loadPdfSource(source, documentParams) {
     scale: DEFAULT_SCALE,
     renderedScale: DEFAULT_SCALE,
     pageNumber: 1,
-    retrievalBlockCache: null
+    retrievalBlockCache: null,
+    readingMap: { sections: [] },
+    pdfDocRef: null
   };
   clearContextScopeTransientStatus();
   sidebarUiState.docId = deriveDocId(currentPdf);
   sidebarUiState.cards = [];
   sidebarUiState.glossaryTerms = [];
+  resetOrientationStateForDocument()
+  setOrientationLoading("Loading PDF...")
   ensureScaleFactor();
   updatePdfControls();
   renderPanel();
@@ -3269,6 +4033,7 @@ async function loadPdfSource(source, documentParams) {
 
   renderState.loadingTask = null;
   renderState.pdfDoc = pdfDoc;
+  currentPdf.pdfDocRef = pdfDoc;
   currentPdf.numPages = pdfDoc.numPages;
   currentPdf.pageNumber = 1;
 
@@ -3283,6 +4048,7 @@ async function loadPdfSource(source, documentParams) {
 
   logger.info("Loaded PDF: numPages", { numPages: pdfDoc.numPages });
   updatePdfControls();
+  void generateOrientationForCurrentDocument(loadToken);
   await loadCardsForCurrentDocument();
   await scheduleRender(1, loadToken);
 }

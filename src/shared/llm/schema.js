@@ -1,4 +1,4 @@
-export const TASKS = Object.freeze(["definition", "explanation", "quant"])
+export const TASKS = Object.freeze(["definition", "explanation", "quant", "orientation"])
 
 const TASK_SET = new Set(TASKS)
 const MAX_SHORT_ANSWER_WORDS = 35
@@ -110,11 +110,51 @@ function normalizeQuant(resp, limits) {
   }
 }
 
+function normalizeSectionIntentItem(item) {
+  const source = item && typeof item === "object" ? item : {}
+  return {
+    title: truncateText(source.title, 140),
+    intent: truncateText(source.intent, 220)
+  }
+}
+
+function normalizeOrientation(resp) {
+  const source = resp && typeof resp === "object" ? resp : {}
+  const intents = Array.isArray(source.sectionIntents)
+    ? source.sectionIntents.map((item) => normalizeSectionIntentItem(item)).filter((item) => item.title)
+    : []
+  return {
+    purpose: truncateText(source.purpose, 360),
+    contribution: truncateText(source.contribution, 360),
+    focusBullets: normalizeStringList(source.focusBullets, { maxItems: 5, maxLength: 220 }),
+    keyTerms: normalizeStringList(source.keyTerms, { maxItems: 8, maxLength: 48 }),
+    sectionIntents: intents.slice(0, 24)
+  }
+}
+
+function enforceGroundingLimits(response, limits) {
+  const source = response && typeof response === "object" ? response : {}
+  const groundingPages = normalizeGroundingPages(source.groundingPages, limits.maxCitations)
+  const groundingQuotes = normalizeGroundingQuotes(
+    source.groundingQuotes,
+    limits.maxCitations,
+    limits.maxQuoteChars
+  )
+  return {
+    ...source,
+    groundingPages,
+    groundingQuotes
+  }
+}
+
 export function normalizeLLMResponse(task, resp, options = {}) {
   const normalizedTask = normalizeTask(task)
   const limits = normalizeLimits(options)
   if (normalizedTask === "quant") {
-    return normalizeQuant(resp, limits)
+    return enforceGroundingLimits(normalizeQuant(resp, limits), limits)
   }
-  return normalizeDefinitionOrExplanation(resp, limits)
+  if (normalizedTask === "orientation") {
+    return normalizeOrientation(resp)
+  }
+  return enforceGroundingLimits(normalizeDefinitionOrExplanation(resp, limits), limits)
 }

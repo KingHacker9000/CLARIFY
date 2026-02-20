@@ -5,8 +5,8 @@ const OPENAI_RESPONSES_API_URL = "https://api.openai.com/v1/responses"
 const REQUEST_TIMEOUT_MS = 12000
 const RATE_LIMIT_COOLDOWN_FALLBACK_MS = 60000
 const MAX_SELECTED_TEXT_LENGTH = 200
-const MAX_CONTEXT_WINDOW_LENGTH = 800
-const MAX_TITLE_LENGTH = 180
+const MAX_CONTEXT_WINDOW_LENGTH = 1600
+const MAX_TITLE_LENGTH = 220
 const MAX_SECTION_TITLE_LENGTH = 160
 const MAX_QUOTE_LENGTH = 300
 const MAX_OUTPUT_TOKENS = 500
@@ -53,7 +53,7 @@ function normalizeNumber(value, fallback, min, max) {
 }
 
 function normalizeTask(task) {
-  if (task === "definition" || task === "explanation" || task === "quant") {
+  if (task === "definition" || task === "explanation" || task === "quant" || task === "orientation") {
     return task
   }
   return "explanation"
@@ -63,10 +63,16 @@ function normalizeInput(input) {
   const source = input && typeof input === "object" ? input : {}
   const grounding = source.grounding && typeof source.grounding === "object" ? source.grounding : {}
   const openaiFileId = normalizeText(source.openaiFileId).slice(0, 120)
+  const headings = Array.isArray(source.headings)
+    ? source.headings.map((item) => clampText(item, 140)).filter(Boolean).slice(0, 24)
+    : []
+  const readingMode = source.readingMode === "structure" ? "structure" : "flow"
   return {
     selectedText: clampText(source.selectedText, MAX_SELECTED_TEXT_LENGTH),
     contextWindow: clampText(source.contextWindow, MAX_CONTEXT_WINDOW_LENGTH),
     title: clampText(source.title, MAX_TITLE_LENGTH),
+    headings,
+    readingMode,
     openaiFileId,
     grounding: {
       pageIndex: Number.isFinite(grounding.pageIndex) ? Math.max(0, Number(grounding.pageIndex)) : 0,
@@ -83,10 +89,16 @@ function taskLabel(task) {
   if (task === "quant") {
     return "figure/quant translation"
   }
+  if (task === "orientation") {
+    return "paper orientation"
+  }
   return "explanation"
 }
 
 function buildSchemaForTask(task) {
+  if (task === "orientation") {
+    return `{"purpose":"string","contribution":"string","focusBullets":["string"],"keyTerms":["string"],"sectionIntents":[{"title":"string","intent":"string"}]}`
+  }
   if (task === "quant") {
     return `{"shortAnswer":"<=35 words","whatItShows":"string","takeaway":"string","supportsClaim":["string"],"whatToLookAt":["string"],"groundingPages":[0],"groundingQuotes":["short quote"]}`
   }
@@ -94,6 +106,23 @@ function buildSchemaForTask(task) {
 }
 
 function buildUserPrompt(task, input, limits) {
+  if (task === "orientation") {
+    return [
+      "Task: paper orientation summary",
+      `Return JSON schema exactly: ${buildSchemaForTask(task)}`,
+      "Style: concise, grounded, and paper-specific.",
+      "purpose and contribution should be short prose sentences.",
+      "focusBullets: 3-5 items, actionable reading guidance.",
+      "keyTerms: up to 8 short terms/phrases.",
+      "sectionIntents: align to provided headings when possible, each with 1-line intent.",
+      `Reading mode preference: ${input.readingMode}`,
+      `Title guess: "${input.title || ""}"`,
+      `Abstract-ish context: "${input.contextWindow || ""}"`,
+      `Headings: "${input.headings.join(" | ")}"`,
+      "If evidence is limited, keep statements cautious and explicit."
+    ].join("\n")
+  }
+
   return [
     `Task: ${taskLabel(task)}`,
     `Return JSON schema exactly: ${buildSchemaForTask(task)}`,
@@ -142,7 +171,7 @@ function extractResponseText(payload) {
   }
 
   if (typeof payload.output_text === "string" && payload.output_text.trim()) {
-    return payload.output_text.trim()
+    return payload.output_text
   }
 
   const output = Array.isArray(payload.output) ? payload.output : []
@@ -150,16 +179,16 @@ function extractResponseText(payload) {
     const contentItems = Array.isArray(block?.content) ? block.content : []
     for (const item of contentItems) {
       if (typeof item?.text === "string" && item.text.trim()) {
-        return item.text.trim()
+        return item.text
       }
       if (typeof item?.output_text === "string" && item.output_text.trim()) {
-        return item.output_text.trim()
+        return item.output_text
       }
       if (typeof item?.content === "string" && item.content.trim()) {
-        return item.content.trim()
+        return item.content
       }
       if (typeof item?.text?.value === "string" && item.text.value.trim()) {
-        return item.text.value.trim()
+        return item.text.value
       }
     }
   }
@@ -167,7 +196,7 @@ function extractResponseText(payload) {
 }
 
 function extractJsonObject(rawText) {
-  const text = typeof rawText === "string" ? rawText.trim() : ""
+  const text = typeof rawText === "string" ? rawText : ""
   const start = text.indexOf("{")
   const end = text.lastIndexOf("}")
   if (start < 0 || end < 0 || end <= start) {
@@ -175,7 +204,10 @@ function extractJsonObject(rawText) {
   }
   const candidate = text.slice(start, end + 1)
   try {
-    return JSON.parse(candidate)
+    return {
+      parsed: JSON.parse(candidate),
+      extractedJsonText: candidate
+    }
   } catch (_error) {
     throw new Error("OpenAI returned invalid JSON payload.")
   }
@@ -331,13 +363,18 @@ export async function generate(task, input, config = {}) {
         if (!rawText) {
           throw new Error("OpenAI response was empty.")
         }
-        const parsed = extractJsonObject(rawText)
+        const { parsed, extractedJsonText } = extractJsonObject(rawText)
         logger.info("OpenAI response ok", {
           status: response.status,
-          rawText: clampText(sanitizeLogString(rawText), 1200),
+          rawTextLength: rawText.length,
+          extractedJsonLength: extractedJsonText.length,
           parsed
         })
-        return parsed
+        return {
+          ...parsed,
+          rawText,
+          extractedJsonText
+        }
       } catch (error) {
         const errorMessage = sanitizeLogString(error?.message || "Unknown error")
         logger.info("OpenAI response error", {
