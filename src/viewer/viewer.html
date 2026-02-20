@@ -3,28 +3,114 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="../vendor/pdfjs/pdf_viewer.css" />
     <link rel="stylesheet" href="./viewer.css" />
   </head>
   <body>
-    <div class="layout">
+    <div id="layout" class="layout">
       <main class="pdfPane">
         <div class="pdfToolbar">
-          <button id="openFile">Open PDF</button>
+          <button id="openFile" type="button">Open PDF</button>
+          <div class="toolbarGroup navGroup" aria-label="Page navigation">
+            <button id="prevPage" class="toolbarIconButton" type="button" aria-label="Previous page">&larr;</button>
+            <span id="pageIndicator" class="pageIndicator">Page - / -</span>
+            <button id="nextPage" class="toolbarIconButton" type="button" aria-label="Next page">&rarr;</button>
+          </div>
+          <div class="toolbarGroup zoomGroup" aria-label="Zoom controls">
+            <button id="zoomOut" class="toolbarIconButton" type="button" aria-label="Zoom out">-</button>
+            <button id="zoomIn" class="toolbarIconButton" type="button" aria-label="Zoom in">+</button>
+            <button id="fitWidth" type="button" aria-pressed="false">Fit Width</button>
+          </div>
           <span id="status">No PDF loaded</span>
+          <span id="readingModeStatus" class="readingModeStatus">Mode: Flow</span>
+          <button id="toggleSidebar" type="button" aria-pressed="false">Hide Panel</button>
+          <div class="toolbarRight">
+            <button
+              id="diagnosticsToggle"
+              class="diagnosticsToggle"
+              type="button"
+              aria-label="Diagnostics and Settings"
+              aria-expanded="false"
+            >
+              &#8942;
+            </button>
+            <div id="diagnosticsMenu" class="diagnosticsMenu" hidden>
+              <section class="menuSection">
+                <h3 class="menuTitle">Diagnostics</h3>
+                <label class="diagRow">
+                  <input id="verboseToggle" type="checkbox" />
+                  Verbose logging
+                </label>
+                <button id="copyDebugInfo" type="button">Copy debug info</button>
+                <span id="copyStatus" class="copyStatus" aria-live="polite"></span>
+              </section>
+
+              <section class="menuSection">
+                <h3 class="menuTitle">Settings</h3>
+
+                <div class="settingGroup">
+                  <span class="settingLabel">Reading mode</span>
+                  <label class="diagRow">
+                    <input id="readingModeFlow" name="readingMode" type="radio" value="flow" />
+                    Flow
+                  </label>
+                  <label class="diagRow">
+                    <input id="readingModeStructure" name="readingMode" type="radio" value="structure" />
+                    Structure
+                  </label>
+                </div>
+
+                <label class="settingLabel" for="llmModeSelect">LLM mode</label>
+                <select id="llmModeSelect">
+                  <option value="auto">Auto</option>
+                  <option value="mock">Mock</option>
+                  <option id="llmModeOpenAIOption" value="openai">OpenAI</option>
+                </select>
+                <span id="llmModeHelp" class="helperText" hidden>Set key to enable.</span>
+
+                <label class="settingLabel" for="openaiApiKeyInput">OpenAI API key</label>
+                <input
+                  id="openaiApiKeyInput"
+                  class="apiKeyInput"
+                  type="password"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="sk-..."
+                />
+                <div class="keyActions">
+                  <button id="saveApiKey" type="button">Save Key</button>
+                  <button id="clearApiKey" type="button">Clear</button>
+                </div>
+                <span id="apiKeyStatus" class="helperText" aria-live="polite"></span>
+
+                <label class="diagRow">
+                  <input id="autoOpenPdfToggle" type="checkbox" />
+                  Auto-open PDF links in CLARIFY
+                </label>
+              </section>
+            </div>
+          </div>
         </div>
 
-        <div id="pdfRoot" class="pdfRoot">
+        <div id="pdfRoot" class="pdfRoot pdfViewer">
           <!-- PDF.js will render pages here -->
         </div>
       </main>
 
-      <aside class="sidebar">
+      <aside id="sidebar" class="sidebar">
+        <button
+          id="sidebarResizeHandle"
+          class="sidebarResizeHandle"
+          type="button"
+          aria-label="Resize sidebar"
+          title="Drag to resize sidebar"
+        ></button>
         <div class="tabs">
-          <button class="tab active" data-tab="orientation">📘</button>
-          <button class="tab" data-tab="explain">💡</button>
-          <button class="tab" data-tab="glossary">🔖</button>
-          <button class="tab" data-tab="figures">📊</button>
-          <button class="tab" data-tab="walkthrough">🧩</button>
+          <button class="tab active" data-tab="orientation">&#128214;</button>
+          <button class="tab" data-tab="explain">&#128161;</button>
+          <button class="tab" data-tab="glossary">&#128278;</button>
+          <button class="tab" data-tab="figures">&#128202;</button>
+          <button class="tab" data-tab="walkthrough">&#129513;</button>
         </div>
 
         <section id="panel" class="panel">

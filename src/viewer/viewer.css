@@ -1,61 +1,359 @@
 :root {
-  --bg: #f6f7fb;
-  --panel: #ffffff;
-  --border: #e7e8ee;
-  --text: #111;
-  --muted: #666;
+  --bg: #f4f4f1;
+  --panel: #fcfcfa;
+  --border: #dfdfd8;
+  --text: #2b2b26;
+  --muted: #5f5f57;
+  --toolbarButtonBg: #fdfdfb;
+  --toolbarButtonActive: #efefe8;
+  --scrollTrack: #e8e8e2;
+  --scrollThumb: #c2c2b7;
+  --scrollThumbHover: #adad9f;
+  --sidebar-width: 360px;
+  --sidebar-collapsed-width: 56px;
+  --sidebar-min-width: 240px;
+  --sidebar-max-width: 640px;
 }
 
-* { box-sizing: border-box; }
+* {
+  box-sizing: border-box;
+}
 
 body {
   margin: 0;
   font: 13px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
   color: var(--text);
   background: var(--bg);
+  height: 100vh;
+  overflow: hidden;
+}
+
+body.resizingSidebar {
+  cursor: col-resize;
+  user-select: none;
+}
+
+html {
+  height: 100%;
+  overflow: hidden;
 }
 
 .layout {
-  height: 100vh;
+  height: 100%;
+  width: 100%;
   display: grid;
-  grid-template-columns: 1fr 360px;
+  grid-template-columns: minmax(0, 1fr) var(--sidebar-width);
+  overflow: hidden;
+}
+
+.layout.sidebarCollapsed {
+  grid-template-columns: minmax(0, 1fr) var(--sidebar-collapsed-width);
 }
 
 .pdfPane {
   display: grid;
   grid-template-rows: auto 1fr;
   border-right: 1px solid var(--border);
+  min-width: 0;
+  min-height: 0;
 }
 
 .pdfToolbar {
-  height: 44px;
+  min-height: 44px;
   display: flex;
   align-items: center;
+  flex-wrap: nowrap;
   gap: 10px;
-  padding: 0 12px;
-  background: #fff;
+  padding: 6px 12px;
+  background: var(--panel);
   border-bottom: 1px solid var(--border);
+  color: var(--text);
 }
 
 .pdfToolbar button {
   border: 1px solid var(--border);
-  background: #fff;
+  background: var(--toolbarButtonBg);
+  color: var(--text) !important;
   padding: 8px 10px;
   border-radius: 10px;
   cursor: pointer;
+  font-weight: 500;
 }
 
-#status { color: var(--muted); }
+.pdfToolbar button[disabled] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.toolbarGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.toolbarIconButton {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 8px;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.pageIndicator {
+  min-width: 100px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+#fitWidth[aria-pressed="true"] {
+  background: var(--toolbarButtonActive);
+  border-color: #d6d6cc;
+}
+
+#toggleSidebar[aria-pressed="true"] {
+  background: var(--toolbarButtonActive);
+  border-color: #d6d6cc;
+}
+
+#status {
+  color: var(--text) !important;
+  flex: 1 1 auto;
+  min-width: 180px;
+  max-width: 520px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+
+.readingModeStatus {
+  font-size: 12px;
+  color: var(--text) !important;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+  background: #f6f6f1;
+}
+
+.toolbarRight {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.diagnosticsToggle {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 8px;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.diagnosticsMenu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 280px;
+  max-height: 75vh;
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.08);
+  z-index: 20;
+}
+
+.diagnosticsMenu[hidden] {
+  display: none;
+}
+
+.menuSection {
+  display: grid;
+  gap: 8px;
+}
+
+.menuSection + .menuSection {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.menuTitle {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.diagRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--text);
+}
+
+.diagRow input {
+  margin: 2px 0 0;
+}
+
+.settingGroup {
+  display: grid;
+  gap: 6px;
+}
+
+.settingLabel {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.diagnosticsMenu button {
+  width: 100%;
+  text-align: left;
+}
+
+.diagnosticsMenu select,
+.diagnosticsMenu .apiKeyInput {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 8px;
+  font: inherit;
+  background: #fff;
+}
+
+.keyActions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.keyActions button {
+  text-align: center;
+}
+
+.copyStatus,
+.helperText {
+  min-height: 16px;
+  font-size: 12px;
+  color: var(--muted);
+}
 
 .pdfRoot {
   overflow: auto;
-  padding: 16px;
+  padding: 18px 4px 28px 10px;
+  display: block;
+  scroll-behavior: smooth;
+  background: var(--bg);
+  min-width: 0;
+  min-height: 0;
+  scrollbar-color: var(--scrollThumb) var(--scrollTrack);
+  scrollbar-width: thin;
+}
+
+.pdfRoot.fitWidthMode {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.pdfRoot.pdfViewer {
+  --page-margin: 0;
+  --page-border: none;
+  --pdfViewer-padding-bottom: 0;
+}
+
+.pdfPageShell {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  margin-bottom: 18px;
+}
+
+.pdfRoot.fitWidthMode .pdfPageShell {
+  justify-content: flex-start;
+}
+
+.pdfPageSurface {
+  position: relative;
+  background: #fff;
+  border: 1px solid #d7d7cd;
+  box-shadow: 0 4px 16px rgba(28, 26, 20, 0.1);
+  isolation: isolate;
+}
+
+.pdfPageCanvas {
+  display: block;
+}
+
+.pdfPageSurface .textLayer {
+  user-select: text;
+}
+
+.pdfMessage {
+  width: min(680px, 100%);
+  margin-top: 20px;
+  padding: 16px 18px;
+  border-radius: 12px;
+  border: 1px solid #d9d9cf;
+  background: #fff;
+  color: var(--text);
+  line-height: 1.45;
 }
 
 .sidebar {
   display: grid;
   grid-template-columns: 56px 1fr;
   background: var(--panel);
+  min-height: 0;
+  min-width: 0;
+  position: relative;
+}
+
+.layout.sidebarCollapsed .sidebar {
+  grid-template-columns: 56px 0;
+}
+
+.layout.sidebarCollapsed .panel {
+  display: none;
+}
+
+.sidebarResizeHandle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -6px;
+  width: 12px;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  padding: 0;
+  z-index: 5;
+  touch-action: none;
+}
+
+.sidebarResizeHandle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 2px;
+  background: transparent;
+}
+
+.sidebarResizeHandle:hover::before,
+body.resizingSidebar .sidebarResizeHandle::before,
+.sidebarResizeHandle:focus-visible::before {
+  background: #d0d0c2;
+}
+
+.layout.sidebarCollapsed .sidebarResizeHandle {
+  display: none;
 }
 
 .tabs {
@@ -76,11 +374,82 @@ body {
 }
 
 .tab.active {
-  background: #f2f3ff;
-  border-color: #d9dbff;
+  background: #efefe8;
+  border-color: #ddddcf;
 }
 
 .panel {
   padding: 14px;
   overflow: auto;
+  min-height: 0;
+  scrollbar-color: var(--scrollThumb) var(--scrollTrack);
+  scrollbar-width: thin;
+}
+
+.pdfRoot::-webkit-scrollbar,
+.panel::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+.pdfRoot::-webkit-scrollbar-track,
+.panel::-webkit-scrollbar-track {
+  background: var(--scrollTrack);
+}
+
+.pdfRoot::-webkit-scrollbar-thumb,
+.panel::-webkit-scrollbar-thumb {
+  background: var(--scrollThumb);
+  border: 2px solid var(--scrollTrack);
+  border-radius: 999px;
+}
+
+.pdfRoot::-webkit-scrollbar-thumb:hover,
+.panel::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollThumbHover);
+}
+
+@media (max-width: 960px) {
+  .layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(320px, 1fr) 240px;
+  }
+
+  .pdfPane {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .sidebar {
+    grid-template-columns: 52px 1fr;
+    min-height: 0;
+  }
+
+  .layout.sidebarCollapsed {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(320px, 1fr) 52px;
+  }
+
+  .layout.sidebarCollapsed .sidebar {
+    grid-template-columns: 52px 0;
+  }
+
+  .sidebarResizeHandle {
+    display: none;
+  }
+
+  .diagnosticsMenu {
+    right: -8px;
+  }
+
+  .pdfToolbar {
+    gap: 8px;
+    padding: 8px 10px;
+    flex-wrap: wrap;
+  }
+
+  #status {
+    flex-basis: 100%;
+    max-width: none;
+  }
 }

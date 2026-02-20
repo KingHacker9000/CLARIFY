@@ -18,7 +18,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["src/viewer/*", "assets/*"],
+      "resources": ["src/viewer/*", "src/vendor/pdfjs/*", "assets/*"],
       "matches": ["<all_urls>"]
     }
   ]
