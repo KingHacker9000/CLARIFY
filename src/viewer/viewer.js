@@ -15,6 +15,8 @@ const MAX_SCALE = 3.2;
 const ZOOM_STEP = 0.2;
 const SIDEBAR_DEFAULT_WIDTH = 360;
 const SIDEBAR_MIN_WIDTH = 240;
+const SIDEBAR_MAX_WIDTH_RATIO = 1 / 3;
+const SIDEBAR_COLLAPSE_TRIGGER_WIDTH = 200;
 const PDF_PANE_MIN_WIDTH = 280;
 const SIDEBAR_COLLAPSED_WIDTH = 56;
 const REMOTE_LOAD_ERROR_MESSAGE =
@@ -41,6 +43,7 @@ const zoomOutBtn = document.getElementById("zoomOut");
 const zoomInBtn = document.getElementById("zoomIn");
 const fitWidthBtn = document.getElementById("fitWidth");
 const toggleSidebarBtn = document.getElementById("toggleSidebar");
+const reopenSidebarBtn = document.getElementById("reopenSidebar");
 const diagnosticsToggleBtn = document.getElementById("diagnosticsToggle");
 const diagnosticsMenu = document.getElementById("diagnosticsMenu");
 const verboseToggle = document.getElementById("verboseToggle");
@@ -151,7 +154,9 @@ function setFitWidthEnabled(enabled) {
 
 function clampSidebarWidth(width) {
   const layoutWidth = layoutEl?.clientWidth || window.innerWidth || 0;
-  const dynamicMax = Math.max(SIDEBAR_MIN_WIDTH, layoutWidth - PDF_PANE_MIN_WIDTH);
+  const ratioMax = Math.floor(layoutWidth * SIDEBAR_MAX_WIDTH_RATIO);
+  const availableMax = layoutWidth - PDF_PANE_MIN_WIDTH;
+  const dynamicMax = Math.max(SIDEBAR_MIN_WIDTH, Math.min(availableMax, ratioMax));
   return Math.min(dynamicMax, Math.max(SIDEBAR_MIN_WIDTH, width));
 }
 
@@ -222,7 +227,14 @@ function handleSidebarResizeMove(event) {
   }
 
   const delta = sidebarState.resizeStartX - event.clientX;
-  setSidebarWidth(sidebarState.resizeStartWidth + delta, { skipFitWidthResize: true });
+  const nextWidth = sidebarState.resizeStartWidth + delta;
+  if (nextWidth <= SIDEBAR_COLLAPSE_TRIGGER_WIDTH) {
+    setSidebarCollapsed(true, { skipFitWidthResize: true });
+    handleSidebarResizeEnd(event);
+    return;
+  }
+
+  setSidebarWidth(nextWidth, { skipFitWidthResize: true });
 }
 
 function handleSidebarResizeEnd(event) {
@@ -1157,6 +1169,10 @@ document.querySelectorAll(".tab").forEach((button) => {
 
 toggleSidebarBtn.addEventListener("click", () => {
   setSidebarCollapsed(!sidebarState.collapsed);
+});
+
+reopenSidebarBtn?.addEventListener("click", () => {
+  setSidebarCollapsed(false);
 });
 
 sidebarResizeHandle.addEventListener("pointerdown", handleSidebarResizeStart);

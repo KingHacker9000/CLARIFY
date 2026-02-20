@@ -324,6 +324,31 @@ html {
   display: none;
 }
 
+.reopenSidebar {
+  display: none;
+  position: absolute;
+  top: 10px;
+  left: 8px;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--toolbarButtonBg);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 22px;
+  line-height: 1;
+  z-index: 6;
+}
+
+.layout.sidebarCollapsed .reopenSidebar {
+  display: block;
+}
+
+.layout.sidebarCollapsed .tabs {
+  display: none;
+}
+
 .sidebarResizeHandle {
   position: absolute;
   top: 0;
@@ -434,6 +459,17 @@ body.resizingSidebar .sidebarResizeHandle::before,
 
   .layout.sidebarCollapsed .sidebar {
     grid-template-columns: 52px 0;
+  }
+
+  .layout.sidebarCollapsed .tabs {
+    display: none;
+  }
+
+  .layout.sidebarCollapsed .reopenSidebar {
+    left: 6px;
+    top: 6px;
+    width: 38px;
+    height: 38px;
   }
 
   .sidebarResizeHandle {
