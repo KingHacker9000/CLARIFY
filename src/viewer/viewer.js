@@ -9,10 +9,12 @@ import {
   getCards,
   getGlossaryTerms,
   getOpenAIFileId,
+  getOrientationCache,
   getSettings,
   getVerbose,
   removeCard,
   setOpenAIFileId,
+  setOrientationCache,
   removeGlossaryTerm,
   setSettings,
   setVerbose,
@@ -26,6 +28,7 @@ import { extractOutline } from "./outline.js";
 import { buildPageTextCache, getPageText } from "./page_text.js";
 
 const logger = createLogger("VIEWER");
+const DEFAULT_VIEWER_TITLE = "CLARIFY";
 const DEFAULT_SCALE = 1.2;
 const MIN_SCALE = 0.6;
 const MAX_SCALE = 3.2;
@@ -55,6 +58,11 @@ const WHOLE_PDF_LOCAL_REQUIRED_MESSAGE =
 const ICON_PIN = "\uD83D\uDCCC";
 const ICON_COPY = "\uD83D\uDCCB";
 const ICON_DELETE = "\uD83D\uDDD1\uFE0F";
+const ICON_REGENERATE_LIGHT_URL = new URL("../../assets/icons/regenerate.png", import.meta.url).toString();
+const ICON_REGENERATE_DARK_URL = new URL(
+  "../../assets/icons/regenerate-dark.png",
+  import.meta.url
+).toString();
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   "../vendor/pdfjs/pdf.worker.mjs",
@@ -169,6 +177,7 @@ const sidebarUiState = {
   orientation: createOrientationUiState("flow")
 };
 let recentJumpState = null;
+let orientationRunToken = 0;
 
 const RETRIEVAL_BLOCK_MIN_CHARS = 50;
 const RETRIEVAL_BLOCK_MAX_CHARS = 420;
@@ -766,12 +775,33 @@ function createOrientationHeader({ actionLabel = "Start reading" }) {
   title.textContent = "Paper Orientation"
   header.append(title)
 
+  const actions = document.createElement("div")
+  actions.className = "orientationHeaderActions"
+
+  const regenerateButton = document.createElement("button")
+  regenerateButton.type = "button"
+  regenerateButton.className = "orientationIconButton"
+  regenerateButton.dataset.orientationAction = "regenerate"
+  regenerateButton.title = "Regenerate orientation"
+  regenerateButton.setAttribute("aria-label", "Regenerate orientation")
+  const regenerateIcon = document.createElement("img")
+  regenerateIcon.className = "orientationIconImage"
+  regenerateIcon.alt = ""
+  regenerateIcon.src =
+    window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? ICON_REGENERATE_LIGHT_URL
+      : ICON_REGENERATE_DARK_URL
+  regenerateButton.append(regenerateIcon)
+  actions.append(regenerateButton)
+
   const actionButton = document.createElement("button")
   actionButton.type = "button"
   actionButton.className = "orientationAction"
   actionButton.dataset.orientationAction = "collapse"
   actionButton.textContent = actionLabel
-  header.append(actionButton)
+  actions.append(actionButton)
+
+  header.append(actions)
 
   return header
 }
@@ -886,23 +916,74 @@ function renderOrientationReadingMap(container, sections, sectionIntents, mapExp
     mapSection.append(orderHint)
   }
 
-  const list = document.createElement("ol")
+  const list = document.createElement("ul")
   list.className = "orientationReadingMap"
   const limit = Math.min(normalizedSections.length, ORIENTATION_MAX_SECTION_INTENTS)
+  const hasAnyExplicitNumbering = normalizedSections.some((section) => sanitizeText(section?.numbering))
+  const counters = []
   for (let index = 0; index < limit; index += 1) {
     const section = normalizedSections[index]
+    const level = Math.max(1, Math.floor(Number(section?.level) || 1))
+    for (let counterIndex = 0; counterIndex < level - 1; counterIndex += 1) {
+      if (!Number.isFinite(Number(counters[counterIndex]))) {
+        counters[counterIndex] = 1
+      }
+    }
+    counters[level - 1] = (Number(counters[level - 1]) || 0) + 1
+    counters.length = level
+    const computedNumber = counters.join(".")
+    const explicitNumber = sanitizeText(section?.numbering)
+    let numberLabel = explicitNumber || computedNumber
+    if (
+      !explicitNumber &&
+      hasAnyExplicitNumbering &&
+      index === 0 &&
+      /^abstract\b/i.test(sanitizeText(section?.displayTitle || section?.title))
+    ) {
+      numberLabel = "0"
+    }
+
     const item = document.createElement("li")
     item.className = "orientationMapItem"
+    if (level > 1) {
+      item.classList.add("isSubsection")
+    }
+    item.style.setProperty("--outline-level", String(level))
+    item.style.setProperty("--outline-indent", `${Math.max(level - 1, 0) * 14}px`)
 
-    const titleLine = document.createElement("p")
-    titleLine.className = "orientationMapTitle"
-    const levelPrefix =
-      Number(section?.level) > 1 ? `${"> ".repeat(Math.max(Number(section.level) - 1, 0))}` : ""
+    const titleRow = document.createElement("div")
+    titleRow.className = "orientationMapTitle"
+
+    const jumpLink = document.createElement("button")
+    jumpLink.type = "button"
+    jumpLink.className = "orientationMapLink"
+    jumpLink.dataset.orientationAction = "jump-section"
+    jumpLink.dataset.sectionPageIndex = String(Number(section?.pageIndex) || 0)
+    jumpLink.dataset.sectionId = sanitizeText(section?.id)
+    jumpLink.dataset.sectionTitle = sanitizeText(section?.displayTitle || section?.title)
+
+    const numberBadge = document.createElement("span")
+    numberBadge.className = "orientationMapNumber"
+    numberBadge.textContent = `${numberLabel}`
+    jumpLink.append(numberBadge)
+
+    const titleText = document.createElement("span")
+    titleText.className = "orientationMapLinkText"
+    titleText.textContent = clampText(section?.displayTitle || section?.title, 140)
+    jumpLink.append(titleText)
+
     const pageLabel = Number.isFinite(section?.pageIndex) ? `Page ${Number(section.pageIndex) + 1}` : "Page ?"
-    titleLine.textContent = `${levelPrefix}${clampText(section?.title, 140)} - ${pageLabel}`
-    item.append(titleLine)
+    const pageBadge = document.createElement("span")
+    pageBadge.className = "orientationMapPage"
+    pageBadge.textContent = `\u2197 ${pageLabel}`
+    jumpLink.append(pageBadge)
 
-    const intent = intentMap.get(normalizeSectionTitleKey(section?.title))
+    titleRow.append(jumpLink)
+    item.append(titleRow)
+
+    const intent =
+      intentMap.get(normalizeSectionTitleKey(section?.title)) ||
+      intentMap.get(normalizeSectionTitleKey(section?.displayTitle))
     if (intent) {
       const intentLine = document.createElement("p")
       intentLine.className = "orientationMapIntent"
@@ -1216,6 +1297,73 @@ function sanitizeUrlForLog(url) {
   }
 }
 
+function getFilenameFromUrl(url) {
+  const normalizedUrl = sanitizeText(url)
+  if (!normalizedUrl) {
+    return ""
+  }
+
+  const readLastPathSegment = (value) => {
+    const segment = value.split("/").filter(Boolean).pop() || ""
+    if (!segment) {
+      return ""
+    }
+    try {
+      return decodeURIComponent(segment).trim()
+    } catch (_error) {
+      return segment.trim()
+    }
+  }
+
+  try {
+    const parsed = new URL(normalizedUrl)
+    return readLastPathSegment(parsed.pathname || "")
+  } catch (_error) {
+    const withoutQuery = normalizedUrl.split("?")[0].split("#")[0]
+    return readLastPathSegment(withoutQuery)
+  }
+}
+
+function normalizePdfFilename(value) {
+  const normalized = sanitizeText(value)
+  if (!normalized) {
+    return ""
+  }
+  if (normalized.toLowerCase().endsWith(".pdf")) {
+    return normalized
+  }
+  return `${normalized}.pdf`
+}
+
+function getCurrentPdfTitleLabel() {
+  if (!currentPdf) {
+    return ""
+  }
+
+  const filename = normalizePdfFilename(currentPdf.filename)
+  if (filename) {
+    return filename
+  }
+
+  if (currentPdf.sourceType === "remote") {
+    const inferredFilename = normalizePdfFilename(getFilenameFromUrl(currentPdf.url))
+    if (inferredFilename) {
+      return inferredFilename
+    }
+    const safeUrl = sanitizeUrlForLog(currentPdf.url)
+    if (safeUrl) {
+      return safeUrl
+    }
+  }
+
+  return "document.pdf"
+}
+
+function updateDocumentTitle() {
+  const titleLabel = getCurrentPdfTitleLabel()
+  document.title = titleLabel ? `${titleLabel} - ${DEFAULT_VIEWER_TITLE}` : DEFAULT_VIEWER_TITLE
+}
+
 function getViewerBaseUrl() {
   return `${location.origin}${location.pathname}`;
 }
@@ -1321,6 +1469,29 @@ function createSectionId(title, pageIndex, position) {
   return `sec_${Math.max(pageIndex, 0)}_${position}_${safeSlug}`
 }
 
+function parseSectionTitleNumbering(rawTitle) {
+  const title = sanitizeText(rawTitle)
+  if (!title) {
+    return {
+      numbering: "",
+      displayTitle: ""
+    }
+  }
+
+  const matched = title.match(/^((?:\d+(?:\.\d+)*|[IVXLCM]+))(?:[\.\)]?)\s+(.+)$/i)
+  if (!matched) {
+    return {
+      numbering: "",
+      displayTitle: title
+    }
+  }
+
+  return {
+    numbering: sanitizeText(matched[1]).replace(/\.$/, ""),
+    displayTitle: sanitizeText(matched[2]) || title
+  }
+}
+
 function normalizeReadingMapSections(sections) {
   if (!Array.isArray(sections)) {
     return []
@@ -1348,8 +1519,11 @@ function normalizeReadingMapSections(sections) {
     if (normalizedTitle === lastTitle && section.pageIndex <= lastPage + 1) {
       continue
     }
+    const titleParts = parseSectionTitleNumbering(section.title)
     normalized.push({
       id: createSectionId(section.title, section.pageIndex, normalized.length),
+      numbering: titleParts.numbering,
+      displayTitle: titleParts.displayTitle,
       ...section
     })
     lastTitle = normalizedTitle
@@ -1366,6 +1540,10 @@ function isLoadTokenCurrent(loadToken) {
     Boolean(renderState.pdfDoc) &&
     renderState.pdfDoc === currentPdf.pdfDocRef
   )
+}
+
+function isOrientationRunCurrent(loadToken, runToken) {
+  return isLoadTokenCurrent(loadToken) && runToken === orientationRunToken
 }
 
 function updateOrientationLoadingMessage(message) {
@@ -1570,15 +1748,93 @@ function normalizeOrientationResult(response, sections) {
   }
 }
 
-async function generateOrientationForCurrentDocument(loadToken) {
-  if (!isLoadTokenCurrent(loadToken) || !renderState.pdfDoc) {
+function buildOrientationSummaryFromData(data) {
+  const source = data && typeof data === "object" ? data : {}
+  return {
+    purpose: clampText(source.purpose, 360),
+    contribution: clampText(source.contribution, 360),
+    focusBullets: Array.isArray(source.focusBullets)
+      ? source.focusBullets.map((item) => clampText(item, 220)).filter(Boolean)
+      : [],
+    keyTerms: Array.isArray(source.keyTerms)
+      ? source.keyTerms.map((item) => clampText(item, 48)).filter(Boolean).slice(0, ORIENTATION_MAX_KEY_TERMS)
+      : [],
+    sectionIntents: Array.isArray(source.sectionIntents)
+      ? source.sectionIntents
+          .map((item) => ({
+            title: clampText(item?.title, 140),
+            intent: clampText(item?.intent, 220)
+          }))
+          .filter((item) => item.title && item.intent)
+          .slice(0, ORIENTATION_MAX_SECTION_INTENTS)
+      : []
+  }
+}
+
+function hasOrientationSummary(summary) {
+  const source = summary && typeof summary === "object" ? summary : {}
+  return Boolean(
+    sanitizeText(source.purpose) ||
+      sanitizeText(source.contribution) ||
+      (Array.isArray(source.focusBullets) && source.focusBullets.length > 0) ||
+      (Array.isArray(source.keyTerms) && source.keyTerms.length > 0)
+  )
+}
+
+async function applyCachedOrientationForDocument(docId, loadToken, runToken) {
+  if (!docId || docId === "unknown") {
+    return false
+  }
+  const cachedEntry = await getOrientationCache(docId)
+  if (!cachedEntry || !isOrientationRunCurrent(loadToken, runToken)) {
+    return false
+  }
+  const cachedSections = normalizeReadingMapSections(cachedEntry.sections)
+  const cachedSummary = buildOrientationSummaryFromData(cachedEntry.summary)
+  if (!hasOrientationSummary(cachedSummary) && cachedSections.length === 0) {
+    return false
+  }
+
+  applyReadingMapToCurrentDocument(cachedSections)
+  setOrientationReady({
+    ...cachedSummary,
+    sections: cachedSections
+  })
+  if (sidebarUiState.activeTab === "orientation") {
+    renderPanel()
+  }
+  return true
+}
+
+async function persistOrientationForDocument(docId, sections, summary) {
+  if (!docId || docId === "unknown") {
+    return
+  }
+  await setOrientationCache(docId, {
+    updatedAt: Date.now(),
+    sections,
+    summary
+  })
+}
+
+async function generateOrientationForCurrentDocument(loadToken, { force = false } = {}) {
+  const runToken = ++orientationRunToken
+  if (!isOrientationRunCurrent(loadToken, runToken) || !renderState.pdfDoc) {
     return
   }
 
   try {
-    updateOrientationLoadingMessage("Generating orientation...")
+    const docId = deriveDocId(currentPdf)
+    if (!force) {
+      const usedCache = await applyCachedOrientationForDocument(docId, loadToken, runToken)
+      if (usedCache) {
+        return
+      }
+    }
+
+    updateOrientationLoadingMessage(force ? "Regenerating orientation..." : "Generating orientation...")
     const outline = await extractOutline(renderState.pdfDoc)
-    if (!isLoadTokenCurrent(loadToken)) {
+    if (!isOrientationRunCurrent(loadToken, runToken)) {
       return
     }
 
@@ -1587,7 +1843,7 @@ async function generateOrientationForCurrentDocument(loadToken) {
     updateOrientationLoadingMessage("Summarizing purpose and reading map...")
 
     const orientationInput = await buildOrientationInput(renderState.pdfDoc, sections)
-    if (!isLoadTokenCurrent(loadToken)) {
+    if (!isOrientationRunCurrent(loadToken, runToken)) {
       return
     }
 
@@ -1597,16 +1853,19 @@ async function generateOrientationForCurrentDocument(loadToken) {
       headings: orientationInput.headings,
       readingMode: getReadingModeOrDefault()
     })
-    if (!isLoadTokenCurrent(loadToken)) {
+    if (!isOrientationRunCurrent(loadToken, runToken)) {
       return
     }
 
-    setOrientationReady(normalizeOrientationResult(response, sections))
+    const normalizedOrientation = normalizeOrientationResult(response, sections)
+    const orientationSummary = buildOrientationSummaryFromData(normalizedOrientation)
+    setOrientationReady(normalizedOrientation)
+    void persistOrientationForDocument(docId, sections, orientationSummary)
     if (sidebarUiState.activeTab === "orientation") {
       renderPanel()
     }
   } catch (error) {
-    if (!isLoadTokenCurrent(loadToken)) {
+    if (!isOrientationRunCurrent(loadToken, runToken)) {
       return
     }
     logger.warn("Orientation generation failed", {
@@ -3174,6 +3433,21 @@ async function handlePanelCardAction(event) {
       toggleOrientationMapExpanded(false)
       return
     }
+    if (action === "regenerate") {
+      if (renderState.pdfDoc && currentPdf) {
+        void generateOrientationForCurrentDocument(renderState.loadToken, { force: true })
+      }
+      return
+    }
+    if (action === "jump-section") {
+      const pageIndex = parseOptionalPageIndex(orientationButton.dataset.sectionPageIndex)
+      if (pageIndex != null) {
+        scrollToPage(pageIndex + 1, "smooth")
+        const sectionTitle = sanitizeText(orientationButton.dataset.sectionTitle)
+        setStatus(sectionTitle ? `Jumped to ${sectionTitle} (Page ${pageIndex + 1})` : `Jumped to Page ${pageIndex + 1}`)
+      }
+      return
+    }
   }
 
   const termButton = eventTarget.closest("button[data-term-action]")
@@ -3935,6 +4209,7 @@ function handleLoadFailure(sourceType, error) {
     failedUrl.toLowerCase().startsWith("file://");
 
   currentPdf = null;
+  updateDocumentTitle();
   clearContextScopeTransientStatus();
   renderState.pdfDoc = null;
   renderState.loadingTask = null;
@@ -3997,6 +4272,7 @@ async function loadPdfSource(source, documentParams) {
     readingMap: { sections: [] },
     pdfDocRef: null
   };
+  updateDocumentTitle();
   clearContextScopeTransientStatus();
   sidebarUiState.docId = deriveDocId(currentPdf);
   sidebarUiState.cards = [];
@@ -4107,6 +4383,7 @@ async function loadPdfFromRemoteUrl(srcUrl) {
   await loadPdfSource(
     {
       sourceType: "remote",
+      filename: normalizePdfFilename(getFilenameFromUrl(srcUrl)),
       url: srcUrl
     },
     {
@@ -4401,6 +4678,7 @@ setActiveTab("orientation");
 ensureScaleFactor();
 initializeSidebarState();
 updatePdfControls();
+updateDocumentTitle();
 if (src) {
   void loadPdfFromRemoteUrl(src);
 } else {

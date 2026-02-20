@@ -6,6 +6,7 @@ const SETTINGS_KEY = "settings";
 const CARDS_BY_DOC_ID_KEY = "cardsByDocId";
 const GLOSSARY_BY_DOC_ID_KEY = "glossaryByDocId";
 const OPENAI_FILE_IDS_BY_DOC_ID_KEY = "openaiFileIdsByDocId";
+const ORIENTATION_CACHE_BY_DOC_ID_KEY = "orientationCacheByDocId";
 
 function getStorageArea() {
   try {
@@ -101,6 +102,90 @@ function ensureObjectMap(value) {
   return {}
 }
 
+function normalizeText(value) {
+  return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : ""
+}
+
+function truncateText(value, maxLength) {
+  const text = normalizeText(value)
+  if (!text) {
+    return ""
+  }
+  if (!Number.isFinite(maxLength) || maxLength < 1 || text.length <= maxLength) {
+    return text
+  }
+  return text.slice(0, maxLength).trim()
+}
+
+function normalizeNumber(value, fallback, min, max) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) {
+    return fallback
+  }
+  return Math.min(max, Math.max(min, Math.floor(numeric)))
+}
+
+function normalizeStringList(list, maxItems, maxLength) {
+  const source = Array.isArray(list) ? list : []
+  return source.map((item) => truncateText(item, maxLength)).filter(Boolean).slice(0, maxItems)
+}
+
+function normalizeSectionIntentList(list) {
+  const source = Array.isArray(list) ? list : []
+  return source
+    .map((item) => ({
+      title: truncateText(item?.title, 140),
+      intent: truncateText(item?.intent, 220)
+    }))
+    .filter((item) => item.title && item.intent)
+    .slice(0, 40)
+}
+
+function normalizeOrientationSections(list) {
+  const source = Array.isArray(list) ? list : []
+  return source
+    .map((section, index) => {
+      const title = truncateText(section?.title, 180)
+      const numericPageIndex = Number(section?.pageIndex)
+      if (!Number.isFinite(numericPageIndex) || numericPageIndex < 0) {
+        return null
+      }
+      const pageIndex = Math.floor(numericPageIndex)
+      const level = normalizeNumber(section?.level, 1, 1, 8)
+      if (!title) {
+        return null
+      }
+      const sourceType = section?.source === "outline" ? "outline" : "heuristic"
+      const sectionId = truncateText(section?.id, 80) || `sec_${pageIndex}_${index}`
+      return {
+        id: sectionId,
+        title,
+        pageIndex,
+        level,
+        source: sourceType
+      }
+    })
+    .filter(Boolean)
+    .slice(0, 280)
+}
+
+function normalizeOrientationCacheEntry(entry) {
+  const source = entry && typeof entry === "object" ? entry : {}
+  const sections = normalizeOrientationSections(source.sections)
+  return {
+    version: 1,
+    updatedAt: Number.isFinite(source.updatedAt) ? Number(source.updatedAt) : Date.now(),
+    sections,
+    summary: {
+      purpose: truncateText(source.summary?.purpose, 400),
+      contribution: truncateText(source.summary?.contribution, 400),
+      focusBullets: normalizeStringList(source.summary?.focusBullets, 8, 220),
+      keyTerms: normalizeStringList(source.summary?.keyTerms, 12, 60),
+      sectionIntents: normalizeSectionIntentList(source.summary?.sectionIntents)
+    }
+  }
+}
+
 function normalizeGlossaryTerm(termObj) {
   const input = termObj && typeof termObj === "object" ? termObj : {}
   const normalizedGrounding = input.grounding && typeof input.grounding === "object" ? input.grounding : {}
@@ -147,6 +232,11 @@ function normalizeGlossaryList(value) {
 async function getOpenAIFileIdsByDocIdMap() {
   const values = await get({ [OPENAI_FILE_IDS_BY_DOC_ID_KEY]: {} })
   return ensureObjectMap(values?.[OPENAI_FILE_IDS_BY_DOC_ID_KEY])
+}
+
+async function getOrientationCacheByDocIdMap() {
+  const values = await get({ [ORIENTATION_CACHE_BY_DOC_ID_KEY]: {} })
+  return ensureObjectMap(values?.[ORIENTATION_CACHE_BY_DOC_ID_KEY])
 }
 
 async function getCardsByDocIdMap() {
@@ -261,4 +351,37 @@ export async function clearOpenAIFileId(docId) {
   }
   delete mapping[normalizedDocId]
   return set({ [OPENAI_FILE_IDS_BY_DOC_ID_KEY]: mapping })
+}
+
+export async function getOrientationCache(docId) {
+  const normalizedDocId = normalizeDocId(docId)
+  if (!normalizedDocId || normalizedDocId === "unknown") {
+    return null
+  }
+  const mapping = await getOrientationCacheByDocIdMap()
+  const entry = mapping[normalizedDocId]
+  if (!entry || typeof entry !== "object") {
+    return null
+  }
+  return normalizeOrientationCacheEntry(entry)
+}
+
+export async function setOrientationCache(docId, entry) {
+  const normalizedDocId = normalizeDocId(docId)
+  if (!normalizedDocId || normalizedDocId === "unknown") {
+    return false
+  }
+  const mapping = await getOrientationCacheByDocIdMap()
+  mapping[normalizedDocId] = normalizeOrientationCacheEntry(entry)
+  return set({ [ORIENTATION_CACHE_BY_DOC_ID_KEY]: mapping })
+}
+
+export async function clearOrientationCache(docId) {
+  const normalizedDocId = normalizeDocId(docId)
+  const mapping = await getOrientationCacheByDocIdMap()
+  if (!(normalizedDocId in mapping)) {
+    return true
+  }
+  delete mapping[normalizedDocId]
+  return set({ [ORIENTATION_CACHE_BY_DOC_ID_KEY]: mapping })
 }

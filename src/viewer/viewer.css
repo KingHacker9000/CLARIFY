@@ -500,6 +500,12 @@ body.resizingSidebar .sidebarResizeHandle::before,
   gap: 8px;
 }
 
+.orientationHeaderActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .orientationAction,
 .orientationChip,
 .orientationToggleMap {
@@ -512,9 +518,36 @@ body.resizingSidebar .sidebarResizeHandle::before,
   cursor: pointer;
 }
 
+.orientationIconButton {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fdfdfb;
+  color: var(--text);
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.orientationIconImage {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  display: block;
+}
+
 .orientationAction:hover,
 .orientationChip:hover,
 .orientationToggleMap:hover {
+  background: #f2f2eb;
+}
+
+.orientationIconButton:hover {
   background: #f2f2eb;
 }
 
@@ -620,7 +653,8 @@ body.resizingSidebar .sidebarResizeHandle::before,
 
 .orientationReadingMap {
   margin: 0;
-  padding-left: 18px;
+  padding-left: 0;
+  list-style: none;
   display: grid;
   gap: 8px;
 }
@@ -628,6 +662,13 @@ body.resizingSidebar .sidebarResizeHandle::before,
 .orientationMapItem {
   display: grid;
   gap: 3px;
+  padding-left: var(--outline-indent, 0px);
+}
+
+.orientationMapItem.isSubsection {
+  border-left: 1px dashed #e1e1d5;
+  margin-left: 2px;
+  padding-left: calc(var(--outline-indent, 0px) + 8px);
 }
 
 .orientationMapTitle,
@@ -636,14 +677,59 @@ body.resizingSidebar .sidebarResizeHandle::before,
 }
 
 .orientationMapTitle {
+  display: flex;
+}
+
+.orientationMapLink {
+  width: 100%;
+  border: 1px solid #deded2;
+  border-radius: 8px;
+  background: #fafaf6;
+  color: #2f2f2a;
+  cursor: pointer;
+  font: inherit;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  padding: 6px 8px;
+}
+
+.orientationMapLink:hover {
+  background: #f2f2ea;
+  border-color: #d0d0c2;
+}
+
+.orientationMapLink:focus-visible,
+.orientationIconButton:focus-visible {
+  outline: 2px solid #7b9ef5;
+  outline-offset: 1px;
+}
+
+.orientationMapNumber {
+  min-width: 24px;
+  color: #6e6e64;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.orientationMapLinkText {
   font-size: 12px;
-  color: #53534b;
+  color: #2f2f2a;
+  line-height: 1.35;
+}
+
+.orientationMapPage {
+  font-size: 11px;
+  color: #64645a;
 }
 
 .orientationMapIntent {
   font-size: 12px;
   color: #2e2e29;
   line-height: 1.4;
+  margin-left: 34px;
 }
 
 .orientationError {
