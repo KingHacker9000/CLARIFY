@@ -536,7 +536,7 @@ body.resizingSidebar .sidebarResizeHandle::before,
   background: #f8f8f4;
   padding: 8px;
   display: grid;
-  gap: 6px;
+  gap: 8px;
 }
 
 .cardGroundingLabel {
@@ -545,21 +545,49 @@ body.resizingSidebar .sidebarResizeHandle::before,
   color: var(--muted);
 }
 
-.cardQuote {
-  margin: 0;
-  padding: 6px 8px;
-  border-left: 2px solid #cfcfbf;
+.cardGroundingSource {
+  width: 100%;
+  appearance: none;
+  border: 1px solid #d7d7ca;
+  border-radius: 10px;
   background: #fff;
+  padding: 8px 10px;
+  display: grid;
+  gap: 6px;
+  font: inherit;
+  text-align: left;
   color: #45453f;
-  line-height: 1.35;
-  max-height: 3.1em;
-  overflow: hidden;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.cardGroundingSource:hover {
+  background: #fdfcf4;
+  border-color: #c6c6b3;
+}
+
+.cardGroundingSource:focus-visible {
+  outline: 2px solid #7b9ef5;
+  outline-offset: 1px;
+}
+
+.cardGroundingSourceLabel {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6d6d63;
+  font-weight: 600;
+}
+
+.cardGroundingSourceText {
+  margin: 0;
+  line-height: 1.42;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .cardCitationQuote {
-  margin-top: 2px;
   font-size: 12px;
-  max-height: 4em;
 }
 
 .cardDetails {
@@ -667,9 +695,9 @@ body.resizingSidebar .sidebarResizeHandle::before,
   padding: 6px 8px;
   border-left: 2px solid #d8d8cb;
   background: #f7f7f2;
-  line-height: 1.35;
-  max-height: 3.1em;
-  overflow: hidden;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .glossaryFooter {
@@ -685,9 +713,9 @@ body.resizingSidebar .sidebarResizeHandle::before,
 }
 
 .textLayer .clarify-highlight {
-  background: rgba(255, 222, 111, 0.62);
+  background: rgba(110, 172, 255, 0.38);
   border-radius: 3px;
-  box-shadow: inset 0 -1px 0 rgba(190, 145, 22, 0.35);
+  box-shadow: inset 0 -1px 0 rgba(57, 116, 196, 0.4);
 }
 
 .textLayer .clarify-highlight-pulse {
@@ -699,18 +727,14 @@ body.resizingSidebar .sidebarResizeHandle::before,
   z-index: 2;
   pointer-events: none;
   border-radius: 4px;
-  background: rgba(255, 221, 105, 0.3);
-  outline: 1px solid rgba(188, 141, 10, 0.45);
+  background: rgba(103, 170, 255, 0.24);
+  outline: 1px solid rgba(80, 138, 226, 0.52);
   animation: clarifyOverlayFade 0.7s ease-out forwards;
 }
 
 .textLayer .clarify-highlight-overlay-approx {
-  background: rgba(103, 170, 255, 0.2);
-  outline-color: rgba(80, 138, 226, 0.52);
-}
-
-.textLayer .sourceTextFlash {
-  animation: sourceTextFlashPulse 1s ease-out;
+  background: rgba(103, 170, 255, 0.28);
+  outline-color: rgba(66, 126, 212, 0.62);
 }
 
 @keyframes sourceFlashPulse {
@@ -724,23 +748,12 @@ body.resizingSidebar .sidebarResizeHandle::before,
   }
 }
 
-@keyframes sourceTextFlashPulse {
-  0% {
-    background-color: rgba(255, 226, 107, 0.92);
-    outline: 1px solid rgba(194, 150, 23, 0.9);
-  }
-  100% {
-    background-color: transparent;
-    outline: 1px solid transparent;
-  }
-}
-
 @keyframes clarifyHighlightPulse {
   0% {
-    background: rgba(255, 233, 136, 0.92);
+    background: rgba(126, 185, 255, 0.6);
   }
   100% {
-    background: rgba(255, 222, 111, 0.62);
+    background: rgba(110, 172, 255, 0.38);
   }
 }
 

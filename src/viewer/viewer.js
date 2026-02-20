@@ -34,12 +34,13 @@ const SIDEBAR_MAX_WIDTH_RATIO = 1 / 3;
 const SIDEBAR_COLLAPSE_TRIGGER_WIDTH = 200;
 const PDF_PANE_MIN_WIDTH = 280;
 const SIDEBAR_COLLAPSED_WIDTH = 56;
-const CARD_SOURCE_FLASH_MS = 800;
 const SOURCE_HIGHLIGHT_DELAY_MS = 80;
 const MAX_CONTEXT_LENGTH = 800;
 const PAGE_VISIBILITY_THRESHOLD = 0.6;
 const REMOTE_LOAD_ERROR_MESSAGE =
   "This PDF could not be loaded due to site restrictions (CORS/login). Try downloading and opening it locally.";
+const FILE_URL_LOAD_HINT_MESSAGE =
+  "If this file URL doesn't load, open it locally using the Open PDF button.";
 const WHOLE_PDF_LOCAL_REQUIRED_MESSAGE =
   "Whole PDF requires local access. Download this PDF and open it locally.";
 
@@ -143,6 +144,57 @@ function clampText(value, maxLength = 220) {
     return normalized
   }
   return `${normalized.slice(0, Math.max(maxLength - 3, 1)).trim()}...`
+}
+
+function truncateText(value, maxLength = 220) {
+  const normalized = sanitizeText(value)
+  if (!normalized) {
+    return ""
+  }
+  if (!Number.isFinite(maxLength) || maxLength < 1 || normalized.length <= maxLength) {
+    return normalized
+  }
+  return normalized.slice(0, maxLength).trim()
+}
+
+function parseOptionalPageIndex(value) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    return null
+  }
+  return Math.floor(numeric)
+}
+
+function createGroundingSourceTrigger({ cardId, sourceText, pageIndex, label, compact = false }) {
+  const trigger = document.createElement("button")
+  trigger.type = "button"
+  trigger.className = "cardGroundingSource"
+  if (compact) {
+    trigger.classList.add("cardCitationQuote")
+  }
+  trigger.dataset.cardAction = "jump"
+  trigger.dataset.cardId = cardId
+  trigger.dataset.sourceStrict = "true"
+
+  const normalizedText = sanitizeText(sourceText)
+  if (normalizedText) {
+    trigger.dataset.sourceText = normalizedText
+  }
+  if (Number.isFinite(pageIndex)) {
+    trigger.dataset.sourcePageIndex = String(Math.max(0, Math.floor(Number(pageIndex))))
+  }
+
+  const badge = document.createElement("span")
+  badge.className = "cardGroundingSourceLabel"
+  const pageLabel = Number.isFinite(pageIndex) ? `Page ${Number(pageIndex) + 1}` : "Page ?"
+  badge.textContent = `${label} - ${pageLabel}`
+
+  const text = document.createElement("span")
+  text.className = "cardGroundingSourceText"
+  text.textContent = normalizedText || "No quote available."
+
+  trigger.append(badge, text)
+  return trigger
 }
 
 function normalizeTabName(tab) {
@@ -269,21 +321,32 @@ function createCardNode(card) {
   const groundingLabel = document.createElement("p")
   groundingLabel.className = "cardGroundingLabel"
   groundingLabel.textContent = `Grounded in: ${pageLabel} - ${sectionTitle}`
-  const quote = document.createElement("blockquote")
-  quote.className = "cardQuote"
-  quote.textContent = clampText(card.grounding?.quote, 300) || "No quote available."
+  const quote = createGroundingSourceTrigger({
+    cardId: card.id,
+    sourceText: card.grounding?.quote,
+    pageIndex: Number.isFinite(card.grounding?.pageIndex) ? Number(card.grounding.pageIndex) : null,
+    label: "Primary quote"
+  })
   const citationQuotes = Array.isArray(card.grounding?.citationQuotes)
-    ? card.grounding.citationQuotes.filter(Boolean).slice(0, 2)
+    ? card.grounding.citationQuotes.filter(Boolean).slice(0, 4)
     : []
   const citationPages = Array.isArray(card.grounding?.citationPages)
     ? card.grounding.citationPages
     : []
   const citationsFragment = document.createDocumentFragment()
   citationQuotes.forEach((citationQuote, index) => {
-    const citation = document.createElement("blockquote")
-    citation.className = "cardQuote cardCitationQuote"
-    const citationPage = Number.isFinite(citationPages[index]) ? ` (p. ${Number(citationPages[index]) + 1})` : ""
-    citation.textContent = `Citation${citationPage}: ${clampText(citationQuote, 260)}`
+    const citationPageIndex = Number.isFinite(citationPages[index])
+      ? Number(citationPages[index])
+      : Number.isFinite(card.grounding?.pageIndex)
+        ? Number(card.grounding.pageIndex)
+        : null
+    const citation = createGroundingSourceTrigger({
+      cardId: card.id,
+      sourceText: citationQuote,
+      pageIndex: citationPageIndex,
+      label: `Citation ${index + 1}`,
+      compact: true
+    })
     citationsFragment.append(citation)
   })
   const jumpButton = document.createElement("button")
@@ -431,7 +494,7 @@ function createGlossaryNode(term) {
   if (term.grounding?.quote) {
     const quote = document.createElement("blockquote")
     quote.className = "glossaryQuote"
-    quote.textContent = clampText(term.grounding.quote, 300)
+    quote.textContent = sanitizeText(term.grounding.quote)
     article.append(quote)
   }
 
@@ -645,10 +708,6 @@ function inferOpenedPdfSourceFromSrc(src) {
   }
 
   const lowered = src.toLowerCase();
-  if (lowered.startsWith("file:")) {
-    return "local";
-  }
-
   if (lowered.startsWith("http:") || lowered.startsWith("https:")) {
     return "remote";
   }
@@ -876,7 +935,7 @@ function buildCardLocator(payload) {
     : 0
 
   return {
-    selectedText: clampText(payload?.selectedText, 200),
+    selectedText: truncateText(payload?.selectedText, 200),
     pageIndex: resolvedPageIndex,
     contextHint: buildLocatorContextHint(payload?.selectedText, payload?.contextWindow)
   }
@@ -1168,80 +1227,6 @@ function getPageNodeByIndex(pageIndex) {
   return pdfRoot.querySelector(`.pdfPageShell[data-page-index="${pageIndex}"]`)
 }
 
-function pickSourceFlashTargets(textLayer, selectedText) {
-  if (!(textLayer instanceof HTMLElement)) {
-    return []
-  }
-
-  const spans = Array.from(textLayer.querySelectorAll("span"))
-  if (!spans.length) {
-    return [textLayer]
-  }
-
-  const normalizedSelection = sanitizeText(selectedText).toLowerCase()
-  if (!normalizedSelection) {
-    return [textLayer]
-  }
-
-  const exactSpan = spans.find((span) =>
-    sanitizeText(span.textContent || "").toLowerCase().includes(normalizedSelection)
-  )
-  if (exactSpan) {
-    return [exactSpan]
-  }
-
-  const keyTokens = normalizedSelection.split(" ").filter((token) => token.length >= 4)
-  if (!keyTokens.length) {
-    return [textLayer]
-  }
-
-  const matchIndex = spans.findIndex((span) => {
-    const spanText = sanitizeText(span.textContent || "").toLowerCase()
-    return keyTokens.some((token) => spanText.includes(token))
-  })
-  if (matchIndex < 0) {
-    return [textLayer]
-  }
-
-  const start = Math.max(matchIndex - 1, 0)
-  const end = Math.min(matchIndex + 2, spans.length)
-  return spans.slice(start, end)
-}
-
-function flashSource(pageNode, selectedText) {
-  if (!(pageNode instanceof HTMLElement)) {
-    return
-  }
-
-  const normalizedSelection = sanitizeText(selectedText)
-  if (!normalizedSelection) {
-    pageNode.classList.add("sourceFlash")
-    setTimeout(() => {
-      pageNode.classList.remove("sourceFlash")
-    }, CARD_SOURCE_FLASH_MS)
-    return
-  }
-
-  const textLayer = pageNode.querySelector(".textLayer")
-  const targets = pickSourceFlashTargets(textLayer, normalizedSelection)
-  if (!targets.length) {
-    pageNode.classList.add("sourceFlash")
-    setTimeout(() => {
-      pageNode.classList.remove("sourceFlash")
-    }, CARD_SOURCE_FLASH_MS)
-    return
-  }
-
-  for (const target of targets) {
-    target.classList.add("sourceTextFlash")
-  }
-  setTimeout(() => {
-    for (const target of targets) {
-      target.classList.remove("sourceTextFlash")
-    }
-  }, CARD_SOURCE_FLASH_MS)
-}
-
 function waitForPageInView(pageNode) {
   if (!(pageNode instanceof HTMLElement)) {
     return Promise.resolve()
@@ -1283,7 +1268,10 @@ function waitForHighlightTiming() {
   })
 }
 
-function resolveCardPageIndex(card) {
+function resolveCardPageIndex(card, preferredPageIndex = null) {
+  if (Number.isFinite(preferredPageIndex) && preferredPageIndex >= 0) {
+    return Math.max(0, Number(preferredPageIndex))
+  }
   if (Number.isFinite(card?.grounding?.pageIndex)) {
     return Math.max(0, Number(card.grounding.pageIndex))
   }
@@ -1293,22 +1281,113 @@ function resolveCardPageIndex(card) {
   return null
 }
 
-function resolveCardNeedleText(card) {
-  const locatorText = clampText(card?.locator?.selectedText, 200)
-  if (locatorText) {
-    return locatorText
-  }
-
-  const quoteText = sanitizeText(card?.grounding?.quote || "")
-  if (quoteText) {
-    return quoteText.slice(0, 80)
-  }
-
-  return clampText(card?.selectedText || card?.title || "", 80)
+function normalizeNeedleText(value) {
+  return sanitizeText(value)
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, "\"")
+    .replace(/\u2026/g, "...")
 }
 
-async function jumpToCardSource(card) {
-  const pageIndex = resolveCardPageIndex(card)
+function appendNeedleCandidate(candidates, dedupeSet, value) {
+  const normalized = normalizeNeedleText(value)
+  if (!normalized) {
+    return
+  }
+
+  const queue = [normalized]
+  const withoutPrefix = normalized.replace(/^(citation|quote)\s*\d*\s*:\s*/i, "")
+  if (withoutPrefix !== normalized) {
+    queue.push(withoutPrefix)
+  }
+
+  const fragments = normalized
+    .split(/\.\.\.+/)
+    .map((part) => sanitizeText(part))
+    .filter((part) => part.length >= 14)
+    .sort((a, b) => b.length - a.length)
+  queue.push(...fragments.slice(0, 3))
+
+  for (const candidate of queue) {
+    const trimmed = truncateText(candidate, 260)
+    if (!trimmed) {
+      continue
+    }
+
+    const key = trimmed.toLowerCase()
+    if (!dedupeSet.has(key)) {
+      dedupeSet.add(key)
+      candidates.push(trimmed)
+    }
+
+    if (trimmed.length > 180) {
+      const startSlice = trimmed.slice(0, 180).trim()
+      const endSlice = trimmed.slice(-180).trim()
+      const sliceCandidates = [startSlice, endSlice]
+      for (const sliceCandidate of sliceCandidates) {
+        const sliceKey = sliceCandidate.toLowerCase()
+        if (sliceCandidate && !dedupeSet.has(sliceKey)) {
+          dedupeSet.add(sliceKey)
+          candidates.push(sliceCandidate)
+        }
+      }
+    }
+  }
+}
+
+function buildCardNeedleCandidates(card, preferredText = "", options = {}) {
+  const candidates = []
+  const dedupeSet = new Set()
+  const strictSource = Boolean(options.strictSource)
+  appendNeedleCandidate(candidates, dedupeSet, preferredText)
+  if (strictSource && candidates.length > 0) {
+    return candidates.slice(0, 10)
+  }
+  appendNeedleCandidate(candidates, dedupeSet, card?.locator?.selectedText)
+  appendNeedleCandidate(candidates, dedupeSet, card?.selectedText)
+  appendNeedleCandidate(candidates, dedupeSet, card?.grounding?.quote)
+  appendNeedleCandidate(candidates, dedupeSet, card?.locator?.contextHint)
+  appendNeedleCandidate(candidates, dedupeSet, card?.title)
+
+  const citationQuotes = Array.isArray(card?.grounding?.citationQuotes)
+    ? card.grounding.citationQuotes
+    : []
+  for (const citationQuote of citationQuotes) {
+    appendNeedleCandidate(candidates, dedupeSet, citationQuote)
+    if (candidates.length >= 14) {
+      break
+    }
+  }
+
+  return candidates.slice(0, 14)
+}
+
+function tryHighlightNeedles(pageIndex, needleCandidates) {
+  const candidates = needleCandidates.length > 0 ? needleCandidates : [""]
+  for (const preferExact of [true, false]) {
+    for (const needleText of candidates) {
+      const result = highlightOnPage({
+        pdfRoot,
+        pageIndex,
+        needleText,
+        preferExact
+      })
+      if (result.success) {
+        return { ...result, needleText, preferExact }
+      }
+    }
+  }
+
+  return {
+    success: false,
+    matchesCount: 0,
+    needleText: candidates[0] || "",
+    preferExact: false
+  }
+}
+
+async function jumpToCardSource(card, options = {}) {
+  const preferredPageIndex = parseOptionalPageIndex(options?.preferredPageIndex)
+  const pageIndex = resolveCardPageIndex(card, preferredPageIndex)
   if (pageIndex == null) {
     return
   }
@@ -1322,20 +1401,17 @@ async function jumpToCardSource(card) {
   await waitForPageInView(pageNode)
   await waitForHighlightTiming()
 
-  const highlightResult = highlightOnPage({
-    pdfRoot,
-    pageIndex,
-    needleText: resolveCardNeedleText(card),
-    preferExact: true
+  const needleCandidates = buildCardNeedleCandidates(card, options?.preferredText, {
+    strictSource: options?.strictSource
   })
+  const highlightResult = tryHighlightNeedles(pageIndex, needleCandidates)
   logger.info("Jump-to-source highlight result", {
     success: highlightResult.success,
-    matchesCount: highlightResult.matchesCount
+    matchesCount: highlightResult.matchesCount,
+    preferExact: highlightResult.preferExact,
+    candidateCount: needleCandidates.length
   })
 
-  if (!highlightResult.success) {
-    flashSource(pageNode, "")
-  }
 }
 
 async function loadCardsForCurrentDocument() {
@@ -1425,7 +1501,11 @@ async function handlePanelCardAction(event) {
   }
 
   if (action === "jump") {
-    void jumpToCardSource(card)
+    void jumpToCardSource(card, {
+      preferredText: button.dataset.sourceText || "",
+      preferredPageIndex: button.dataset.sourcePageIndex,
+      strictSource: button.dataset.sourceStrict === "true"
+    })
     return
   }
 
@@ -2117,6 +2197,12 @@ function scheduleRender(targetPageNumber, loadToken = renderState.loadToken) {
 }
 
 function handleLoadFailure(sourceType, error) {
+  const failedUrl = currentPdf?.url;
+  const failedRemoteFileUrl =
+    sourceType === "remote" &&
+    typeof failedUrl === "string" &&
+    failedUrl.toLowerCase().startsWith("file://");
+
   currentPdf = null;
   clearContextScopeTransientStatus();
   renderState.pdfDoc = null;
@@ -2130,8 +2216,15 @@ function handleLoadFailure(sourceType, error) {
   renderPanel();
 
   if (sourceType === "remote") {
-    showPdfMessage(REMOTE_LOAD_ERROR_MESSAGE);
-    setStatus("Remote PDF blocked by site restrictions");
+    const remoteFailureMessage = failedRemoteFileUrl
+      ? `${REMOTE_LOAD_ERROR_MESSAGE} ${FILE_URL_LOAD_HINT_MESSAGE}`
+      : REMOTE_LOAD_ERROR_MESSAGE;
+    showPdfMessage(remoteFailureMessage);
+    setStatus(
+      failedRemoteFileUrl
+        ? `Failed to load file URL. ${FILE_URL_LOAD_HINT_MESSAGE}`
+        : "Remote PDF blocked by site restrictions"
+    );
   } else {
     showPdfMessage("This file could not be opened. Try another PDF.");
     setStatus("Failed to load local PDF");
@@ -2259,13 +2352,18 @@ async function loadPdfFromRemoteUrl(srcUrl) {
     return;
   }
 
+  const isFileUrl = srcUrl.toLowerCase().startsWith("file://");
   openedPdfSource = "remote";
   logger.info("Loading PDF remote: url (ok), but do not log tokens", {
     url: sanitizeUrlForLog(srcUrl)
   });
 
   setActiveTab("orientation");
-  setStatus(`Loading: ${sanitizeUrlForLog(srcUrl)}`);
+  setStatus(
+    isFileUrl
+      ? `Loading file URL. ${FILE_URL_LOAD_HINT_MESSAGE}`
+      : `Loading: ${sanitizeUrlForLog(srcUrl)}`
+  );
 
   await loadPdfSource(
     {

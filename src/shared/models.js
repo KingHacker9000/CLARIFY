@@ -19,6 +19,17 @@ function clampText(value, maxLength) {
   return `${text.slice(0, Math.max(maxLength - 3, 1)).trim()}...`
 }
 
+function truncateText(value, maxLength) {
+  const text = sanitizeText(value)
+  if (!text) {
+    return ""
+  }
+  if (!Number.isFinite(maxLength) || maxLength < 1 || text.length <= maxLength) {
+    return text
+  }
+  return text.slice(0, maxLength).trim()
+}
+
 function clampWords(value, maxWords) {
   const text = sanitizeText(value)
   if (!text) {
@@ -107,9 +118,9 @@ export function normalizeCard(card) {
       textRange: input.grounding?.textRange ?? null
     },
     locator: {
-      selectedText: clampText(input.locator?.selectedText || input.selectedText || input.title, 200),
+      selectedText: truncateText(input.locator?.selectedText || input.selectedText || input.title, 200),
       pageIndex: locatorPageIndex,
-      contextHint: clampText(input.locator?.contextHint, 200)
+      contextHint: truncateText(input.locator?.contextHint, 200)
     },
     createdAt:
       typeof input.createdAt === "number" && Number.isFinite(input.createdAt)

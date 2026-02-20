@@ -9,7 +9,77 @@ let activeOverlays = [];
 let clearTimer = null;
 
 function sanitizeNeedle(value) {
-  return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, "\"")
+    .replace(/\u2026/g, "...")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function truncateNeedle(value, maxLength = 260) {
+  const normalized = sanitizeNeedle(value);
+  if (!normalized) {
+    return "";
+  }
+  if (!Number.isFinite(maxLength) || maxLength < 1 || normalized.length <= maxLength) {
+    return normalized;
+  }
+  return normalized.slice(0, maxLength).trim();
+}
+
+function addNeedleCandidate(candidates, dedupeSet, value) {
+  const normalized = truncateNeedle(value);
+  if (!normalized) {
+    return;
+  }
+
+  const queue = [normalized];
+  const withoutPrefix = normalized.replace(/^(citation|quote)\s*\d*\s*:\s*/i, "");
+  if (withoutPrefix !== normalized) {
+    queue.push(withoutPrefix);
+  }
+
+  const fragments = normalized
+    .split(/\.\.\.+/)
+    .map((part) => sanitizeNeedle(part))
+    .filter((part) => part.length >= 14)
+    .sort((a, b) => b.length - a.length);
+  queue.push(...fragments.slice(0, 3));
+
+  for (const candidate of queue) {
+    const trimmed = truncateNeedle(candidate);
+    if (!trimmed) {
+      continue;
+    }
+
+    const key = trimmed.toLowerCase();
+    if (!dedupeSet.has(key)) {
+      dedupeSet.add(key);
+      candidates.push(trimmed);
+    }
+
+    if (trimmed.length > 180) {
+      const slices = [trimmed.slice(0, 180).trim(), trimmed.slice(-180).trim()];
+      for (const sliceCandidate of slices) {
+        const sliceKey = sliceCandidate.toLowerCase();
+        if (sliceCandidate && !dedupeSet.has(sliceKey)) {
+          dedupeSet.add(sliceKey);
+          candidates.push(sliceCandidate);
+        }
+      }
+    }
+  }
+}
+
+function buildNeedleCandidates(needleText) {
+  const candidates = [];
+  const dedupeSet = new Set();
+  addNeedleCandidate(candidates, dedupeSet, needleText);
+  return candidates;
 }
 
 function removeOverlay(overlay) {
@@ -72,6 +142,145 @@ function collapseTextWithMap(text) {
   }
 
   return { collapsed, map };
+}
+
+function isAlphaNumeric(char) {
+  return /^[a-z0-9]$/i.test(char);
+}
+
+function collapseSearchTextWithMap(text) {
+  let collapsed = "";
+  const map = [];
+  let lastWasWhitespace = true;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const lower = char.toLowerCase();
+
+    if (isAlphaNumeric(lower)) {
+      collapsed += lower;
+      map.push(index);
+      lastWasWhitespace = false;
+      continue;
+    }
+
+    if (
+      char === "-" &&
+      index > 0 &&
+      index + 1 < text.length &&
+      isAlphaNumeric(text[index - 1]) &&
+      isAlphaNumeric(text[index + 1])
+    ) {
+      continue;
+    }
+
+    if (/\s/.test(char) || /[^\w\s]/.test(char)) {
+      if (!lastWasWhitespace) {
+        collapsed += " ";
+        map.push(index);
+        lastWasWhitespace = true;
+      }
+      continue;
+    }
+  }
+
+  if (collapsed.endsWith(" ")) {
+    collapsed = collapsed.slice(0, -1);
+    map.pop();
+  }
+
+  return { collapsed, map };
+}
+
+function mapCollapsedRangeToOriginal(map, start, end) {
+  if (!Array.isArray(map) || map.length === 0) {
+    return null;
+  }
+  const clampedStart = Math.min(Math.max(start, 0), map.length - 1);
+  const clampedEnd = Math.min(Math.max(end - 1, clampedStart), map.length - 1);
+  const originalStart = map[clampedStart] ?? 0;
+  const originalEnd = (map[clampedEnd] ?? originalStart) + 1;
+  return { start: originalStart, end: originalEnd };
+}
+
+function findTokenWindowRange(haystack, needle) {
+  const normalizedHaystack = typeof haystack === "string" ? haystack : "";
+  const normalizedNeedle = typeof needle === "string" ? needle : "";
+  if (!normalizedHaystack || !normalizedNeedle) {
+    return null;
+  }
+
+  const tokens = Array.from(
+    new Set(normalizedNeedle.split(" ").map((token) => token.trim()).filter((token) => token.length >= 3))
+  );
+  if (tokens.length < 2) {
+    return null;
+  }
+
+  const anchorToken = [...tokens].sort((a, b) => b.length - a.length)[0];
+  if (!anchorToken) {
+    return null;
+  }
+
+  const threshold = Math.max(2, Math.ceil(tokens.length * 0.5));
+  const targetLength = Math.max(normalizedNeedle.length, 40);
+  let best = null;
+  let cursor = 0;
+  let occurrenceCount = 0;
+
+  while (occurrenceCount < 80) {
+    const hitIndex = normalizedHaystack.indexOf(anchorToken, cursor);
+    if (hitIndex < 0) {
+      break;
+    }
+    occurrenceCount += 1;
+    cursor = hitIndex + Math.max(anchorToken.length, 1);
+
+    const windowStart = Math.max(0, hitIndex - Math.floor(targetLength * 0.3));
+    const windowEnd = Math.min(normalizedHaystack.length, hitIndex + targetLength + Math.floor(targetLength * 0.35));
+    const segment = normalizedHaystack.slice(windowStart, windowEnd);
+    if (!segment) {
+      continue;
+    }
+
+    const matchedTokenIndices = [];
+    for (const token of tokens) {
+      const localIndex = segment.indexOf(token);
+      if (localIndex >= 0) {
+        matchedTokenIndices.push({ token, localIndex });
+      }
+    }
+
+    if (matchedTokenIndices.length < threshold) {
+      continue;
+    }
+
+    const localStart = Math.min(...matchedTokenIndices.map((item) => item.localIndex));
+    const localEnd = Math.max(...matchedTokenIndices.map((item) => item.localIndex + item.token.length));
+    const candidateStart = windowStart + localStart;
+    const candidateEnd = Math.max(windowStart + localEnd, candidateStart + 1);
+    const candidateLength = candidateEnd - candidateStart;
+    const distanceFromTarget = Math.abs(candidateLength - targetLength);
+    const score = matchedTokenIndices.length;
+
+    if (
+      !best ||
+      score > best.score ||
+      (score === best.score && distanceFromTarget < best.distanceFromTarget)
+    ) {
+      best = {
+        score,
+        distanceFromTarget,
+        start: candidateStart,
+        end: candidateEnd
+      };
+    }
+  }
+
+  if (!best) {
+    return null;
+  }
+  return { start: best.start, end: best.end };
 }
 
 function findMatchIndex(haystack, needle, caseInsensitive) {
@@ -146,17 +355,45 @@ function findMatchRange(text, needle, preferExact) {
   }
 
   const collapsedCaseInsensitiveIndex = findMatchIndex(collapsed, collapsedNeedle, true);
-  if (collapsedCaseInsensitiveIndex < 0) {
+  if (collapsedCaseInsensitiveIndex >= 0) {
+    const start = map[Math.min(collapsedCaseInsensitiveIndex, map.length - 1)] ?? 0;
+    const endMapIndex = Math.min(
+      collapsedCaseInsensitiveIndex + Math.max(collapsedNeedle.length - 1, 0),
+      map.length - 1
+    );
+    const end = (map[endMapIndex] ?? start) + 1;
+    return { start, end };
+  }
+
+  const normalizedHaystack = collapseSearchTextWithMap(text);
+  const normalizedNeedleMap = collapseSearchTextWithMap(normalizedNeedle);
+  if (!normalizedHaystack.collapsed || !normalizedHaystack.map.length || !normalizedNeedleMap.collapsed) {
     return null;
   }
 
-  const start = map[Math.min(collapsedCaseInsensitiveIndex, map.length - 1)] ?? 0;
-  const endMapIndex = Math.min(
-    collapsedCaseInsensitiveIndex + Math.max(collapsedNeedle.length - 1, 0),
-    map.length - 1
+  const normalizedIndex = normalizedHaystack.collapsed.indexOf(normalizedNeedleMap.collapsed);
+  if (normalizedIndex >= 0) {
+    return mapCollapsedRangeToOriginal(
+      normalizedHaystack.map,
+      normalizedIndex,
+      normalizedIndex + normalizedNeedleMap.collapsed.length
+    );
+  }
+
+  if (preferExact) {
+    return null;
+  }
+
+  const tokenWindowMatch = findTokenWindowRange(normalizedHaystack.collapsed, normalizedNeedleMap.collapsed);
+  if (!tokenWindowMatch) {
+    return null;
+  }
+
+  return mapCollapsedRangeToOriginal(
+    normalizedHaystack.map,
+    tokenWindowMatch.start,
+    tokenWindowMatch.end
   );
-  const end = (map[endMapIndex] ?? start) + 1;
-  return { start, end };
 }
 
 function buildRangesForMatch(positions, start, end) {
@@ -260,20 +497,49 @@ function buildApproxOverlayRect(textLayer, needleText) {
   }
 
   const matchedSpans = [];
-  for (const span of spans) {
+  for (let index = 0; index < spans.length; index += 1) {
+    const span = spans[index];
     const spanText = sanitizeNeedle(span.textContent || "").toLowerCase();
     if (!spanText) {
       continue;
     }
-    if (tokens.some((token) => spanText.includes(token))) {
-      matchedSpans.push(span);
-      if (matchedSpans.length >= 4) {
-        break;
-      }
+    const tokenHits = tokens.filter((token) => spanText.includes(token));
+    if (tokenHits.length > 0) {
+      matchedSpans.push({ span, index, tokenHits: tokenHits.length });
     }
   }
 
   if (!matchedSpans.length) {
+    return null;
+  }
+
+  let bestCluster = null;
+  for (let start = 0; start < matchedSpans.length; start += 1) {
+    const cluster = [matchedSpans[start]];
+    let score = matchedSpans[start].tokenHits;
+    let end = start + 1;
+
+    while (end < matchedSpans.length) {
+      const previous = matchedSpans[end - 1];
+      const current = matchedSpans[end];
+      if (current.index - previous.index > 2 || cluster.length >= 10) {
+        break;
+      }
+      cluster.push(current);
+      score += current.tokenHits;
+      end += 1;
+    }
+
+    const spanCount = cluster.length;
+    const widthPenalty = spanCount > 1 ? (spanCount - 1) * 0.08 : 0;
+    const clusterScore = score - widthPenalty;
+    if (!bestCluster || clusterScore > bestCluster.score) {
+      bestCluster = { score: clusterScore, cluster };
+    }
+  }
+
+  const targetCluster = bestCluster?.cluster ?? [];
+  if (!targetCluster.length) {
     return null;
   }
 
@@ -283,8 +549,8 @@ function buildApproxOverlayRect(textLayer, needleText) {
   let right = Number.NEGATIVE_INFINITY;
   let bottom = Number.NEGATIVE_INFINITY;
 
-  for (const span of matchedSpans) {
-    const rect = span.getBoundingClientRect();
+  for (const item of targetCluster) {
+    const rect = item.span.getBoundingClientRect();
     left = Math.min(left, rect.left);
     top = Math.min(top, rect.top);
     right = Math.max(right, rect.right);
@@ -342,17 +608,20 @@ export function highlightOnPage({ pdfRoot, pageIndex, needleText, preferExact = 
     return { success: false, matchesCount: 0 };
   }
 
-  const needle = sanitizeNeedle(needleText);
-  if (!needle) {
+  const needleCandidates = buildNeedleCandidates(needleText);
+  if (needleCandidates.length === 0) {
     createOverlay(textLayer, null, FALLBACK_OVERLAY_MS, true);
     startAutoClear(pdfRoot);
     return { success: false, matchesCount: 0 };
   }
 
   const { text, positions } = collectTextMap(textLayer);
-  const match = findMatchRange(text, needle, Boolean(preferExact));
+  for (const needle of needleCandidates) {
+    const match = findMatchRange(text, needle, Boolean(preferExact));
+    if (!match) {
+      continue;
+    }
 
-  if (match) {
     const ranges = buildRangesForMatch(positions, match.start, match.end);
     const marks = [];
     for (let index = ranges.length - 1; index >= 0; index -= 1) {
@@ -370,7 +639,7 @@ export function highlightOnPage({ pdfRoot, pageIndex, needleText, preferExact = 
     }
   }
 
-  const approxRect = buildApproxOverlayRect(textLayer, needle);
+  const approxRect = buildApproxOverlayRect(textLayer, needleCandidates[0]);
   createOverlay(textLayer, approxRect, FALLBACK_OVERLAY_MS, true);
   startAutoClear(pdfRoot);
   return { success: false, matchesCount: 0 };
