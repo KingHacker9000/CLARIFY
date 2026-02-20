@@ -732,6 +732,12 @@ body.resizingSidebar .sidebarResizeHandle::before,
   animation: clarifyOverlayFade 0.7s ease-out forwards;
 }
 
+.textLayer .clarify-highlight-overlay-exact {
+  background: rgba(110, 172, 255, 0.34);
+  outline-color: rgba(63, 122, 206, 0.72);
+  animation: clarifyOverlayExactPulse 0.95s ease-out;
+}
+
 .textLayer .clarify-highlight-overlay-approx {
   background: rgba(103, 170, 255, 0.28);
   outline-color: rgba(66, 126, 212, 0.62);
@@ -763,6 +769,17 @@ body.resizingSidebar .sidebarResizeHandle::before,
   }
   100% {
     opacity: 0;
+  }
+}
+
+@keyframes clarifyOverlayExactPulse {
+  0% {
+    opacity: 0.95;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0.74;
+    transform: scale(1);
   }
 }
 

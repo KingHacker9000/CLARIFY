@@ -1,10 +1,9 @@
-const HIGHLIGHT_CLASS = "clarify-highlight";
 const OVERLAY_CLASS = "clarify-highlight-overlay";
 const OVERLAY_APPROX_CLASS = "clarify-highlight-overlay-approx";
+const OVERLAY_EXACT_CLASS = "clarify-highlight-overlay-exact";
 const AUTO_CLEAR_MS = 2000;
 const FALLBACK_OVERLAY_MS = 700;
 
-let activeMarks = [];
 let activeOverlays = [];
 let clearTimer = null;
 
@@ -88,21 +87,6 @@ function removeOverlay(overlay) {
   }
   overlay.remove();
   activeOverlays = activeOverlays.filter((item) => item !== overlay);
-}
-
-function unwrapMark(mark) {
-  if (!(mark instanceof HTMLElement) || !mark.parentNode) {
-    return;
-  }
-
-  const parent = mark.parentNode;
-  while (mark.firstChild) {
-    parent.insertBefore(mark.firstChild, mark);
-  }
-  parent.removeChild(mark);
-  if (parent instanceof HTMLElement) {
-    parent.normalize();
-  }
 }
 
 function startAutoClear(pdfRoot) {
@@ -431,26 +415,7 @@ function buildRangesForMatch(positions, start, end) {
   return ranges;
 }
 
-function wrapRange({ node, startOffset, endOffset }) {
-  if (!node || startOffset < 0 || endOffset <= startOffset) {
-    return null;
-  }
-
-  try {
-    const range = document.createRange();
-    range.setStart(node, startOffset);
-    range.setEnd(node, endOffset);
-    const mark = document.createElement("mark");
-    mark.className = HIGHLIGHT_CLASS;
-    range.surroundContents(mark);
-    range.detach?.();
-    return mark;
-  } catch (_error) {
-    return null;
-  }
-}
-
-function createOverlay(textLayer, rect, durationMs = AUTO_CLEAR_MS, approx = false) {
+function createOverlay(textLayer, rect, durationMs = AUTO_CLEAR_MS, approx = false, exact = false) {
   if (!(textLayer instanceof HTMLElement)) {
     return null;
   }
@@ -463,7 +428,13 @@ function createOverlay(textLayer, rect, durationMs = AUTO_CLEAR_MS, approx = fal
   };
 
   const overlay = document.createElement("div");
-  overlay.className = approx ? `${OVERLAY_CLASS} ${OVERLAY_APPROX_CLASS}` : OVERLAY_CLASS;
+  if (approx) {
+    overlay.className = `${OVERLAY_CLASS} ${OVERLAY_APPROX_CLASS}`;
+  } else if (exact) {
+    overlay.className = `${OVERLAY_CLASS} ${OVERLAY_EXACT_CLASS}`;
+  } else {
+    overlay.className = OVERLAY_CLASS;
+  }
   overlay.style.left = `${Math.round(bounds.left)}px`;
   overlay.style.top = `${Math.round(bounds.top)}px`;
   overlay.style.width = `${Math.round(bounds.width)}px`;
@@ -478,6 +449,63 @@ function createOverlay(textLayer, rect, durationMs = AUTO_CLEAR_MS, approx = fal
   }
 
   return overlay;
+}
+
+function rangeToOverlayRects(textLayer, range) {
+  if (!(textLayer instanceof HTMLElement) || !(range instanceof Range)) {
+    return [];
+  }
+
+  const layerRect = textLayer.getBoundingClientRect();
+  const clientRects = Array.from(range.getClientRects());
+  if (clientRects.length === 0) {
+    return [];
+  }
+
+  const rects = [];
+  for (const rect of clientRects) {
+    const width = Math.max(rect.width, 0);
+    const height = Math.max(rect.height, 0);
+    if (width < 0.5 || height < 0.5) {
+      continue;
+    }
+    rects.push({
+      left: rect.left - layerRect.left,
+      top: rect.top - layerRect.top,
+      width,
+      height
+    });
+  }
+  return rects;
+}
+
+function createOverlayRectsForRanges(textLayer, ranges, durationMs = AUTO_CLEAR_MS, exact = true) {
+  if (!(textLayer instanceof HTMLElement) || !Array.isArray(ranges) || ranges.length === 0) {
+    return 0;
+  }
+
+  let count = 0;
+  for (const rangeInfo of ranges) {
+    if (!rangeInfo?.node || rangeInfo.endOffset <= rangeInfo.startOffset) {
+      continue;
+    }
+    try {
+      const range = document.createRange();
+      range.setStart(rangeInfo.node, rangeInfo.startOffset);
+      range.setEnd(rangeInfo.node, rangeInfo.endOffset);
+      const rects = rangeToOverlayRects(textLayer, range);
+      range.detach?.();
+      for (const rect of rects) {
+        const overlay = createOverlay(textLayer, rect, durationMs, false, exact);
+        if (overlay) {
+          count += 1;
+        }
+      }
+    } catch (_error) {
+      // Ignore invalid range and continue.
+    }
+  }
+  return count;
 }
 
 function buildApproxOverlayRect(textLayer, needleText) {
@@ -575,11 +603,6 @@ export function clearHighlights(_pdfRoot) {
     clearTimer = null;
   }
 
-  for (const mark of activeMarks) {
-    unwrapMark(mark);
-  }
-  activeMarks = [];
-
   for (const overlay of activeOverlays) {
     removeOverlay(overlay);
   }
@@ -623,17 +646,9 @@ export function highlightOnPage({ pdfRoot, pageIndex, needleText, preferExact = 
     }
 
     const ranges = buildRangesForMatch(positions, match.start, match.end);
-    const marks = [];
-    for (let index = ranges.length - 1; index >= 0; index -= 1) {
-      const mark = wrapRange(ranges[index]);
-      if (mark) {
-        mark.classList.add("clarify-highlight-pulse");
-        marks.push(mark);
-      }
-    }
+    const overlayCount = createOverlayRectsForRanges(textLayer, ranges, AUTO_CLEAR_MS, true);
 
-    if (marks.length > 0) {
-      activeMarks = marks;
+    if (overlayCount > 0) {
       startAutoClear(pdfRoot);
       return { success: true, matchesCount: 1 };
     }
