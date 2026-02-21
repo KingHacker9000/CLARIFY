@@ -1,4 +1,11 @@
-export const TASKS = Object.freeze(["definition", "explanation", "quant", "orientation"])
+export const TASKS = Object.freeze([
+  "definition",
+  "explanation",
+  "quant",
+  "orientation",
+  "section_intents",
+  "section_intent"
+])
 
 const TASK_SET = new Set(TASKS)
 const MAX_SHORT_ANSWER_WORDS = 35
@@ -118,6 +125,27 @@ function normalizeSectionIntentItem(item) {
   }
 }
 
+function normalizeSectionIntents(resp) {
+  const source = resp && typeof resp === "object" ? resp : {}
+  const intents = Array.isArray(source.intents)
+    ? source.intents
+        .map((item) => ({
+          sectionKey: truncateText(item?.sectionKey, 220),
+          intent: truncateText(clampWords(item?.intent, 25), 220)
+        }))
+        .filter((item) => item.sectionKey && item.intent)
+        .slice(0, 48)
+    : []
+  return { intents }
+}
+
+function normalizeSectionIntent(resp) {
+  const source = resp && typeof resp === "object" ? resp : {}
+  return {
+    intent: truncateText(clampWords(source.intent, 25), 220)
+  }
+}
+
 function normalizeOrientation(resp) {
   const source = resp && typeof resp === "object" ? resp : {}
   const intents = Array.isArray(source.sectionIntents)
@@ -150,6 +178,12 @@ function enforceGroundingLimits(response, limits) {
 export function normalizeLLMResponse(task, resp, options = {}) {
   const normalizedTask = normalizeTask(task)
   const limits = normalizeLimits(options)
+  if (normalizedTask === "section_intents") {
+    return normalizeSectionIntents(resp)
+  }
+  if (normalizedTask === "section_intent") {
+    return normalizeSectionIntent(resp)
+  }
   if (normalizedTask === "quant") {
     return enforceGroundingLimits(normalizeQuant(resp, limits), limits)
   }

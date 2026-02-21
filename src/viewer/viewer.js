@@ -9,12 +9,17 @@ import {
   getCards,
   getGlossaryTerms,
   getOpenAIFileId,
+  getOutline,
+  getIntents,
   getOrientationCache,
   getSettings,
   getVerbose,
+  getWalkthrough,
+  setOutline,
   removeCard,
   setOpenAIFileId,
   setOrientationCache,
+  setWalkthrough,
   removeGlossaryTerm,
   setSettings,
   setVerbose,
@@ -26,6 +31,8 @@ import { uploadPdfToOpenAI } from "../shared/openai/files.js";
 import { getPdfBytes, REMOTE_BYTES_BLOCKED } from "./pdf_bytes.js";
 import { extractOutline } from "./outline.js";
 import { buildPageTextCache, getPageText } from "./page_text.js";
+import { buildSectionTree } from "./reading_map_tree.js";
+import { createIntentManager } from "./intent_manager.js";
 
 const logger = createLogger("VIEWER");
 const DEFAULT_VIEWER_TITLE = "CLARIFY";
@@ -46,8 +53,8 @@ const ORIENTATION_ABSTRACT_CHAR_LIMIT = 1200;
 const ORIENTATION_MAX_KEY_TERMS = 8;
 const ORIENTATION_MAX_FLOW_FOCUS_BULLETS = 4;
 const ORIENTATION_MAX_STRUCTURE_FOCUS_BULLETS = 5;
-const ORIENTATION_MAX_SECTION_INTENTS = 20;
 const ORIENTATION_TEXT_SCAN_PAGES = 8;
+const PANEL_TOAST_DURATION_MS = 1600;
 const PAGE_VISIBILITY_THRESHOLD = 0.6;
 const REMOTE_LOAD_ERROR_MESSAGE =
   "This PDF could not be loaded due to site restrictions (CORS/login). Try downloading and opening it locally.";
@@ -151,8 +158,18 @@ function createEmptyOrientationData() {
     contribution: "",
     focusBullets: [],
     keyTerms: [],
-    sectionIntents: [],
+    sectionIntents: {},
     sections: []
+  }
+}
+
+function createReadingMapUiState() {
+  return {
+    expandedKeys: new Set(),
+    visibleIntentKeys: new Set(),
+    intentLoadingByKey: {},
+    topLevelPrewarming: false,
+    groupPrewarmByKey: {}
   }
 }
 
@@ -165,7 +182,17 @@ function createOrientationUiState(readingMode = "flow") {
     mapExpanded: readingMode === "structure",
     userCollapsed: false,
     userMapPreference: false,
+    intentsStatus: "idle",
+    readingMap: createReadingMapUiState(),
     data: createEmptyOrientationData()
+  }
+}
+
+function createWalkthroughUiState() {
+  return {
+    items: [],
+    confirmRebuild: false,
+    saving: false
   }
 }
 
@@ -173,11 +200,16 @@ const sidebarUiState = {
   docId: "unknown",
   cards: [],
   glossaryTerms: [],
+  walkthrough: createWalkthroughUiState(),
+  toastMessage: "",
   activeTab: "orientation",
   orientation: createOrientationUiState("flow")
 };
 let recentJumpState = null;
 let orientationRunToken = 0;
+let panelToastTimer = null;
+let sectionIntentManager = null
+let sectionIntentManagerDocId = ""
 
 const RETRIEVAL_BLOCK_MIN_CHARS = 50;
 const RETRIEVAL_BLOCK_MAX_CHARS = 420;
@@ -448,13 +480,38 @@ function createCardNode(card) {
     : "Page ?"
   const sectionTitle = clampText(card.grounding?.sectionTitle || "Unknown section", 120)
   meta.textContent = `${pageLabel} - ${sectionTitle}`
-  header.append(title, meta)
+  if (card.type === "quant") {
+    const metaRow = document.createElement("div")
+    metaRow.className = "cardMetaRow"
+    const figureIntentButton = document.createElement("button")
+    figureIntentButton.type = "button"
+    figureIntentButton.className = "cardIntentOverlay"
+    figureIntentButton.dataset.cardAction = "toggle-figure-intent"
+    figureIntentButton.dataset.cardId = card.id
+    figureIntentButton.textContent = "?"
+    metaRow.append(meta, figureIntentButton)
+    header.append(title, metaRow)
+  } else {
+    header.append(title, meta)
+  }
   article.append(header)
 
   const shortAnswer = document.createElement("p")
   shortAnswer.className = "cardShortAnswer"
   shortAnswer.textContent = clampText(card.shortAnswer, 280)
   article.append(shortAnswer)
+
+  if (card.type === "quant") {
+    const figureIntentKey = getFigureIntentKey(card)
+    if (isIntentVisible(figureIntentKey)) {
+      const intentMap = getSectionIntentMapFromOrientationData(getOrientationState().data?.sectionIntents)
+      const intent = clampText(intentMap[figureIntentKey], 220)
+      const bubble = document.createElement("div")
+      bubble.className = "cardIntentBubble"
+      bubble.textContent = isIntentLoading(figureIntentKey) ? "Generating..." : intent || "No intent available yet."
+      article.append(bubble)
+    }
+  }
 
   const grounding = document.createElement("section")
   grounding.className = "cardGrounding"
@@ -695,6 +752,76 @@ function normalizeSectionTitleKey(title) {
   return sanitizeText(title).toLowerCase()
 }
 
+function normalizeSectionKeyTitle(title) {
+  return sanitizeText(title).toLowerCase()
+}
+
+function getSectionLevel(section) {
+  return Number.isFinite(Number(section?.level)) ? Math.max(1, Math.floor(Number(section.level))) : 1
+}
+
+function getSectionDisplayTitle(section) {
+  return sanitizeText(section?.title || section?.displayTitle)
+}
+
+function getSectionKey(section) {
+  const pageIndex = parseOptionalPageIndex(section?.pageIndex)
+  const titleKey = normalizeSectionKeyTitle(getSectionDisplayTitle(section))
+  if (pageIndex == null || !titleKey) {
+    return ""
+  }
+  const level = getSectionLevel(section)
+  return `${pageIndex}:${level}:${titleKey}`
+}
+
+function getSectionKeysFromSections(sections) {
+  const keys = []
+  const seen = new Set()
+  for (const section of Array.isArray(sections) ? sections : []) {
+    const key = getSectionKey(section)
+    if (!key || seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    keys.push(key)
+  }
+  return keys
+}
+
+function normalizeSectionIntentMap(intentsObj) {
+  const source = intentsObj && typeof intentsObj === "object" && !Array.isArray(intentsObj) ? intentsObj : {}
+  const normalized = {}
+  for (const [rawKey, rawIntent] of Object.entries(source)) {
+    const key = sanitizeText(rawKey)
+    const intent = clampText(rawIntent, 220)
+    if (!key || !intent) {
+      continue
+    }
+    normalized[key] = intent
+  }
+  return normalized
+}
+
+function getSectionIntentMapFromOrientationData(sectionIntents) {
+  return normalizeSectionIntentMap(sectionIntents)
+}
+
+function mapIntentsToCurrentSections(sections, intentsObj) {
+  const intents = normalizeSectionIntentMap(intentsObj)
+  const mapped = {}
+  for (const section of Array.isArray(sections) ? sections : []) {
+    const sectionKey = getSectionKey(section)
+    if (!sectionKey) {
+      continue
+    }
+    const intent = clampText(intents[sectionKey], 220)
+    if (intent) {
+      mapped[sectionKey] = intent
+    }
+  }
+  return mapped
+}
+
 function getReadingModeOrDefault() {
   return currentSettings?.defaultReadingMode === "structure" ? "structure" : "flow"
 }
@@ -704,6 +831,66 @@ function getOrientationState() {
     sidebarUiState.orientation = createOrientationUiState(getReadingModeOrDefault())
   }
   return sidebarUiState.orientation
+}
+
+function getReadingMapState() {
+  const orientationState = getOrientationState()
+  if (!orientationState.readingMap || typeof orientationState.readingMap !== "object") {
+    orientationState.readingMap = createReadingMapUiState()
+  }
+  return orientationState.readingMap
+}
+
+function resetReadingMapState() {
+  const orientationState = getOrientationState()
+  orientationState.readingMap = createReadingMapUiState()
+}
+
+function setIntentLoading(sectionKey, isLoading) {
+  if (!sectionKey) {
+    return
+  }
+  const readingMapState = getReadingMapState()
+  readingMapState.intentLoadingByKey[sectionKey] = Boolean(isLoading)
+}
+
+function isIntentLoading(sectionKey) {
+  const readingMapState = getReadingMapState()
+  return Boolean(readingMapState.intentLoadingByKey[sectionKey])
+}
+
+function setIntentVisible(sectionKey, visible) {
+  if (!sectionKey) {
+    return
+  }
+  const readingMapState = getReadingMapState()
+  if (visible) {
+    readingMapState.visibleIntentKeys.add(sectionKey)
+    return
+  }
+  readingMapState.visibleIntentKeys.delete(sectionKey)
+}
+
+function isIntentVisible(sectionKey) {
+  const readingMapState = getReadingMapState()
+  return readingMapState.visibleIntentKeys.has(sectionKey)
+}
+
+function setNodeExpanded(sectionKey, expanded) {
+  if (!sectionKey) {
+    return
+  }
+  const readingMapState = getReadingMapState()
+  if (expanded) {
+    readingMapState.expandedKeys.add(sectionKey)
+    return
+  }
+  readingMapState.expandedKeys.delete(sectionKey)
+}
+
+function isNodeExpanded(sectionKey) {
+  const readingMapState = getReadingMapState()
+  return readingMapState.expandedKeys.has(sectionKey)
 }
 
 function applyOrientationModeDefaults(mode, { force = false } = {}) {
@@ -719,6 +906,8 @@ function applyOrientationModeDefaults(mode, { force = false } = {}) {
 
 function resetOrientationStateForDocument() {
   sidebarUiState.orientation = createOrientationUiState(getReadingModeOrDefault())
+  sectionIntentManager = null
+  sectionIntentManagerDocId = ""
 }
 
 function updateOrientationSections(sections) {
@@ -732,6 +921,7 @@ function setOrientationLoading(message = "Generating orientation...") {
   orientationState.status = "loading"
   orientationState.loadingMessage = sanitizeText(message) || "Generating orientation..."
   orientationState.errorMessage = ""
+  orientationState.intentsStatus = "idle"
 }
 
 function setOrientationError(message) {
@@ -752,6 +942,11 @@ function setOrientationReady(data) {
   }
 }
 
+function setOrientationIntentsStatus(status = "idle") {
+  const orientationState = getOrientationState()
+  orientationState.intentsStatus = status === "loading" ? "loading" : "idle"
+}
+
 function toggleOrientationCollapsed(collapsed) {
   const orientationState = getOrientationState()
   orientationState.collapsed = Boolean(collapsed)
@@ -764,6 +959,34 @@ function toggleOrientationMapExpanded(expanded) {
   orientationState.mapExpanded = Boolean(expanded)
   orientationState.userMapPreference = true
   renderPanel()
+}
+
+function showPanelToast(message, durationMs = PANEL_TOAST_DURATION_MS) {
+  sidebarUiState.toastMessage = clampText(message, 140)
+  if (panelToastTimer) {
+    clearTimeout(panelToastTimer)
+  }
+  if (sidebarUiState.activeTab === "orientation" || sidebarUiState.activeTab === "walkthrough") {
+    renderPanel()
+  }
+  panelToastTimer = setTimeout(() => {
+    panelToastTimer = null
+    sidebarUiState.toastMessage = ""
+    if (sidebarUiState.activeTab === "orientation" || sidebarUiState.activeTab === "walkthrough") {
+      renderPanel()
+    }
+  }, Math.max(700, Number(durationMs) || PANEL_TOAST_DURATION_MS))
+}
+
+function createPanelToastNode(message) {
+  const text = clampText(message, 140)
+  if (!text) {
+    return null
+  }
+  const toast = document.createElement("p")
+  toast.className = "panelToast"
+  toast.textContent = text
+  return toast
 }
 
 function createOrientationHeader({ actionLabel = "Start reading" }) {
@@ -871,16 +1094,56 @@ function createOrientationKeyTerms(terms) {
   return wrapper
 }
 
-function renderOrientationReadingMap(container, sections, sectionIntents, mapExpanded, readingMode) {
+function renderOrientationReadingMap(
+  container,
+  sections,
+  sectionIntents,
+  mapExpanded,
+  readingMode,
+  intentsStatus = "idle"
+) {
   const mapSection = createOrientationSection("Reading map")
+  const normalizedSections = Array.isArray(sections) ? sections : []
+  const sectionIntentMap = getSectionIntentMapFromOrientationData(sectionIntents)
+  const mappedIntents = mapIntentsToCurrentSections(normalizedSections, sectionIntentMap)
+  const readingMapState = getReadingMapState()
+  const treeRoots = buildSectionTree(normalizedSections)
+  const topLevelNodes = treeRoots.filter((node) => Number(node?.level) === 1)
+  const visibleRoots = topLevelNodes.length > 0 ? topLevelNodes : treeRoots
+
+  const controls = document.createElement("div")
+  controls.className = "orientationMapControls"
+
   const toggleButton = document.createElement("button")
   toggleButton.type = "button"
   toggleButton.className = "orientationToggleMap"
   toggleButton.dataset.orientationAction = mapExpanded ? "collapse-map" : "expand-map"
   toggleButton.textContent = mapExpanded ? "Hide map" : "Show map"
-  mapSection.append(toggleButton)
+  controls.append(toggleButton)
 
-  const normalizedSections = Array.isArray(sections) ? sections : []
+  const prewarmTopLevelButton = document.createElement("button")
+  prewarmTopLevelButton.type = "button"
+  prewarmTopLevelButton.className = "orientationMapSubtleAction"
+  prewarmTopLevelButton.dataset.orientationAction = "generate-top-level-intents"
+  prewarmTopLevelButton.disabled = readingMapState.topLevelPrewarming || visibleRoots.length === 0
+  prewarmTopLevelButton.textContent = readingMapState.topLevelPrewarming
+    ? "Generating top-level intents..."
+    : "Generate top-level intents"
+  controls.append(prewarmTopLevelButton)
+  mapSection.append(controls)
+
+  const actionRow = document.createElement("div")
+  actionRow.className = "orientationMapActions"
+
+  const walkthroughButton = document.createElement("button")
+  walkthroughButton.type = "button"
+  walkthroughButton.className = "orientationMapActionButton"
+  walkthroughButton.dataset.orientationAction = "build-walkthrough"
+  walkthroughButton.disabled = normalizedSections.length === 0
+  walkthroughButton.textContent = "Build walkthrough"
+  actionRow.append(walkthroughButton)
+  mapSection.append(actionRow)
+
   if (normalizedSections.length === 0) {
     const empty = document.createElement("p")
     empty.className = "orientationMutedText"
@@ -890,20 +1153,14 @@ function renderOrientationReadingMap(container, sections, sectionIntents, mapExp
     return
   }
 
-  const intentMap = new Map()
-  for (const item of Array.isArray(sectionIntents) ? sectionIntents : []) {
-    const key = normalizeSectionTitleKey(item?.title)
-    const intent = clampText(item?.intent, 220)
-    if (!key || !intent || intentMap.has(key)) {
-      continue
-    }
-    intentMap.set(key, intent)
-  }
-
   if (!mapExpanded) {
     const summary = document.createElement("p")
     summary.className = "orientationMutedText"
-    summary.textContent = `${normalizedSections.length} sections available.`
+    const intentCount = Object.keys(mappedIntents).length
+    summary.textContent =
+      intentCount > 0
+        ? `${normalizedSections.length} sections available. ${intentCount} intents ready.`
+        : `${normalizedSections.length} sections available.`
     mapSection.append(summary)
     container.append(mapSection)
     return
@@ -918,80 +1175,79 @@ function renderOrientationReadingMap(container, sections, sectionIntents, mapExp
 
   const list = document.createElement("ul")
   list.className = "orientationReadingMap"
-  const limit = Math.min(normalizedSections.length, ORIENTATION_MAX_SECTION_INTENTS)
-  const hasAnyExplicitNumbering = normalizedSections.some((section) => sanitizeText(section?.numbering))
-  const counters = []
-  for (let index = 0; index < limit; index += 1) {
-    const section = normalizedSections[index]
-    const level = Math.max(1, Math.floor(Number(section?.level) || 1))
-    for (let counterIndex = 0; counterIndex < level - 1; counterIndex += 1) {
-      if (!Number.isFinite(Number(counters[counterIndex]))) {
-        counters[counterIndex] = 1
-      }
-    }
-    counters[level - 1] = (Number(counters[level - 1]) || 0) + 1
-    counters.length = level
-    const computedNumber = counters.join(".")
-    const explicitNumber = sanitizeText(section?.numbering)
-    let numberLabel = explicitNumber || computedNumber
-    if (
-      !explicitNumber &&
-      hasAnyExplicitNumbering &&
-      index === 0 &&
-      /^abstract\b/i.test(sanitizeText(section?.displayTitle || section?.title))
-    ) {
-      numberLabel = "0"
-    }
-
+  function renderNode(node, parentList) {
     const item = document.createElement("li")
     item.className = "orientationMapItem"
-    if (level > 1) {
+    item.style.setProperty("--outline-level", String(Math.max(1, Number(node?.level) || 1)))
+    if (Number(node?.level) > 1) {
       item.classList.add("isSubsection")
     }
-    item.style.setProperty("--outline-level", String(level))
-    item.style.setProperty("--outline-indent", `${Math.max(level - 1, 0) * 14}px`)
 
-    const titleRow = document.createElement("div")
-    titleRow.className = "orientationMapTitle"
+    const row = document.createElement("div")
+    row.className = "orientationMapRow"
+    item.append(row)
 
-    const jumpLink = document.createElement("button")
-    jumpLink.type = "button"
-    jumpLink.className = "orientationMapLink"
-    jumpLink.dataset.orientationAction = "jump-section"
-    jumpLink.dataset.sectionPageIndex = String(Number(section?.pageIndex) || 0)
-    jumpLink.dataset.sectionId = sanitizeText(section?.id)
-    jumpLink.dataset.sectionTitle = sanitizeText(section?.displayTitle || section?.title)
-
-    const numberBadge = document.createElement("span")
-    numberBadge.className = "orientationMapNumber"
-    numberBadge.textContent = `${numberLabel}`
-    jumpLink.append(numberBadge)
-
-    const titleText = document.createElement("span")
-    titleText.className = "orientationMapLinkText"
-    titleText.textContent = clampText(section?.displayTitle || section?.title, 140)
-    jumpLink.append(titleText)
-
-    const pageLabel = Number.isFinite(section?.pageIndex) ? `Page ${Number(section.pageIndex) + 1}` : "Page ?"
-    const pageBadge = document.createElement("span")
-    pageBadge.className = "orientationMapPage"
-    pageBadge.textContent = `\u2197 ${pageLabel}`
-    jumpLink.append(pageBadge)
-
-    titleRow.append(jumpLink)
-    item.append(titleRow)
-
-    const intent =
-      intentMap.get(normalizeSectionTitleKey(section?.title)) ||
-      intentMap.get(normalizeSectionTitleKey(section?.displayTitle))
-    if (intent) {
-      const intentLine = document.createElement("p")
-      intentLine.className = "orientationMapIntent"
-      intentLine.textContent = intent
-      item.append(intentLine)
+    if (node.hasChildren) {
+      const expandButton = document.createElement("button")
+      expandButton.type = "button"
+      expandButton.className = "orientationMapExpand"
+      expandButton.dataset.orientationAction = isNodeExpanded(node.key) ? "collapse-node" : "expand-node"
+      expandButton.dataset.sectionKey = node.key
+      expandButton.textContent = isNodeExpanded(node.key) ? "\u25BE" : "\u25B8"
+      row.append(expandButton)
+    } else {
+      const spacer = document.createElement("span")
+      spacer.className = "orientationMapExpandSpacer"
+      spacer.textContent = ""
+      row.append(spacer)
     }
 
-    list.append(item)
+    const titleButton = document.createElement("button")
+    titleButton.type = "button"
+    titleButton.className = "orientationMapTitleButton"
+    titleButton.dataset.orientationAction = "jump-section"
+    titleButton.dataset.sectionPageIndex = String(Number(node?.pageIndex) || 0)
+    titleButton.dataset.sectionTitle = sanitizeText(node?.title)
+    titleButton.textContent = clampText(node?.title, 140) || "Untitled section"
+    row.append(titleButton)
+
+    const pageButton = document.createElement("button")
+    pageButton.type = "button"
+    pageButton.className = "orientationMapPageButton"
+    pageButton.dataset.orientationAction = "jump-section"
+    pageButton.dataset.sectionPageIndex = String(Number(node?.pageIndex) || 0)
+    pageButton.dataset.sectionTitle = sanitizeText(node?.title)
+    pageButton.textContent = `\u2197 Page ${Math.max(0, Number(node?.pageIndex) || 0) + 1}`
+    row.append(pageButton)
+
+    if (node.hasChildren && isNodeExpanded(node.key)) {
+      const groupActions = document.createElement("div")
+      groupActions.className = "orientationMapGroupActions"
+      const generateChildrenButton = document.createElement("button")
+      generateChildrenButton.type = "button"
+      generateChildrenButton.className = "orientationMapSubtleAction"
+      generateChildrenButton.dataset.orientationAction = "generate-node-children-intents"
+      generateChildrenButton.dataset.sectionKey = node.key
+      generateChildrenButton.disabled = Boolean(readingMapState.groupPrewarmByKey[node.key])
+      generateChildrenButton.textContent = readingMapState.groupPrewarmByKey[node.key]
+        ? "Generating child intents..."
+        : "Generate intents for this section"
+      groupActions.append(generateChildrenButton)
+      item.append(groupActions)
+
+      const childList = document.createElement("ul")
+      childList.className = "orientationReadingMap orientationReadingMapNested"
+      for (const child of Array.isArray(node.children) ? node.children : []) {
+        renderNode(child, childList)
+      }
+      item.append(childList)
+    }
+
+    parentList.append(item)
+  }
+
+  for (const node of visibleRoots) {
+    renderNode(node, list)
   }
   mapSection.append(list)
   container.append(mapSection)
@@ -1024,6 +1280,10 @@ function renderOrientationTab() {
       actionLabel: readingMode === "structure" ? "Collapse" : "Start reading"
     })
   )
+  const toast = createPanelToastNode(sidebarUiState.toastMessage)
+  if (toast) {
+    container.append(toast)
+  }
 
   if (orientationState.status === "loading") {
     container.append(createOrientationLoading(orientationState.loadingMessage || "Generating orientation..."))
@@ -1031,9 +1291,10 @@ function renderOrientationTab() {
       renderOrientationReadingMap(
         container,
         orientationState.data.sections,
-        [],
+        orientationState.data.sectionIntents,
         orientationState.mapExpanded,
-        readingMode
+        readingMode,
+        orientationState.intentsStatus
       )
     }
     panel.append(container)
@@ -1087,9 +1348,190 @@ function renderOrientationTab() {
     data.sections,
     data.sectionIntents,
     orientationState.mapExpanded,
-    readingMode
+    readingMode,
+    orientationState.intentsStatus
   )
 
+  panel.append(container)
+}
+
+function normalizeWalkthroughItems(items) {
+  const source = Array.isArray(items) ? items : []
+  return source
+    .map((item, index) => ({
+      sectionTitle: clampText(item?.sectionTitle, 180) || `Section ${index + 1}`,
+      oneLiner: clampText(item?.oneLiner, 220),
+      pageIndex: Number.isFinite(Number(item?.pageIndex)) ? Math.max(0, Math.floor(Number(item.pageIndex))) : 0,
+      createdAt:
+        typeof item?.createdAt === "number" && Number.isFinite(item.createdAt) ? item.createdAt : Date.now()
+    }))
+    .slice(0, 120)
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+}
+
+function escapeKeywordRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+function splitSectionLabel(sectionTitle) {
+  const text = clampText(sectionTitle, 180)
+  const matched = text.match(/^(\d+(?:\.\d+)*|[IVXLCM]+)\s+(.+)$/i)
+  if (!matched) {
+    return { number: "", title: text }
+  }
+  return {
+    number: sanitizeText(matched[1]),
+    title: sanitizeText(matched[2])
+  }
+}
+
+function buildWalkthroughKeywordList(sectionTitle, explanation) {
+  const keywordSet = new Set()
+  const titleWords = sanitizeText(sectionTitle)
+    .toLowerCase()
+    .split(/\s+/)
+    .map((word) => word.replace(/[^a-z0-9-]/g, ""))
+    .filter((word) => word.length >= 5)
+    .slice(0, 6)
+  for (const word of titleWords) {
+    keywordSet.add(word)
+  }
+
+  const actionWords = ["introduce", "argue", "discuss", "present", "describe", "summarize", "evaluate", "compare"]
+  for (const word of actionWords) {
+    if (new RegExp(`\\b${escapeKeywordRegExp(word)}\\w*\\b`, "i").test(explanation)) {
+      keywordSet.add(word)
+    }
+  }
+
+  return [...keywordSet].slice(0, 10).sort((a, b) => b.length - a.length)
+}
+
+function formatWalkthroughExplanationHtml(explanation, sectionTitle) {
+  const text = clampText(explanation, 320)
+  if (!text) {
+    return ""
+  }
+  let html = escapeHtml(text)
+  const keywords = buildWalkthroughKeywordList(sectionTitle, text)
+  for (const keyword of keywords) {
+    const pattern = new RegExp(`\\b(${escapeKeywordRegExp(keyword)}\\w*)\\b`, "gi")
+    html = html.replace(pattern, "<strong>$1</strong>")
+  }
+  return html
+}
+
+function renderWalkthroughTab() {
+  if (!currentPdf || !renderState.pdfDoc) {
+    renderEmpty("walkthrough")
+    return
+  }
+
+  const walkthroughState = sidebarUiState.walkthrough || createWalkthroughUiState()
+  panel.innerHTML = ""
+
+  const container = document.createElement("div")
+  container.className = "walkthroughPanel"
+
+  const headingRow = document.createElement("div")
+  headingRow.className = "walkthroughHeader"
+  const heading = document.createElement("h3")
+  heading.className = "panelTitle"
+  heading.textContent = "Walkthrough"
+  headingRow.append(heading)
+
+  const rebuildButton = document.createElement("button")
+  rebuildButton.type = "button"
+  rebuildButton.className = "walkthroughAction"
+  rebuildButton.dataset.walkthroughAction = "rebuild"
+  rebuildButton.textContent = "Rebuild from orientation"
+  headingRow.append(rebuildButton)
+  container.append(headingRow)
+
+  const toast = createPanelToastNode(sidebarUiState.toastMessage)
+  if (toast) {
+    container.append(toast)
+  }
+
+  if (walkthroughState.confirmRebuild) {
+    const confirm = document.createElement("div")
+    confirm.className = "walkthroughConfirm"
+    const text = document.createElement("span")
+    text.textContent = "Replace existing walkthrough items?"
+    const confirmButton = document.createElement("button")
+    confirmButton.type = "button"
+    confirmButton.className = "walkthroughAction"
+    confirmButton.dataset.walkthroughAction = "confirm-rebuild"
+    confirmButton.textContent = "Replace"
+    const cancelButton = document.createElement("button")
+    cancelButton.type = "button"
+    cancelButton.className = "walkthroughAction"
+    cancelButton.dataset.walkthroughAction = "cancel-rebuild"
+    cancelButton.textContent = "Cancel"
+    confirm.append(text, confirmButton, cancelButton)
+    container.append(confirm)
+  }
+
+  const items = normalizeWalkthroughItems(walkthroughState.items)
+  if (items.length === 0) {
+    const empty = document.createElement("p")
+    empty.className = "panelEmptyMessage"
+    empty.textContent = getEmptyMessage("walkthrough")
+    container.append(empty)
+    panel.append(container)
+    return
+  }
+
+  const list = document.createElement("div")
+  list.className = "walkthroughList"
+  items.forEach((item, index) => {
+    const row = document.createElement("article")
+    row.className = "walkthroughItem"
+    row.dataset.walkthroughIndex = String(index)
+
+    const jumpButton = document.createElement("button")
+    jumpButton.type = "button"
+    jumpButton.className = "walkthroughJump"
+    jumpButton.dataset.walkthroughAction = "jump"
+    jumpButton.dataset.walkthroughIndex = String(index)
+    jumpButton.dataset.sectionPageIndex = String(item.pageIndex)
+    jumpButton.dataset.sectionTitle = item.sectionTitle
+    const sectionLabel = splitSectionLabel(item.sectionTitle)
+    if (sectionLabel.number) {
+      const number = document.createElement("span")
+      number.className = "walkthroughSectionNumber"
+      number.textContent = sectionLabel.number
+      const title = document.createElement("span")
+      title.className = "walkthroughSectionTitle"
+      title.textContent = sectionLabel.title
+      jumpButton.append(number, title)
+    } else {
+      const title = document.createElement("span")
+      title.className = "walkthroughSectionTitle"
+      title.textContent = item.sectionTitle
+      jumpButton.append(title)
+    }
+
+    const oneLinerPreview = document.createElement("p")
+    oneLinerPreview.className = "walkthroughPreview"
+    const previewHtml = formatWalkthroughExplanationHtml(item.oneLiner, item.sectionTitle)
+    if (previewHtml) {
+      oneLinerPreview.innerHTML = previewHtml
+    } else {
+      oneLinerPreview.textContent = "Add a one-line roadmap note."
+    }
+    row.append(jumpButton, oneLinerPreview)
+    list.append(row)
+  })
+  container.append(list)
   panel.append(container)
 }
 
@@ -1107,12 +1549,19 @@ function renderPanel() {
     renderGlossaryTab()
     return
   }
+  if (tab === "walkthrough") {
+    renderWalkthroughTab()
+    return
+  }
   renderEmpty(tab)
 }
 
 function setActiveTab(tab) {
   const normalizedTab = normalizeTabName(tab)
   sidebarUiState.activeTab = normalizedTab
+  if (normalizedTab !== "walkthrough") {
+    sidebarUiState.walkthrough.confirmRebuild = false
+  }
   document.querySelectorAll(".tab").forEach((button) => {
     button.classList.toggle("active", button.dataset.tab === normalizedTab)
   })
@@ -1533,6 +1982,473 @@ function normalizeReadingMapSections(sections) {
   return normalized
 }
 
+function toStoredOutlineSections(sections) {
+  const source = Array.isArray(sections) ? sections : []
+  return source
+    .map((section) => ({
+      title: sanitizeText(section?.title || section?.displayTitle),
+      pageIndex: parseOptionalPageIndex(section?.pageIndex),
+      level: getSectionLevel(section)
+    }))
+    .filter((section) => section.title && section.pageIndex != null)
+}
+
+function buildFallbackSectionIntent(sectionTitle) {
+  const normalizedTitle = clampText(sectionTitle, 120) || "this section"
+  return clampText(`Read this section for: ${normalizedTitle}`, 220)
+}
+
+function isLowPriorityWalkthroughSection(sectionTitle) {
+  const title = sanitizeText(sectionTitle).toLowerCase()
+  if (!title) {
+    return false
+  }
+  return (
+    /\breferences?\b/.test(title) ||
+    /\bbibliograph/.test(title) ||
+    /\bappendix\b/.test(title) ||
+    /\backnowledg(e)?ments?\b/.test(title) ||
+    /\bsupplement(ar(y|al))?\b/.test(title)
+  )
+}
+
+async function loadCachedSectionIntentsForDocument(docId, sections) {
+  if (!docId || docId === "unknown") {
+    return {}
+  }
+  const cachedIntents = await getIntents(docId)
+  return mapIntentsToCurrentSections(sections, cachedIntents)
+}
+
+function buildWalkthroughItemsFromSections(sections, sectionIntentMap) {
+  const sourceSections = Array.isArray(sections) ? sections : []
+  const intentMap = normalizeSectionIntentMap(sectionIntentMap)
+  const topLevelSections = sourceSections.filter(
+    (section) => getSectionLevel(section) === 1 && !isLowPriorityWalkthroughSection(getSectionDisplayTitle(section))
+  )
+  return topLevelSections.map((section) => {
+    const sectionTitle = getSectionDisplayTitle(section)
+    const sectionKey = getSectionKey(section)
+    const oneLiner = clampText(intentMap[sectionKey], 220) || buildFallbackSectionIntent(sectionTitle)
+    return {
+      sectionTitle,
+      oneLiner,
+      pageIndex: parseOptionalPageIndex(section?.pageIndex) ?? 0,
+      createdAt: Date.now()
+    }
+  })
+}
+
+async function persistWalkthroughForCurrentDocument(items) {
+  const docId = deriveDocId(currentPdf)
+  if (!docId || docId === "unknown") {
+    return false
+  }
+  const normalizedItems = normalizeWalkthroughItems(items)
+  sidebarUiState.walkthrough.items = normalizedItems
+  sidebarUiState.walkthrough.confirmRebuild = false
+  return setWalkthrough(docId, normalizedItems)
+}
+
+async function buildWalkthroughFromOrientation({ forceRebuild = false } = {}) {
+  const sections = getReadingMapSections()
+  if (sections.length === 0) {
+    showPanelToast("No outline available")
+    return false
+  }
+  const orientationState = getOrientationState()
+  const intentMap = mapIntentsToCurrentSections(sections, orientationState.data?.sectionIntents)
+  const items = buildWalkthroughItemsFromSections(sections, intentMap)
+  if (!forceRebuild && items.length === 0) {
+    showPanelToast("No top-level sections found")
+    return false
+  }
+  const persisted = await persistWalkthroughForCurrentDocument(items)
+  if (!persisted) {
+    showPanelToast("Walkthrough save failed")
+    return false
+  }
+  setActiveTab("walkthrough")
+  showPanelToast("Walkthrough created")
+  setStatus("Walkthrough created")
+  return true
+}
+
+async function jumpToSection(pageIndex, sectionTitle, behavior = "smooth") {
+  const normalizedPageIndex = parseOptionalPageIndex(pageIndex)
+  if (normalizedPageIndex == null) {
+    return
+  }
+  const pageNode = getPageNodeByIndex(normalizedPageIndex)
+  if (!pageNode) {
+    return
+  }
+
+  if (document.activeElement instanceof HTMLElement && panel.contains(document.activeElement)) {
+    document.activeElement.blur()
+  }
+
+  scrollToPage(normalizedPageIndex + 1, behavior)
+  await waitForPageInView(pageNode)
+  await waitForHighlightTiming()
+  const needleText = clampText(sectionTitle, 160)
+  if (needleText) {
+    const result = highlightOnPage({
+      pdfRoot,
+      pageIndex: normalizedPageIndex,
+      needleText,
+      preferExact: false
+    })
+    if (result.success) {
+      rememberRecentJump(normalizedPageIndex, [needleText])
+    }
+  }
+}
+
+function ensureSectionIntentManager() {
+  if (!currentPdf || !renderState.pdfDoc) {
+    return null
+  }
+  const docId = deriveDocId(currentPdf)
+  if (!docId || docId === "unknown") {
+    return null
+  }
+  if (sectionIntentManager && sectionIntentManagerDocId === docId) {
+    return sectionIntentManager
+  }
+  sectionIntentManager = createIntentManager({
+    docId,
+    pdfDoc: renderState.pdfDoc,
+    logger
+  })
+  sectionIntentManagerDocId = docId
+  return sectionIntentManager
+}
+
+function getSectionTreeRootsForCurrentDocument() {
+  const sections = getReadingMapSections()
+  const roots = buildSectionTree(sections)
+  const topLevel = roots.filter((node) => Number(node?.level) === 1)
+  return topLevel.length > 0 ? topLevel : roots
+}
+
+function findSectionNodeByKey(nodes, sectionKey) {
+  const targetKey = sanitizeText(sectionKey)
+  if (!targetKey) {
+    return null
+  }
+  const queue = [...(Array.isArray(nodes) ? nodes : [])]
+  while (queue.length > 0) {
+    const node = queue.shift()
+    if (!node) {
+      continue
+    }
+    if (sanitizeText(node.key) === targetKey) {
+      return node
+    }
+    if (Array.isArray(node.children) && node.children.length > 0) {
+      queue.unshift(...node.children)
+    }
+  }
+  return null
+}
+
+function upsertOrientationIntent(sectionKey, intent) {
+  const key = sanitizeText(sectionKey)
+  const normalizedIntent = clampText(intent, 220)
+  if (!key || !normalizedIntent) {
+    return
+  }
+  const orientationState = getOrientationState()
+  const existing = getSectionIntentMapFromOrientationData(orientationState.data?.sectionIntents)
+  orientationState.data.sectionIntents = {
+    ...existing,
+    [key]: normalizedIntent
+  }
+}
+
+async function ensureIntentForSectionNode(node) {
+  const manager = ensureSectionIntentManager()
+  if (!node || !node.key || !manager) {
+    return ""
+  }
+  const sectionKey = sanitizeText(node.key)
+  if (!sectionKey) {
+    return ""
+  }
+  const currentMap = getSectionIntentMapFromOrientationData(getOrientationState().data?.sectionIntents)
+  const existing = clampText(currentMap[sectionKey], 220)
+  if (existing) {
+    return existing
+  }
+
+  setIntentLoading(sectionKey, true)
+  renderPdfIntentOverlays()
+  if (sidebarUiState.activeTab === "orientation") {
+    renderPanel()
+  }
+  try {
+    const intent = clampText(await manager.getOrGenerateIntent(node), 220)
+    if (intent) {
+      upsertOrientationIntent(sectionKey, intent)
+      return intent
+    }
+    return ""
+  } finally {
+    setIntentLoading(sectionKey, false)
+    renderPdfIntentOverlays()
+    if (sidebarUiState.activeTab === "orientation") {
+      renderPanel()
+    }
+  }
+}
+
+async function handleGenerateTopLevelIntents() {
+  const manager = ensureSectionIntentManager()
+  const readingMapState = getReadingMapState()
+  if (readingMapState.topLevelPrewarming || !manager) {
+    return
+  }
+  const nodes = getSectionTreeRootsForCurrentDocument()
+  if (nodes.length === 0) {
+    return
+  }
+
+  readingMapState.topLevelPrewarming = true
+  if (sidebarUiState.activeTab === "orientation") {
+    renderPanel()
+  }
+  try {
+    await manager.prewarmTopLevelIntents(nodes)
+    for (const node of nodes) {
+      const intent = await manager.getOrGenerateIntent(node)
+      if (intent) {
+        upsertOrientationIntent(node.key, intent)
+      }
+    }
+  } finally {
+    readingMapState.topLevelPrewarming = false
+    if (sidebarUiState.activeTab === "orientation") {
+      renderPanel()
+    }
+  }
+}
+
+async function handleGenerateChildIntentsForSection(sectionKey) {
+  const manager = ensureSectionIntentManager()
+  const key = sanitizeText(sectionKey)
+  if (!key || !manager) {
+    return
+  }
+  const readingMapState = getReadingMapState()
+  if (readingMapState.groupPrewarmByKey[key]) {
+    return
+  }
+  const node = findSectionNodeByKey(getSectionTreeRootsForCurrentDocument(), key)
+  if (!node || !Array.isArray(node.children) || node.children.length === 0) {
+    return
+  }
+
+  readingMapState.groupPrewarmByKey[key] = true
+  if (sidebarUiState.activeTab === "orientation") {
+    renderPanel()
+  }
+  try {
+    for (const child of node.children) {
+      const intent = await ensureIntentForSectionNode(child)
+      if (intent) {
+        upsertOrientationIntent(child.key, intent)
+      }
+    }
+  } finally {
+    readingMapState.groupPrewarmByKey[key] = false
+    if (sidebarUiState.activeTab === "orientation") {
+      renderPanel()
+    }
+  }
+}
+
+function clearPdfIntentOverlays() {
+  for (const pageNode of renderState.pageNodes) {
+    if (!(pageNode instanceof HTMLElement)) {
+      continue
+    }
+    const overlays = pageNode.querySelectorAll(".pdfIntentOverlay")
+    for (const overlay of overlays) {
+      overlay.remove()
+    }
+    const bubbles = pageNode.querySelectorAll(".pdfIntentBubble")
+    for (const bubble of bubbles) {
+      bubble.remove()
+    }
+  }
+}
+
+function normalizeIntentSearchText(value) {
+  return sanitizeText(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()
+}
+
+function extractTitleTokens(title) {
+  const words = normalizeIntentSearchText(title)
+    .split(" ")
+    .filter((word) => word.length >= 4)
+  return words.slice(0, 4)
+}
+
+function findSectionAnchorInPage(pageNode, title) {
+  if (!(pageNode instanceof HTMLElement)) {
+    return null
+  }
+  const pageSurface = pageNode.querySelector(".pdfPageSurface")
+  const textLayer = pageNode.querySelector(".textLayer")
+  if (!(pageSurface instanceof HTMLElement) || !(textLayer instanceof HTMLElement)) {
+    return null
+  }
+  const spans = Array.from(textLayer.querySelectorAll("span")).filter((span) => span instanceof HTMLElement)
+  if (spans.length === 0) {
+    return null
+  }
+
+  const titleTokens = extractTitleTokens(title)
+  if (titleTokens.length === 0) {
+    return null
+  }
+  const firstToken = titleTokens[0]
+  let bestSpan = null
+  let bestScore = 0
+  for (const span of spans) {
+    const spanText = normalizeIntentSearchText(span.textContent || "")
+    if (!spanText) {
+      continue
+    }
+    let score = 0
+    if (spanText.includes(firstToken)) {
+      score += 3
+    }
+    for (const token of titleTokens) {
+      if (spanText.includes(token)) {
+        score += 1
+      }
+    }
+    if (score > bestScore) {
+      bestScore = score
+      bestSpan = span
+    }
+  }
+  if (!(bestSpan instanceof HTMLElement) || bestScore <= 0) {
+    return null
+  }
+
+  const spanRect = bestSpan.getBoundingClientRect()
+  const surfaceRect = pageSurface.getBoundingClientRect()
+  return {
+    left: Math.max(6, spanRect.right - surfaceRect.left + 4),
+    top: Math.max(4, spanRect.top - surfaceRect.top - 2),
+    pageSurface
+  }
+}
+
+function renderPdfIntentOverlays() {
+  clearPdfIntentOverlays()
+  const sections = getReadingMapSections()
+  const intentMap = getSectionIntentMapFromOrientationData(getOrientationState().data?.sectionIntents)
+  if (!Array.isArray(sections) || sections.length === 0) {
+    return
+  }
+
+  for (const section of sections) {
+    const sectionKey = getSectionKey(section)
+    if (!sectionKey) {
+      continue
+    }
+    const pageIndex = parseOptionalPageIndex(section?.pageIndex)
+    if (pageIndex == null) {
+      continue
+    }
+    const pageNode = getPageNodeByIndex(pageIndex)
+    const anchor = findSectionAnchorInPage(pageNode, getSectionDisplayTitle(section))
+    if (!anchor) {
+      continue
+    }
+
+    const button = document.createElement("button")
+    button.type = "button"
+    button.className = "pdfIntentOverlay"
+    button.dataset.pdfIntentAction = "toggle"
+    button.dataset.sectionKey = sectionKey
+    button.textContent = "?"
+    button.style.left = `${anchor.left}px`
+    button.style.top = `${anchor.top}px`
+    anchor.pageSurface.append(button)
+
+    if (isIntentVisible(sectionKey)) {
+      const bubble = document.createElement("div")
+      bubble.className = "pdfIntentBubble"
+      const intent = clampText(intentMap[sectionKey], 220)
+      bubble.textContent = isIntentLoading(sectionKey) ? "Generating..." : intent || "No intent available yet."
+      bubble.style.left = `${Math.min(anchor.left + 24, Math.max(anchor.pageSurface.clientWidth - 220, 10))}px`
+      bubble.style.top = `${Math.max(anchor.top - 2, 4)}px`
+      anchor.pageSurface.append(bubble)
+    }
+  }
+}
+
+async function handlePdfIntentOverlayClick(buttonEl) {
+  const sectionKey = sanitizeText(buttonEl?.dataset?.sectionKey)
+  if (!sectionKey) {
+    return
+  }
+  const currentlyVisible = isIntentVisible(sectionKey)
+  setIntentVisible(sectionKey, !currentlyVisible)
+  renderPdfIntentOverlays()
+  if (currentlyVisible) {
+    return
+  }
+  const node = findSectionNodeByKey(getSectionTreeRootsForCurrentDocument(), sectionKey)
+  if (!node) {
+    return
+  }
+  await ensureIntentForSectionNode(node)
+  renderPdfIntentOverlays()
+}
+
+function getFigureIntentKey(card) {
+  const cardId = sanitizeText(card?.id)
+  if (!cardId) {
+    return ""
+  }
+  return `figure:${cardId.toLowerCase()}`
+}
+
+function buildFigureIntentNode(card) {
+  const sectionTitle = clampText(card?.title || card?.grounding?.sectionTitle || "Figure", 160)
+  const pageIndex = parseOptionalPageIndex(card?.grounding?.pageIndex) ?? 0
+  const key = getFigureIntentKey(card)
+  return {
+    key,
+    title: sectionTitle,
+    pageIndex,
+    level: 1,
+    hasChildren: false,
+    children: []
+  }
+}
+
+async function handleToggleFigureIntent(card) {
+  const cardKey = getFigureIntentKey(card)
+  if (!cardKey) {
+    return
+  }
+  const visible = isIntentVisible(cardKey)
+  setIntentVisible(cardKey, !visible)
+  if (visible) {
+    renderPanel()
+    return
+  }
+  renderPanel()
+  await ensureIntentForSectionNode(buildFigureIntentNode(card))
+}
+
 function isLoadTokenCurrent(loadToken) {
   return (
     loadToken === renderState.loadToken &&
@@ -1560,6 +2476,23 @@ function applyReadingMapToCurrentDocument(sections) {
   const normalizedSections = normalizeReadingMapSections(sections)
   currentPdf.readingMap = { sections: normalizedSections }
   updateOrientationSections(normalizedSections)
+  resetReadingMapState()
+  const docId = deriveDocId(currentPdf)
+  sectionIntentManager =
+    renderState.pdfDoc && docId
+      ? createIntentManager({
+          docId,
+          pdfDoc: renderState.pdfDoc,
+          logger
+        })
+      : null
+  sectionIntentManagerDocId = sectionIntentManager ? docId : ""
+  const orientationState = getOrientationState()
+  orientationState.data.sectionIntents = mapIntentsToCurrentSections(
+    normalizedSections,
+    orientationState.data?.sectionIntents
+  )
+  renderPdfIntentOverlays()
 }
 
 function summarizeFirstPageTopLines(lines) {
@@ -1724,15 +2657,6 @@ async function buildOrientationInput(pdfDoc, sections) {
 
 function normalizeOrientationResult(response, sections) {
   const source = response && typeof response === "object" ? response : {}
-  const sectionIntents = Array.isArray(source.sectionIntents)
-    ? source.sectionIntents
-        .map((item) => ({
-          title: clampText(item?.title, 140),
-          intent: clampText(item?.intent, 220)
-        }))
-        .filter((item) => item.title && item.intent)
-        .slice(0, ORIENTATION_MAX_SECTION_INTENTS)
-    : []
 
   return {
     purpose: clampText(source.purpose, 360),
@@ -1743,7 +2667,7 @@ function normalizeOrientationResult(response, sections) {
     keyTerms: Array.isArray(source.keyTerms)
       ? source.keyTerms.map((item) => clampText(item, 48)).filter(Boolean).slice(0, ORIENTATION_MAX_KEY_TERMS)
       : [],
-    sectionIntents,
+    sectionIntents: {},
     sections
   }
 }
@@ -1759,15 +2683,7 @@ function buildOrientationSummaryFromData(data) {
     keyTerms: Array.isArray(source.keyTerms)
       ? source.keyTerms.map((item) => clampText(item, 48)).filter(Boolean).slice(0, ORIENTATION_MAX_KEY_TERMS)
       : [],
-    sectionIntents: Array.isArray(source.sectionIntents)
-      ? source.sectionIntents
-          .map((item) => ({
-            title: clampText(item?.title, 140),
-            intent: clampText(item?.intent, 220)
-          }))
-          .filter((item) => item.title && item.intent)
-          .slice(0, ORIENTATION_MAX_SECTION_INTENTS)
-      : []
+    sectionIntents: {}
   }
 }
 
@@ -1785,19 +2701,31 @@ async function applyCachedOrientationForDocument(docId, loadToken, runToken) {
   if (!docId || docId === "unknown") {
     return false
   }
-  const cachedEntry = await getOrientationCache(docId)
+  const [cachedEntry, cachedOutline] = await Promise.all([getOrientationCache(docId), getOutline(docId)])
   if (!cachedEntry || !isOrientationRunCurrent(loadToken, runToken)) {
     return false
   }
-  const cachedSections = normalizeReadingMapSections(cachedEntry.sections)
+  const cachedSections = normalizeReadingMapSections(
+    Array.isArray(cachedOutline?.sections) && cachedOutline.sections.length > 0
+      ? cachedOutline.sections
+      : cachedEntry.sections
+  )
+  if ((!Array.isArray(cachedOutline?.sections) || cachedOutline.sections.length === 0) && cachedSections.length > 0) {
+    void setOutline(docId, {
+      updatedAt: Date.now(),
+      sections: toStoredOutlineSections(cachedSections)
+    })
+  }
   const cachedSummary = buildOrientationSummaryFromData(cachedEntry.summary)
   if (!hasOrientationSummary(cachedSummary) && cachedSections.length === 0) {
     return false
   }
 
   applyReadingMapToCurrentDocument(cachedSections)
+  const cachedIntents = await loadCachedSectionIntentsForDocument(docId, cachedSections)
   setOrientationReady({
     ...cachedSummary,
+    sectionIntents: cachedIntents,
     sections: cachedSections
   })
   if (sidebarUiState.activeTab === "orientation") {
@@ -1833,12 +2761,23 @@ async function generateOrientationForCurrentDocument(loadToken, { force = false 
     }
 
     updateOrientationLoadingMessage(force ? "Regenerating orientation..." : "Generating orientation...")
-    const outline = await extractOutline(renderState.pdfDoc)
+    const cachedOutline = !force && docId && docId !== "unknown" ? await getOutline(docId) : null
+    let outlineSections = normalizeReadingMapSections(cachedOutline?.sections)
+    if (outlineSections.length === 0) {
+      const outline = await extractOutline(renderState.pdfDoc)
+      outlineSections = normalizeReadingMapSections(outline?.sections)
+      if (docId && docId !== "unknown") {
+        void setOutline(docId, {
+          updatedAt: Date.now(),
+          sections: toStoredOutlineSections(outlineSections)
+        })
+      }
+    }
     if (!isOrientationRunCurrent(loadToken, runToken)) {
       return
     }
 
-    const sections = normalizeReadingMapSections(outline?.sections)
+    const sections = outlineSections
     applyReadingMapToCurrentDocument(sections)
     updateOrientationLoadingMessage("Summarizing purpose and reading map...")
 
@@ -1858,8 +2797,12 @@ async function generateOrientationForCurrentDocument(loadToken, { force = false 
     }
 
     const normalizedOrientation = normalizeOrientationResult(response, sections)
+    const cachedIntents = await loadCachedSectionIntentsForDocument(docId, sections)
     const orientationSummary = buildOrientationSummaryFromData(normalizedOrientation)
-    setOrientationReady(normalizedOrientation)
+    setOrientationReady({
+      ...normalizedOrientation,
+      sectionIntents: cachedIntents
+    })
     void persistOrientationForDocument(docId, sections, orientationSummary)
     if (sidebarUiState.activeTab === "orientation") {
       renderPanel()
@@ -3363,14 +4306,23 @@ async function restoreRecentJumpHighlightAfterRender() {
 async function loadCardsForCurrentDocument() {
   const docId = deriveDocId(currentPdf)
   sidebarUiState.docId = docId
-  const [cards, glossaryTerms] = await Promise.all([getCards(docId), getGlossaryTerms(docId)])
+  const [cards, glossaryTerms, walkthroughItems] = await Promise.all([
+    getCards(docId),
+    getGlossaryTerms(docId),
+    getWalkthrough(docId)
+  ])
   sidebarUiState.cards = cards.map((card) => normalizeCard(card))
   sidebarUiState.glossaryTerms = glossaryTerms
+  sidebarUiState.walkthrough = {
+    ...createWalkthroughUiState(),
+    items: normalizeWalkthroughItems(walkthroughItems)
+  }
   renderPanel()
   logger.info("Loaded cards for current document", {
     docId,
     cardCount: sidebarUiState.cards.length,
-    glossaryCount: sidebarUiState.glossaryTerms.length
+    glossaryCount: sidebarUiState.glossaryTerms.length,
+    walkthroughCount: sidebarUiState.walkthrough.items.length
   })
   if (currentSettings) {
     void syncWholePdfStatusFromCache(docId, currentSettings)
@@ -3433,18 +4385,69 @@ async function handlePanelCardAction(event) {
       toggleOrientationMapExpanded(false)
       return
     }
+    if (action === "expand-node" || action === "collapse-node") {
+      const sectionKey = sanitizeText(orientationButton.dataset.sectionKey)
+      if (sectionKey) {
+        setNodeExpanded(sectionKey, action === "expand-node")
+        renderPanel()
+      }
+      return
+    }
+    if (action === "generate-top-level-intents") {
+      void handleGenerateTopLevelIntents()
+      return
+    }
+    if (action === "generate-node-children-intents") {
+      void handleGenerateChildIntentsForSection(orientationButton.dataset.sectionKey)
+      return
+    }
     if (action === "regenerate") {
       if (renderState.pdfDoc && currentPdf) {
         void generateOrientationForCurrentDocument(renderState.loadToken, { force: true })
       }
       return
     }
+    if (action === "build-walkthrough") {
+      void buildWalkthroughFromOrientation()
+      return
+    }
     if (action === "jump-section") {
       const pageIndex = parseOptionalPageIndex(orientationButton.dataset.sectionPageIndex)
       if (pageIndex != null) {
-        scrollToPage(pageIndex + 1, "smooth")
+        void jumpToSection(pageIndex, orientationButton.dataset.sectionTitle, "smooth")
         const sectionTitle = sanitizeText(orientationButton.dataset.sectionTitle)
         setStatus(sectionTitle ? `Jumped to ${sectionTitle} (Page ${pageIndex + 1})` : `Jumped to Page ${pageIndex + 1}`)
+      }
+      return
+    }
+  }
+
+  const walkthroughButton = eventTarget.closest("button[data-walkthrough-action]")
+  if (walkthroughButton && panel.contains(walkthroughButton)) {
+    const action = walkthroughButton.dataset.walkthroughAction
+    if (action === "rebuild") {
+      const hasExisting = normalizeWalkthroughItems(sidebarUiState.walkthrough.items).length > 0
+      if (hasExisting) {
+        sidebarUiState.walkthrough.confirmRebuild = true
+        renderPanel()
+        return
+      }
+      void buildWalkthroughFromOrientation({ forceRebuild: true })
+      return
+    }
+    if (action === "confirm-rebuild") {
+      void buildWalkthroughFromOrientation({ forceRebuild: true })
+      return
+    }
+    if (action === "cancel-rebuild") {
+      sidebarUiState.walkthrough.confirmRebuild = false
+      renderPanel()
+      return
+    }
+    if (action === "jump") {
+      const pageIndex = parseOptionalPageIndex(walkthroughButton.dataset.sectionPageIndex)
+      if (pageIndex != null) {
+        void jumpToSection(pageIndex, walkthroughButton.dataset.sectionTitle, "smooth")
       }
       return
     }
@@ -3498,6 +4501,11 @@ async function handlePanelCardAction(event) {
     } catch (_error) {
       setStatus("Copy failed")
     }
+    return
+  }
+
+  if (action === "toggle-figure-intent" && card.type === "quant") {
+    void handleToggleFigureIntent(card)
     return
   }
 
@@ -4178,6 +5186,7 @@ async function renderAllPages(targetPageNumber, loadToken) {
   }
   setStatus(getLoadedStatusText());
   updatePdfControls();
+  renderPdfIntentOverlays()
 }
 
 function scheduleRender(targetPageNumber, loadToken = renderState.loadToken) {
@@ -4217,6 +5226,8 @@ function handleLoadFailure(sourceType, error) {
   sidebarUiState.docId = "unknown";
   sidebarUiState.cards = [];
   sidebarUiState.glossaryTerms = [];
+  sidebarUiState.walkthrough = createWalkthroughUiState()
+  sidebarUiState.toastMessage = ""
   resetOrientationStateForDocument()
   ensureScaleFactor();
   updatePdfControls();
@@ -4277,6 +5288,8 @@ async function loadPdfSource(source, documentParams) {
   sidebarUiState.docId = deriveDocId(currentPdf);
   sidebarUiState.cards = [];
   sidebarUiState.glossaryTerms = [];
+  sidebarUiState.walkthrough = createWalkthroughUiState()
+  sidebarUiState.toastMessage = ""
   resetOrientationStateForDocument()
   setOrientationLoading("Loading PDF...")
   ensureScaleFactor();
@@ -4540,6 +5553,13 @@ document.querySelectorAll(".tab").forEach((button) => {
 });
 panel.addEventListener("click", (event) => {
   void handlePanelCardAction(event);
+});
+pdfRoot.addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target.closest("button[data-pdf-intent-action]") : null
+  if (!(target instanceof HTMLButtonElement)) {
+    return
+  }
+  void handlePdfIntentOverlayClick(target)
 });
 
 toggleSidebarBtn.addEventListener("click", () => {

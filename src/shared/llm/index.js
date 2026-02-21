@@ -44,12 +44,31 @@ function normalizeInput(input) {
   const headings = Array.isArray(source.headings)
     ? source.headings.map((item) => clampText(item, 140)).filter(Boolean).slice(0, 24)
     : []
+  const sections = Array.isArray(source.sections)
+    ? source.sections
+        .map((section) => ({
+          sectionKey: clampText(section?.sectionKey, 220),
+          title: clampText(section?.title, 160),
+          snippet: clampText(section?.snippet, 1000),
+          pageIndex: Number.isFinite(Number(section?.pageIndex))
+            ? Math.max(0, Math.floor(Number(section.pageIndex)))
+            : 0
+        }))
+        .filter((section) => section.sectionKey && section.title)
+        .slice(0, 24)
+    : []
   const readingMode = source.readingMode === "structure" ? "structure" : "flow"
+  const pageIndex = Number.isFinite(Number(source.pageIndex))
+    ? Math.max(0, Math.floor(Number(source.pageIndex)))
+    : 0
   return {
     selectedText: clampText(source.selectedText, 200),
     contextWindow: clampText(source.contextWindow, 1600),
     title: clampText(source.title, 220),
+    snippet: clampText(source.snippet, 1000),
+    pageIndex,
     headings,
+    sections,
     readingMode,
     openaiFileId,
     grounding: {
@@ -109,6 +128,8 @@ export async function generateLLM(task, input, options = {}) {
     selectedTextLength: normalizedInput.selectedText.length,
     contextWindowLength: normalizedInput.contextWindow.length,
     headingCount: normalizedInput.headings.length,
+    sectionCount: normalizedInput.sections.length,
+    snippetLength: normalizedInput.snippet.length,
     hasOpenAIFile: Boolean(normalizedInput.openaiFileId)
   })
 

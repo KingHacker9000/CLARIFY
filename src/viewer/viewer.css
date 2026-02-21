@@ -312,6 +312,47 @@ html {
   user-select: text;
 }
 
+.pdfIntentOverlay {
+  position: absolute;
+  z-index: 6;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(45, 45, 40, 0.22);
+  background: rgba(255, 255, 255, 0.82);
+  color: #4d4d46;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.pdfIntentOverlay:hover {
+  opacity: 1;
+}
+
+.pdfIntentOverlay:focus-visible {
+  outline: 2px solid #7b9ef5;
+  outline-offset: 1px;
+}
+
+.pdfIntentBubble {
+  position: absolute;
+  z-index: 6;
+  max-width: 220px;
+  border: 1px solid #dfdfd3;
+  background: #fffef9;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: #33332e;
+  box-shadow: 0 4px 12px rgba(22, 20, 16, 0.12);
+}
+
 .pdfMessage {
   width: min(680px, 100%);
   margin-top: 20px;
@@ -488,6 +529,16 @@ body.resizingSidebar .sidebarResizeHandle::before,
   line-height: 1.45;
 }
 
+.panelToast {
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid #d5e3cb;
+  border-radius: 8px;
+  background: #f6fbf1;
+  color: #3d5d33;
+  font-size: 12px;
+}
+
 .orientationPanel {
   display: grid;
   gap: 12px;
@@ -659,82 +710,323 @@ body.resizingSidebar .sidebarResizeHandle::before,
   gap: 8px;
 }
 
+.orientationReadingMapNested {
+  margin-top: 6px;
+  margin-left: 16px;
+}
+
 .orientationMapItem {
   display: grid;
-  gap: 3px;
-  padding-left: var(--outline-indent, 0px);
+  gap: 4px;
+  position: relative;
 }
 
 .orientationMapItem.isSubsection {
   border-left: 1px dashed #e1e1d5;
   margin-left: 2px;
-  padding-left: calc(var(--outline-indent, 0px) + 8px);
+  padding-left: 8px;
 }
 
-.orientationMapTitle,
-.orientationMapIntent {
-  margin: 0;
-}
-
-.orientationMapTitle {
-  display: flex;
-}
-
-.orientationMapLink {
+.orientationMapRow {
+  position: relative;
   width: 100%;
   border: 1px solid #deded2;
   border-radius: 8px;
   background: #fafaf6;
-  color: #2f2f2a;
-  cursor: pointer;
-  font: inherit;
   display: grid;
   grid-template-columns: auto 1fr auto;
   align-items: center;
   gap: 8px;
-  text-align: left;
-  padding: 6px 8px;
+  padding: 6px 26px 6px 8px;
 }
 
-.orientationMapLink:hover {
+.orientationMapRow:hover {
   background: #f2f2ea;
   border-color: #d0d0c2;
 }
 
-.orientationMapLink:focus-visible,
-.orientationIconButton:focus-visible {
-  outline: 2px solid #7b9ef5;
-  outline-offset: 1px;
+.orientationMapExpand,
+.orientationMapTitleButton,
+.orientationMapPageButton {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
 }
 
-.orientationMapNumber {
-  min-width: 24px;
-  color: #6e6e64;
-  font-size: 11px;
-  font-weight: 600;
+.orientationMapExpand {
+  width: 16px;
+  text-align: center;
+  color: #64645a;
 }
 
-.orientationMapLinkText {
+.orientationMapExpandSpacer {
+  width: 16px;
+  display: inline-block;
+}
+
+.orientationMapTitleButton {
   font-size: 12px;
   color: #2f2f2a;
   line-height: 1.35;
 }
 
-.orientationMapPage {
+.orientationMapPageButton {
   font-size: 11px;
   color: #64645a;
+  justify-self: end;
 }
 
-.orientationMapIntent {
-  font-size: 12px;
-  color: #2e2e29;
+.orientationMapTitleButton:hover,
+.orientationMapPageButton:hover,
+.orientationMapExpand:hover {
+  color: #1f1f1b;
+}
+
+.orientationMapTitleButton:focus-visible,
+.orientationMapPageButton:focus-visible,
+.orientationMapExpand:focus-visible,
+.orientationMapIntentOverlay:focus-visible,
+.orientationMapSubtleAction:focus-visible,
+.orientationIconButton:focus-visible {
+  outline: 2px solid #7b9ef5;
+  outline-offset: 1px;
+}
+
+.orientationMapIntentOverlay {
+  position: static;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 1px solid rgba(40, 40, 36, 0.2);
+  background: rgba(255, 255, 255, 0.76);
+  color: #4d4d45;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  opacity: 1;
+  transition: none;
+  padding: 0;
+  line-height: 1;
+  justify-self: end;
+}
+
+.orientationMapRow:hover .orientationMapIntentOverlay {
+  opacity: 1;
+}
+
+.orientationMapIntentBubble {
+  font-size: 11px;
+  color: #33332d;
   line-height: 1.4;
-  margin-left: 34px;
+  border: 1px solid #dfdfd5;
+  background: #fffefb;
+  border-radius: 8px;
+  padding: 6px 8px;
+  margin-left: 16px;
+}
+
+.orientationMapControls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.orientationMapGroupActions {
+  margin-left: 16px;
+}
+
+.orientationMapSubtleAction {
+  border: 0;
+  background: transparent;
+  color: #5f5f57;
+  font: inherit;
+  font-size: 11px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.orientationMapSubtleAction:hover {
+  color: #2f2f2a;
+}
+
+.orientationMapSubtleAction:disabled {
+  opacity: 0.6;
+  cursor: default;
+  text-decoration: none;
+}
+
+.orientationMapActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.orientationMapActionButton {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fdfdfb;
+  color: var(--text);
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.orientationMapActionButton:hover {
+  background: #f2f2eb;
+}
+
+.orientationMapActionButton:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .orientationError {
   margin: 0;
   color: #7a2c2c;
+}
+
+.walkthroughPanel {
+  display: grid;
+  gap: 10px;
+}
+
+.walkthroughHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.walkthroughAction {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fdfdfb;
+  color: var(--text);
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.walkthroughAction:hover {
+  background: #f2f2eb;
+}
+
+.walkthroughConfirm {
+  border: 1px dashed #d7d7cb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.walkthroughList {
+  display: grid;
+  gap: 8px;
+  position: relative;
+  padding-left: 22px;
+}
+
+.walkthroughList::before {
+  content: "";
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: linear-gradient(180deg, #cdd8c0 0%, #c4d0b6 100%);
+  border-radius: 999px;
+}
+
+.walkthroughItem {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+  position: relative;
+}
+
+.walkthroughItem::before {
+  content: "";
+  position: absolute;
+  left: -19px;
+  top: 16px;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: #90a97a;
+  border: 2px solid #e9f0e2;
+}
+
+.walkthroughJump {
+  border: 1px solid #deded2;
+  border-radius: 8px;
+  background: #fafaf6;
+  color: #2f2f2a;
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+  cursor: pointer;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.walkthroughJump:hover {
+  background: #f2f2ea;
+  border-color: #d0d0c2;
+}
+
+.walkthroughSectionNumber {
+  font-weight: 700;
+  color: #5c6f4a;
+  min-width: 22px;
+}
+
+.walkthroughSectionTitle {
+  font-weight: 600;
+  color: #2f2f2a;
+}
+
+.walkthroughPreview {
+  margin: 0;
+  border: 1px solid #e2e2d8;
+  border-radius: 8px;
+  background: #f9faf6;
+  color: #34342e;
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 8px 10px;
+}
+
+.walkthroughPreview strong {
+  font-weight: 700;
+  color: #1f2818;
+}
+
+.walkthroughJump:focus-visible,
+.walkthroughAction:focus-visible,
+.orientationMapActionButton:focus-visible {
+  outline: 2px solid #7b9ef5;
+  outline-offset: 1px;
 }
 
 .cardList {
@@ -761,6 +1053,24 @@ body.resizingSidebar .sidebarResizeHandle::before,
   gap: 2px;
 }
 
+.cardTitleRow {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cardMetaRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cardMetaRow .cardMeta {
+  margin: 0;
+}
+
 .cardTitle {
   margin: 0;
   font-size: 14px;
@@ -777,6 +1087,42 @@ body.resizingSidebar .sidebarResizeHandle::before,
   margin: 0;
   color: var(--text);
   line-height: 1.4;
+}
+
+.cardIntentOverlay {
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  border: 1px solid rgba(44, 44, 40, 0.25);
+  background: rgba(255, 255, 255, 0.9);
+  color: #484840;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  opacity: 0.8;
+}
+
+.cardIntentOverlay:hover {
+  opacity: 1;
+}
+
+.cardIntentOverlay:focus-visible {
+  outline: 2px solid #7b9ef5;
+  outline-offset: 1px;
+}
+
+.cardIntentBubble {
+  border: 1px solid #dfdfd3;
+  background: #fffef9;
+  border-radius: 8px;
+  padding: 6px 8px;
+  margin-top: -2px;
+  font-size: 12px;
+  line-height: 1.38;
+  color: #33332e;
 }
 
 .cardGrounding {

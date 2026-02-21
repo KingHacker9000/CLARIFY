@@ -53,7 +53,14 @@ function normalizeNumber(value, fallback, min, max) {
 }
 
 function normalizeTask(task) {
-  if (task === "definition" || task === "explanation" || task === "quant" || task === "orientation") {
+  if (
+    task === "definition" ||
+    task === "explanation" ||
+    task === "quant" ||
+    task === "orientation" ||
+    task === "section_intents" ||
+    task === "section_intent"
+  ) {
     return task
   }
   return "explanation"
@@ -66,12 +73,32 @@ function normalizeInput(input) {
   const headings = Array.isArray(source.headings)
     ? source.headings.map((item) => clampText(item, 140)).filter(Boolean).slice(0, 24)
     : []
+  const sections = Array.isArray(source.sections)
+    ? source.sections
+        .map((section) => ({
+          sectionKey: clampText(section?.sectionKey, 220),
+          title: clampText(section?.title, 160),
+          snippet: clampText(section?.snippet, 1000),
+          pageIndex: Number.isFinite(Number(section?.pageIndex))
+            ? Math.max(0, Math.floor(Number(section.pageIndex)))
+            : 0
+        }))
+        .filter((section) => section.sectionKey && section.title)
+        .slice(0, 24)
+    : []
   const readingMode = source.readingMode === "structure" ? "structure" : "flow"
+  const snippet = clampText(source.snippet, 1000)
+  const pageIndex = Number.isFinite(Number(source.pageIndex))
+    ? Math.max(0, Math.floor(Number(source.pageIndex)))
+    : 0
   return {
     selectedText: clampText(source.selectedText, MAX_SELECTED_TEXT_LENGTH),
     contextWindow: clampText(source.contextWindow, MAX_CONTEXT_WINDOW_LENGTH),
     title: clampText(source.title, MAX_TITLE_LENGTH),
     headings,
+    sections,
+    snippet,
+    pageIndex,
     readingMode,
     openaiFileId,
     grounding: {
@@ -92,12 +119,24 @@ function taskLabel(task) {
   if (task === "orientation") {
     return "paper orientation"
   }
+  if (task === "section_intents") {
+    return "section intents"
+  }
+  if (task === "section_intent") {
+    return "section intent"
+  }
   return "explanation"
 }
 
 function buildSchemaForTask(task) {
+  if (task === "section_intents") {
+    return `{"intents":[{"sectionKey":"string","intent":"<=25 words"}]}`
+  }
+  if (task === "section_intent") {
+    return `{"intent":"<=25 words"}`
+  }
   if (task === "orientation") {
-    return `{"purpose":"string","contribution":"string","focusBullets":["string"],"keyTerms":["string"],"sectionIntents":[{"title":"string","intent":"string"}]}`
+    return `{"purpose":"string","contribution":"string","focusBullets":["string"],"keyTerms":["string"]}`
   }
   if (task === "quant") {
     return `{"shortAnswer":"<=35 words","whatItShows":"string","takeaway":"string","supportsClaim":["string"],"whatToLookAt":["string"],"groundingPages":[0],"groundingQuotes":["short quote"]}`
@@ -106,6 +145,42 @@ function buildSchemaForTask(task) {
 }
 
 function buildUserPrompt(task, input, limits) {
+  if (task === "section_intent") {
+    return [
+      "Task: section intent",
+      `Return JSON schema exactly: ${buildSchemaForTask(task)}`,
+      "Write one sentence, <= 25 words, for a time-constrained reader.",
+      "Ground only in provided title/snippet.",
+      "If snippet is weak, keep a cautious title-based intent.",
+      `Section title: "${input.title || ""}"`,
+      `Page index (0-based): ${input.pageIndex}`,
+      `Snippet: "${input.snippet || ""}"`
+    ].join("\n")
+  }
+
+  if (task === "section_intents") {
+    const sectionPayload = JSON.stringify(
+      input.sections.map((section) => ({
+        sectionKey: section.sectionKey,
+        title: section.title,
+        pageIndex: section.pageIndex,
+        snippet: section.snippet
+      }))
+    )
+    return [
+      "Task: section intents",
+      `Return JSON schema exactly: ${buildSchemaForTask(task)}`,
+      "Rules: include one entry per provided sectionKey.",
+      "intent must be one sentence and <= 25 words.",
+      "Audience: time-constrained reader optimizing reading strategy.",
+      "Prioritize high-value sections first: problem, method, experiments/results, limitations.",
+      "For low-value sections (references, bibliography, acknowledgments, appendix), state they are usually skippable unless needed.",
+      "Be grounded in title/snippet. If snippet is weak, use a cautious title-based intent.",
+      "Do not invent section keys.",
+      `Sections JSON: ${sectionPayload}`
+    ].join("\n")
+  }
+
   if (task === "orientation") {
     return [
       "Task: paper orientation summary",
@@ -114,7 +189,6 @@ function buildUserPrompt(task, input, limits) {
       "purpose and contribution should be short prose sentences.",
       "focusBullets: 3-5 items, actionable reading guidance.",
       "keyTerms: up to 8 short terms/phrases.",
-      "sectionIntents: align to provided headings when possible, each with 1-line intent.",
       `Reading mode preference: ${input.readingMode}`,
       `Title guess: "${input.title || ""}"`,
       `Abstract-ish context: "${input.contextWindow || ""}"`,

@@ -7,6 +7,9 @@ const CARDS_BY_DOC_ID_KEY = "cardsByDocId";
 const GLOSSARY_BY_DOC_ID_KEY = "glossaryByDocId";
 const OPENAI_FILE_IDS_BY_DOC_ID_KEY = "openaiFileIdsByDocId";
 const ORIENTATION_CACHE_BY_DOC_ID_KEY = "orientationCacheByDocId";
+const OUTLINE_BY_DOC_ID_KEY = "outlineByDocId";
+const INTENTS_BY_DOC_ID_KEY = "intentsByDocId";
+const WALKTHROUGH_BY_DOC_ID_KEY = "walkthroughByDocId";
 
 function getStorageArea() {
   try {
@@ -169,6 +172,66 @@ function normalizeOrientationSections(list) {
     .slice(0, 280)
 }
 
+function normalizeOutlineSections(list) {
+  const source = Array.isArray(list) ? list : []
+  return source
+    .map((section) => {
+      const title = truncateText(section?.title, 180)
+      const numericPageIndex = Number(section?.pageIndex)
+      if (!Number.isFinite(numericPageIndex) || numericPageIndex < 0) {
+        return null
+      }
+      const pageIndex = Math.floor(numericPageIndex)
+      const level = normalizeNumber(section?.level, 1, 1, 8)
+      if (!title) {
+        return null
+      }
+      return {
+        title,
+        pageIndex,
+        level
+      }
+    })
+    .filter(Boolean)
+    .slice(0, 320)
+}
+
+function normalizeOutlineEntry(entry) {
+  const source = entry && typeof entry === "object" ? entry : {}
+  return {
+    version: 1,
+    updatedAt: Number.isFinite(source.updatedAt) ? Number(source.updatedAt) : Date.now(),
+    sections: normalizeOutlineSections(source.sections)
+  }
+}
+
+function normalizeSectionKey(key) {
+  return typeof key === "string" ? key.replace(/\s+/g, " ").trim().slice(0, 220) : ""
+}
+
+function normalizeSectionIntentsEntry(entry) {
+  const source = entry && typeof entry === "object" && !Array.isArray(entry) ? entry : {}
+  const normalized = {}
+  let count = 0
+  for (const [rawKey, rawIntent] of Object.entries(source)) {
+    if (count >= 360) {
+      break
+    }
+    const key = normalizeSectionKey(rawKey)
+    const intent = truncateText(rawIntent, 220)
+    if (!key || !intent) {
+      continue
+    }
+    normalized[key] = intent
+    count += 1
+  }
+  return normalized
+}
+
+function normalizeIntentString(value) {
+  return truncateText(value, 220)
+}
+
 function normalizeOrientationCacheEntry(entry) {
   const source = entry && typeof entry === "object" ? entry : {}
   const sections = normalizeOrientationSections(source.sections)
@@ -229,9 +292,49 @@ function normalizeGlossaryList(value) {
   return value.map((term) => normalizeGlossaryTerm(term))
 }
 
+function normalizeWalkthroughItem(item, index = 0) {
+  const source = item && typeof item === "object" ? item : {}
+  const sectionTitle = truncateText(source.sectionTitle, 180)
+  const oneLiner = truncateText(source.oneLiner, 220)
+  const numericPageIndex = Number(source.pageIndex)
+  const pageIndex =
+    Number.isFinite(numericPageIndex) && numericPageIndex >= 0
+      ? Math.floor(numericPageIndex)
+      : 0
+  return {
+    sectionTitle: sectionTitle || `Section ${index + 1}`,
+    oneLiner: oneLiner || (sectionTitle ? `Read this section for: ${sectionTitle}` : "Read this section."),
+    pageIndex,
+    createdAt:
+      typeof source.createdAt === "number" && Number.isFinite(source.createdAt)
+        ? source.createdAt
+        : Date.now()
+  }
+}
+
+function normalizeWalkthroughList(value) {
+  const source = Array.isArray(value) ? value : []
+  return source.map((item, index) => normalizeWalkthroughItem(item, index)).slice(0, 120)
+}
+
 async function getOpenAIFileIdsByDocIdMap() {
   const values = await get({ [OPENAI_FILE_IDS_BY_DOC_ID_KEY]: {} })
   return ensureObjectMap(values?.[OPENAI_FILE_IDS_BY_DOC_ID_KEY])
+}
+
+async function getOutlineByDocIdMap() {
+  const values = await get({ [OUTLINE_BY_DOC_ID_KEY]: {} })
+  return ensureObjectMap(values?.[OUTLINE_BY_DOC_ID_KEY])
+}
+
+async function getIntentsByDocIdMap() {
+  const values = await get({ [INTENTS_BY_DOC_ID_KEY]: {} })
+  return ensureObjectMap(values?.[INTENTS_BY_DOC_ID_KEY])
+}
+
+async function getWalkthroughByDocIdMap() {
+  const values = await get({ [WALKTHROUGH_BY_DOC_ID_KEY]: {} })
+  return ensureObjectMap(values?.[WALKTHROUGH_BY_DOC_ID_KEY])
 }
 
 async function getOrientationCacheByDocIdMap() {
@@ -325,6 +428,19 @@ export async function removeGlossaryTerm(docId, termId) {
   return nextGlossary
 }
 
+export async function getWalkthrough(docId) {
+  const normalizedDocId = normalizeDocId(docId)
+  const walkthroughByDocId = await getWalkthroughByDocIdMap()
+  return normalizeWalkthroughList(walkthroughByDocId[normalizedDocId])
+}
+
+export async function setWalkthrough(docId, items) {
+  const normalizedDocId = normalizeDocId(docId)
+  const walkthroughByDocId = await getWalkthroughByDocIdMap()
+  walkthroughByDocId[normalizedDocId] = normalizeWalkthroughList(items)
+  return set({ [WALKTHROUGH_BY_DOC_ID_KEY]: walkthroughByDocId })
+}
+
 export async function getOpenAIFileId(docId) {
   const normalizedDocId = normalizeDocId(docId)
   const mapping = await getOpenAIFileIdsByDocIdMap()
@@ -384,4 +500,84 @@ export async function clearOrientationCache(docId) {
   }
   delete mapping[normalizedDocId]
   return set({ [ORIENTATION_CACHE_BY_DOC_ID_KEY]: mapping })
+}
+
+export async function getOutline(docId) {
+  const normalizedDocId = normalizeDocId(docId)
+  if (!normalizedDocId || normalizedDocId === "unknown") {
+    return null
+  }
+  const mapping = await getOutlineByDocIdMap()
+  const entry = mapping[normalizedDocId]
+  if (!entry || typeof entry !== "object") {
+    return null
+  }
+  const normalized = normalizeOutlineEntry(entry)
+  return { sections: normalized.sections }
+}
+
+export async function setOutline(docId, outlineObj) {
+  const normalizedDocId = normalizeDocId(docId)
+  if (!normalizedDocId || normalizedDocId === "unknown") {
+    return false
+  }
+  const mapping = await getOutlineByDocIdMap()
+  mapping[normalizedDocId] = normalizeOutlineEntry(outlineObj)
+  return set({ [OUTLINE_BY_DOC_ID_KEY]: mapping })
+}
+
+export async function getSectionIntents(docId) {
+  const normalizedDocId = normalizeDocId(docId)
+  if (!normalizedDocId || normalizedDocId === "unknown") {
+    return null
+  }
+  const mapping = await getIntentsByDocIdMap()
+  const entry = mapping[normalizedDocId]
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    return null
+  }
+  return normalizeSectionIntentsEntry(entry)
+}
+
+export async function setSectionIntents(docId, intentsObj) {
+  return setIntents(docId, intentsObj)
+}
+
+export async function getIntents(docId) {
+  const intents = await getSectionIntents(docId)
+  return intents || {}
+}
+
+export async function setIntents(docId, intentsObj) {
+  const normalizedDocId = normalizeDocId(docId)
+  if (!normalizedDocId || normalizedDocId === "unknown") {
+    return false
+  }
+  const mapping = await getIntentsByDocIdMap()
+  mapping[normalizedDocId] = normalizeSectionIntentsEntry(intentsObj)
+  return set({ [INTENTS_BY_DOC_ID_KEY]: mapping })
+}
+
+export async function getIntent(docId, sectionKey) {
+  const normalizedSectionKey = normalizeSectionKey(sectionKey)
+  if (!normalizedSectionKey) {
+    return null
+  }
+  const intents = await getIntents(docId)
+  const intent = normalizeIntentString(intents[normalizedSectionKey])
+  return intent || null
+}
+
+export async function setIntent(docId, sectionKey, intentString) {
+  const normalizedDocId = normalizeDocId(docId)
+  const normalizedSectionKey = normalizeSectionKey(sectionKey)
+  const normalizedIntent = normalizeIntentString(intentString)
+  if (!normalizedDocId || normalizedDocId === "unknown" || !normalizedSectionKey || !normalizedIntent) {
+    return false
+  }
+  const mapping = await getIntentsByDocIdMap()
+  const existingDocIntents = normalizeSectionIntentsEntry(mapping[normalizedDocId])
+  existingDocIntents[normalizedSectionKey] = normalizedIntent
+  mapping[normalizedDocId] = existingDocIntents
+  return set({ [INTENTS_BY_DOC_ID_KEY]: mapping })
 }

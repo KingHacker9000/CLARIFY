@@ -154,6 +154,80 @@ function makeOrientationResponse(seed, title, headings, readingMode) {
   }
 }
 
+function makeSectionIntentsResponse(seed, sections) {
+  const safeSections = Array.isArray(sections) ? sections : []
+  const intents = []
+  for (let index = 0; index < safeSections.length; index += 1) {
+    const section = safeSections[index]
+    const sectionKey = normalizeText(section?.sectionKey)
+    const title = normalizeText(section?.title) || `Section ${index + 1}`
+    if (!sectionKey) {
+      continue
+    }
+    const lowerTitle = title.toLowerCase()
+    if (
+      /\breferences?\b/.test(lowerTitle) ||
+      /\bbibliograph/.test(lowerTitle) ||
+      /\bappendix\b/.test(lowerTitle) ||
+      /\backnowledg(e)?ments?\b/.test(lowerTitle) ||
+      /\bsupplement(ar(y|al))?\b/.test(lowerTitle)
+    ) {
+      intents.push({
+        sectionKey,
+        intent: `Usually skippable on a time budget; scan ${title} only if you need citations or extra implementation details.`
+      })
+      continue
+    }
+    const variant = (seed + index) % 4
+    let intent = ""
+    if (variant === 0) {
+      intent = `Read this section to understand ${title} and how it fits the paper's argument.`
+    } else if (variant === 1) {
+      intent = `This section explains ${title}, focusing on assumptions, setup, and why it matters.`
+    } else if (variant === 2) {
+      intent = `Use this section to capture the main point of ${title} before moving forward.`
+    } else {
+      intent = `This section provides key evidence or context related to ${title}.`
+    }
+    intents.push({
+      sectionKey,
+      intent
+    })
+  }
+  return { intents }
+}
+
+function makeSingleSectionIntentResponse(seed, title, snippet, pageIndex) {
+  const normalizedTitle = normalizeText(title) || `Section ${Math.max(1, pageIndex + 1)}`
+  const normalizedSnippet = normalizeText(snippet)
+  const lowerTitle = normalizedTitle.toLowerCase()
+  if (
+    /\breferences?\b/.test(lowerTitle) ||
+    /\bbibliograph/.test(lowerTitle) ||
+    /\bappendix\b/.test(lowerTitle) ||
+    /\backnowledg(e)?ments?\b/.test(lowerTitle) ||
+    /\bsupplement(ar(y|al))?\b/.test(lowerTitle)
+  ) {
+    return { intent: `Usually skippable unless you need citations or implementation details from ${normalizedTitle}.` }
+  }
+
+  const variant = seed % 4
+  if (variant === 0) {
+    return { intent: `Read ${normalizedTitle} for the core claim and how evidence is presented.` }
+  }
+  if (variant === 1) {
+    return { intent: `Use ${normalizedTitle} to track assumptions, setup, and why this step matters.` }
+  }
+  if (variant === 2) {
+    return {
+      intent: normalizedSnippet
+        ? `This section clarifies ${normalizedTitle} and highlights key context before later results.`
+        : `This section introduces ${normalizedTitle} and its role in the paper's argument.`
+    }
+  }
+  return { intent: `Capture one takeaway from ${normalizedTitle} before moving to the next section.` }
+}
+
 export async function generate(task, input = {}) {
   const normalizedTask = normalizeText(task).toLowerCase()
   const selectedText = normalizeText(input.selectedText) || "this selection"
@@ -162,9 +236,21 @@ export async function generate(task, input = {}) {
   const headings = Array.isArray(input.headings)
     ? input.headings.map((item) => normalizeText(item)).filter(Boolean)
     : []
+  const sections = Array.isArray(input.sections)
+    ? input.sections.map((section) => ({
+        sectionKey: normalizeText(section?.sectionKey),
+        title: normalizeText(section?.title),
+        snippet: normalizeText(section?.snippet),
+        pageIndex: Number.isFinite(Number(section?.pageIndex))
+          ? Math.max(0, Math.floor(Number(section.pageIndex)))
+          : 0
+      }))
+    : []
   const readingMode = input.readingMode === "structure" ? "structure" : "flow"
+  const snippet = normalizeText(input.snippet)
+  const pageIndex = Number.isFinite(Number(input.pageIndex)) ? Math.max(0, Math.floor(Number(input.pageIndex))) : 0
   const seed = hashString(
-    `${normalizedTask}|${selectedText}|${title}|${sectionTitle}|${headings.join("|")}|${readingMode}`
+    `${normalizedTask}|${selectedText}|${title}|${sectionTitle}|${headings.join("|")}|${readingMode}|${snippet}|${pageIndex}`
   )
 
   if (normalizedTask === "quant") {
@@ -172,6 +258,12 @@ export async function generate(task, input = {}) {
   }
   if (normalizedTask === "orientation") {
     return makeOrientationResponse(seed, title, headings, readingMode)
+  }
+  if (normalizedTask === "section_intents") {
+    return makeSectionIntentsResponse(seed, sections)
+  }
+  if (normalizedTask === "section_intent") {
+    return makeSingleSectionIntentResponse(seed, title, snippet, pageIndex)
   }
   if (normalizedTask === "definition") {
     return makeDefinitionResponse(seed, selectedText)
