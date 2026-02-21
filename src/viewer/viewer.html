@@ -11,7 +11,15 @@
     <div id="layout" class="layout">
       <main class="pdfPane">
         <div class="pdfToolbar">
-          <button id="openFile" type="button">Open PDF</button>
+          <button
+            id="openFile"
+            class="toolbarIconButton toolbarImageButton"
+            type="button"
+            aria-label="Open PDF"
+            title="Open PDF"
+          >
+            <img class="toolbarIconImage" src="../../assets/icons/open.png" alt="" />
+          </button>
           <div class="toolbarGroup navGroup" aria-label="Page navigation">
             <button id="prevPage" class="toolbarIconButton" type="button" aria-label="Previous page">&larr;</button>
             <span id="pageIndicator" class="pageIndicator">Page - / -</span>
@@ -20,7 +28,16 @@
           <div class="toolbarGroup zoomGroup" aria-label="Zoom controls">
             <button id="zoomOut" class="toolbarIconButton" type="button" aria-label="Zoom out">-</button>
             <button id="zoomIn" class="toolbarIconButton" type="button" aria-label="Zoom in">+</button>
-            <button id="fitWidth" type="button" aria-pressed="false">Fit Width</button>
+            <button
+              id="fitWidth"
+              class="toolbarIconButton toolbarImageButton"
+              type="button"
+              aria-pressed="false"
+              aria-label="Fit Width"
+              title="Fit Width"
+            >
+              <img class="toolbarIconImage" src="../../assets/icons/fit-width.png" alt="" />
+            </button>
           </div>
           <span id="status">No PDF loaded</span>
           <span id="readingModeStatus" class="readingModeStatus">Mode: Flow</span>
@@ -132,6 +149,8 @@
             </div>
           </div>
         </div>
+
+        <aside id="sectionRail" class="sectionRail" hidden aria-label="Document section rail"></aside>
 
         <div id="pdfRoot" class="pdfRoot pdfViewer">
           <!-- PDF.js will render pages here -->

@@ -56,6 +56,11 @@ const ORIENTATION_MAX_STRUCTURE_FOCUS_BULLETS = 5;
 const ORIENTATION_TEXT_SCAN_PAGES = 8;
 const PANEL_TOAST_DURATION_MS = 1600;
 const PAGE_VISIBILITY_THRESHOLD = 0.6;
+const SECTION_RAIL_MIN_LEFT_GUTTER = 34;
+const SECTION_RAIL_LABEL_STEP = 28;
+const SECTION_RAIL_LABEL_RADIUS = 4;
+const SECTION_RAIL_MAX_HOVER_WIDTH = 220;
+const SECTION_JUMP_VIEWPORT_MARGIN_TOP = 120;
 const REMOTE_LOAD_ERROR_MESSAGE =
   "This PDF could not be loaded due to site restrictions (CORS/login). Try downloading and opening it locally.";
 const FILE_URL_LOAD_HINT_MESSAGE =
@@ -84,6 +89,8 @@ const statusEl = document.getElementById("status");
 const readingModeStatusEl = document.getElementById("readingModeStatus");
 const contextScopeStatusEl = document.getElementById("contextScopeStatus");
 const pdfRoot = document.getElementById("pdfRoot");
+const sectionRailEl = document.getElementById("sectionRail");
+const pdfToolbarEl = document.querySelector(".pdfToolbar");
 const fileInput = document.getElementById("fileInput");
 const openFileBtn = document.getElementById("openFile");
 const prevPageBtn = document.getElementById("prevPage");
@@ -210,6 +217,13 @@ let orientationRunToken = 0;
 let panelToastTimer = null;
 let sectionIntentManager = null
 let sectionIntentManagerDocId = ""
+const sectionRailState = {
+  isHovering: false,
+  pointerY: 0,
+  selectedIndex: 0,
+  renderFrame: 0,
+  closeTimer: 0
+}
 
 const RETRIEVAL_BLOCK_MIN_CHARS = 50;
 const RETRIEVAL_BLOCK_MAX_CHARS = 420;
@@ -1102,35 +1116,12 @@ function renderOrientationReadingMap(
   readingMode,
   intentsStatus = "idle"
 ) {
-  const mapSection = createOrientationSection("Reading map")
+  void sectionIntents
+  void mapExpanded
+  void readingMode
+  void intentsStatus
+  const mapSection = createOrientationSection("Section markers")
   const normalizedSections = Array.isArray(sections) ? sections : []
-  const sectionIntentMap = getSectionIntentMapFromOrientationData(sectionIntents)
-  const mappedIntents = mapIntentsToCurrentSections(normalizedSections, sectionIntentMap)
-  const readingMapState = getReadingMapState()
-  const treeRoots = buildSectionTree(normalizedSections)
-  const topLevelNodes = treeRoots.filter((node) => Number(node?.level) === 1)
-  const visibleRoots = topLevelNodes.length > 0 ? topLevelNodes : treeRoots
-
-  const controls = document.createElement("div")
-  controls.className = "orientationMapControls"
-
-  const toggleButton = document.createElement("button")
-  toggleButton.type = "button"
-  toggleButton.className = "orientationToggleMap"
-  toggleButton.dataset.orientationAction = mapExpanded ? "collapse-map" : "expand-map"
-  toggleButton.textContent = mapExpanded ? "Hide map" : "Show map"
-  controls.append(toggleButton)
-
-  const prewarmTopLevelButton = document.createElement("button")
-  prewarmTopLevelButton.type = "button"
-  prewarmTopLevelButton.className = "orientationMapSubtleAction"
-  prewarmTopLevelButton.dataset.orientationAction = "generate-top-level-intents"
-  prewarmTopLevelButton.disabled = readingMapState.topLevelPrewarming || visibleRoots.length === 0
-  prewarmTopLevelButton.textContent = readingMapState.topLevelPrewarming
-    ? "Generating top-level intents..."
-    : "Generate top-level intents"
-  controls.append(prewarmTopLevelButton)
-  mapSection.append(controls)
 
   const actionRow = document.createElement("div")
   actionRow.className = "orientationMapActions"
@@ -1147,109 +1138,19 @@ function renderOrientationReadingMap(
   if (normalizedSections.length === 0) {
     const empty = document.createElement("p")
     empty.className = "orientationMutedText"
-    empty.textContent = "No outline detected."
+    empty.textContent = "No outline detected for section markers."
     mapSection.append(empty)
     container.append(mapSection)
     return
   }
 
-  if (!mapExpanded) {
-    const summary = document.createElement("p")
-    summary.className = "orientationMutedText"
-    const intentCount = Object.keys(mappedIntents).length
-    summary.textContent =
-      intentCount > 0
-        ? `${normalizedSections.length} sections available. ${intentCount} intents ready.`
-        : `${normalizedSections.length} sections available.`
-    mapSection.append(summary)
-    container.append(mapSection)
-    return
-  }
-
-  if (readingMode === "structure") {
-    const orderHint = document.createElement("p")
-    orderHint.className = "orientationMutedText"
-    orderHint.textContent = "Suggested reading order follows the section list below."
-    mapSection.append(orderHint)
-  }
-
-  const list = document.createElement("ul")
-  list.className = "orientationReadingMap"
-  function renderNode(node, parentList) {
-    const item = document.createElement("li")
-    item.className = "orientationMapItem"
-    item.style.setProperty("--outline-level", String(Math.max(1, Number(node?.level) || 1)))
-    if (Number(node?.level) > 1) {
-      item.classList.add("isSubsection")
-    }
-
-    const row = document.createElement("div")
-    row.className = "orientationMapRow"
-    item.append(row)
-
-    if (node.hasChildren) {
-      const expandButton = document.createElement("button")
-      expandButton.type = "button"
-      expandButton.className = "orientationMapExpand"
-      expandButton.dataset.orientationAction = isNodeExpanded(node.key) ? "collapse-node" : "expand-node"
-      expandButton.dataset.sectionKey = node.key
-      expandButton.textContent = isNodeExpanded(node.key) ? "\u25BE" : "\u25B8"
-      row.append(expandButton)
-    } else {
-      const spacer = document.createElement("span")
-      spacer.className = "orientationMapExpandSpacer"
-      spacer.textContent = ""
-      row.append(spacer)
-    }
-
-    const titleButton = document.createElement("button")
-    titleButton.type = "button"
-    titleButton.className = "orientationMapTitleButton"
-    titleButton.dataset.orientationAction = "jump-section"
-    titleButton.dataset.sectionPageIndex = String(Number(node?.pageIndex) || 0)
-    titleButton.dataset.sectionTitle = sanitizeText(node?.title)
-    titleButton.textContent = clampText(node?.title, 140) || "Untitled section"
-    row.append(titleButton)
-
-    const pageButton = document.createElement("button")
-    pageButton.type = "button"
-    pageButton.className = "orientationMapPageButton"
-    pageButton.dataset.orientationAction = "jump-section"
-    pageButton.dataset.sectionPageIndex = String(Number(node?.pageIndex) || 0)
-    pageButton.dataset.sectionTitle = sanitizeText(node?.title)
-    pageButton.textContent = `\u2197 Page ${Math.max(0, Number(node?.pageIndex) || 0) + 1}`
-    row.append(pageButton)
-
-    if (node.hasChildren && isNodeExpanded(node.key)) {
-      const groupActions = document.createElement("div")
-      groupActions.className = "orientationMapGroupActions"
-      const generateChildrenButton = document.createElement("button")
-      generateChildrenButton.type = "button"
-      generateChildrenButton.className = "orientationMapSubtleAction"
-      generateChildrenButton.dataset.orientationAction = "generate-node-children-intents"
-      generateChildrenButton.dataset.sectionKey = node.key
-      generateChildrenButton.disabled = Boolean(readingMapState.groupPrewarmByKey[node.key])
-      generateChildrenButton.textContent = readingMapState.groupPrewarmByKey[node.key]
-        ? "Generating child intents..."
-        : "Generate intents for this section"
-      groupActions.append(generateChildrenButton)
-      item.append(groupActions)
-
-      const childList = document.createElement("ul")
-      childList.className = "orientationReadingMap orientationReadingMapNested"
-      for (const child of Array.isArray(node.children) ? node.children : []) {
-        renderNode(child, childList)
-      }
-      item.append(childList)
-    }
-
-    parentList.append(item)
-  }
-
-  for (const node of visibleRoots) {
-    renderNode(node, list)
-  }
-  mapSection.append(list)
+  const summary = document.createElement("p")
+  summary.className = "orientationMutedText"
+  summary.textContent =
+    normalizedSections.length === 1
+      ? "1 section marker is available on the left rail."
+      : `${normalizedSections.length} section markers are available on the left rail.`
+  mapSection.append(summary)
   container.append(mapSection)
 }
 
@@ -2090,6 +1991,16 @@ async function jumpToSection(pageIndex, sectionTitle, behavior = "smooth") {
 
   scrollToPage(normalizedPageIndex + 1, behavior)
   await waitForPageInView(pageNode)
+  const anchor = findSectionAnchorInPage(pageNode, sectionTitle)
+  if (anchor) {
+    const minPageTop = Math.max(pageNode.offsetTop + 6, 0)
+    const targetTop = Math.max(
+      pageNode.offsetTop + anchor.top - SECTION_JUMP_VIEWPORT_MARGIN_TOP,
+      minPageTop
+    )
+    pdfRoot.scrollTo({ top: targetTop, behavior })
+    await waitForPageInView(pageNode)
+  }
   await waitForHighlightTiming()
   const needleText = clampText(sectionTitle, 160)
   if (needleText) {
@@ -2313,34 +2224,63 @@ function findSectionAnchorInPage(pageNode, title) {
   if (titleTokens.length === 0) {
     return null
   }
-  const firstToken = titleTokens[0]
+  const normalizedTitle = normalizeIntentSearchText(title)
+  const minimumTokenMatches = titleTokens.length >= 2 ? 2 : 1
   let bestSpan = null
-  let bestScore = 0
+  let bestScore = Number.NEGATIVE_INFINITY
+  const surfaceRect = pageSurface.getBoundingClientRect()
+  const surfaceHeight = Math.max(surfaceRect.height, 1)
   for (const span of spans) {
     const spanText = normalizeIntentSearchText(span.textContent || "")
     if (!spanText) {
       continue
     }
-    let score = 0
-    if (spanText.includes(firstToken)) {
-      score += 3
-    }
+
+    let tokenMatches = 0
     for (const token of titleTokens) {
       if (spanText.includes(token)) {
-        score += 1
+        tokenMatches += 1
       }
     }
+    if (tokenMatches < minimumTokenMatches) {
+      continue
+    }
+
+    const spanRect = span.getBoundingClientRect()
+    const relativeTop = spanRect.top - surfaceRect.top
+    const wordCount = spanText.split(" ").filter(Boolean).length
+    let score = tokenMatches * 4
+    if (spanText === normalizedTitle) {
+      score += 40
+    } else if (normalizedTitle && spanText.includes(normalizedTitle)) {
+      score += 26
+    }
+    if (tokenMatches === titleTokens.length) {
+      score += 10
+    }
+    if (wordCount <= 10) {
+      score += 4
+    }
+    if (spanText.length <= 70) {
+      score += 4
+    } else if (spanText.length > 120) {
+      score -= 8
+    }
+    score += Math.min(Math.max(spanRect.height, 0), 24) * 0.55
+    if (relativeTop <= surfaceHeight * 0.45) {
+      score += 3
+    }
+
     if (score > bestScore) {
       bestScore = score
       bestSpan = span
     }
   }
-  if (!(bestSpan instanceof HTMLElement) || bestScore <= 0) {
+  if (!(bestSpan instanceof HTMLElement) || !Number.isFinite(bestScore) || bestScore <= 0) {
     return null
   }
 
   const spanRect = bestSpan.getBoundingClientRect()
-  const surfaceRect = pageSurface.getBoundingClientRect()
   return {
     left: Math.max(6, spanRect.right - surfaceRect.left + 4),
     top: Math.max(4, spanRect.top - surfaceRect.top - 2),
@@ -2493,6 +2433,7 @@ function applyReadingMapToCurrentDocument(sections) {
     orientationState.data?.sectionIntents
   )
   renderPdfIntentOverlays()
+  scheduleSectionRailRender()
 }
 
 function summarizeFirstPageTopLines(lines) {
@@ -2865,6 +2806,267 @@ function resolveSectionId(pageIndex) {
   const section = resolveSectionForPage(pageIndex)
   const sectionId = sanitizeText(section?.id)
   return sectionId || null
+}
+
+function clampNumber(value, min, max) {
+  if (!Number.isFinite(value)) {
+    return min
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    return value
+  }
+  return Math.min(max, Math.max(min, value))
+}
+
+function ensureSectionRailStructure() {
+  if (!(sectionRailEl instanceof HTMLElement)) {
+    return null
+  }
+  let markers = sectionRailEl.querySelector(".sectionRailMarkers")
+  if (!(markers instanceof HTMLElement)) {
+    markers = document.createElement("div")
+    markers.className = "sectionRailMarkers"
+    sectionRailEl.append(markers)
+  }
+  let labels = sectionRailEl.querySelector(".sectionRailLabels")
+  if (!(labels instanceof HTMLElement)) {
+    labels = document.createElement("div")
+    labels.className = "sectionRailLabels"
+    sectionRailEl.append(labels)
+  }
+  return { markers, labels }
+}
+
+function getSectionRailLeftGutter() {
+  if (!(pdfRoot instanceof HTMLElement) || renderState.pageNodes.length === 0) {
+    return 0
+  }
+  const rootRect = pdfRoot.getBoundingClientRect()
+  const firstPageShell = renderState.pageNodes[0]
+  if (!(firstPageShell instanceof HTMLElement)) {
+    return 0
+  }
+  const firstPageSurface = firstPageShell.querySelector(".pdfPageSurface")
+  if (!(firstPageSurface instanceof HTMLElement)) {
+    return 0
+  }
+  const pageRect = firstPageSurface.getBoundingClientRect()
+  return pageRect.left - rootRect.left
+}
+
+function getSectionIndexForPage(pageIndex, sections) {
+  const normalizedPageIndex = parseOptionalPageIndex(pageIndex) ?? 0
+  const source = Array.isArray(sections) ? sections : []
+  let bestIndex = 0
+  for (let index = 0; index < source.length; index += 1) {
+    const sectionPage = parseOptionalPageIndex(source[index]?.pageIndex)
+    if (sectionPage == null) {
+      continue
+    }
+    if (sectionPage <= normalizedPageIndex) {
+      bestIndex = index
+      continue
+    }
+    break
+  }
+  return bestIndex
+}
+
+function clearSectionRailCloseTimer() {
+  if (!sectionRailState.closeTimer) {
+    return
+  }
+  clearTimeout(sectionRailState.closeTimer)
+  sectionRailState.closeTimer = 0
+}
+
+function scheduleSectionRailClose() {
+  clearSectionRailCloseTimer()
+  sectionRailState.closeTimer = setTimeout(() => {
+    sectionRailState.closeTimer = 0
+    sectionRailState.isHovering = false
+    scheduleSectionRailRender()
+  }, 120)
+}
+
+function hideSectionRail() {
+  if (!(sectionRailEl instanceof HTMLElement)) {
+    return
+  }
+  clearSectionRailCloseTimer()
+  sectionRailState.isHovering = false
+  sectionRailEl.classList.remove("isOpen")
+  sectionRailEl.hidden = true
+}
+
+function renderSectionRail() {
+  sectionRailState.renderFrame = 0
+  if (!(sectionRailEl instanceof HTMLElement)) {
+    return
+  }
+  const sections = getReadingMapSections()
+  if (!currentPdf || !renderState.pdfDoc || renderState.pageNodes.length === 0 || sections.length === 0) {
+    hideSectionRail()
+    return
+  }
+
+  const leftGutter = getSectionRailLeftGutter()
+  const shouldShow = leftGutter >= SECTION_RAIL_MIN_LEFT_GUTTER
+  if (!shouldShow) {
+    hideSectionRail()
+    return
+  }
+
+  const structure = ensureSectionRailStructure()
+  if (!structure) {
+    return
+  }
+  const { markers, labels } = structure
+  const toolbarHeight = pdfToolbarEl instanceof HTMLElement ? pdfToolbarEl.offsetHeight : 44
+  const firstPageSurface = renderState.pageNodes[0]?.querySelector?.(".pdfPageSurface")
+  const pageHeight = firstPageSurface instanceof HTMLElement ? firstPageSurface.getBoundingClientRect().height : 0
+  const targetHeight = clampNumber(
+    pageHeight > 0 ? pageHeight / 4 : pdfRoot.clientHeight / 4,
+    84,
+    Math.max(Math.floor(pdfRoot.clientHeight * 0.42), 84)
+  )
+  const topOffset = Math.max((pdfRoot.clientHeight - targetHeight) / 2, 8)
+  sectionRailEl.style.height = `${Math.round(targetHeight)}px`
+  sectionRailEl.style.top = `${Math.round(toolbarHeight + topOffset)}px`
+  sectionRailEl.style.bottom = "auto"
+  sectionRailEl.hidden = false
+  sectionRailEl.classList.toggle("isOpen", sectionRailState.isHovering)
+
+  const maxIndex = Math.max(sections.length - 1, 0)
+  const railHeight = Math.max(sectionRailEl.clientHeight || 120, 120)
+  if (sectionRailState.isHovering) {
+    const pointerY = clampNumber(sectionRailState.pointerY, 0, railHeight)
+    const ratio = railHeight <= 1 ? 0 : pointerY / railHeight
+    sectionRailState.pointerY = pointerY
+    sectionRailState.selectedIndex = clampNumber(Math.round(ratio * maxIndex), 0, maxIndex)
+  } else {
+    const pageIndex = Math.max((currentPdf.pageNumber || 1) - 1, 0)
+    sectionRailState.selectedIndex = clampNumber(getSectionIndexForPage(pageIndex, sections), 0, maxIndex)
+    const ratio = maxIndex <= 0 ? 0.5 : sectionRailState.selectedIndex / maxIndex
+    sectionRailState.pointerY = clampNumber(ratio * railHeight, 0, railHeight)
+  }
+
+  const selectedIndex = sectionRailState.selectedIndex
+  markers.innerHTML = ""
+  for (let index = 0; index < sections.length; index += 1) {
+    const section = sections[index]
+    const position = maxIndex <= 0 ? 0.5 : index / maxIndex
+    const marker = document.createElement("button")
+    marker.type = "button"
+    marker.className = "sectionRailMarker"
+    marker.dataset.sectionIndex = String(index)
+    marker.style.setProperty("--position", String(position))
+    marker.title = getSectionDisplayTitle(section) || `Page ${(parseOptionalPageIndex(section?.pageIndex) ?? 0) + 1}`
+    marker.setAttribute("aria-label", marker.title)
+    marker.addEventListener("mousedown", (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      jumpToRailSectionByIndex(index)
+    })
+    marker.addEventListener("click", (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+    })
+    if (index === selectedIndex) {
+      marker.classList.add("isSelected")
+    }
+    markers.append(marker)
+  }
+
+  labels.innerHTML = ""
+  if (!sectionRailState.isHovering) {
+    return
+  }
+  const anchorY = clampNumber(sectionRailState.pointerY, 0, railHeight)
+  const start = Math.max(0, selectedIndex - SECTION_RAIL_LABEL_RADIUS)
+  const end = Math.min(maxIndex, selectedIndex + SECTION_RAIL_LABEL_RADIUS)
+  for (let index = start; index <= end; index += 1) {
+    const section = sections[index]
+    const level = getSectionLevel(section)
+    const distance = Math.abs(index - selectedIndex)
+    const proximity = Math.max(0, 1 - distance / (SECTION_RAIL_LABEL_RADIUS + 0.2))
+    const labelButton = document.createElement("button")
+    labelButton.type = "button"
+    labelButton.className = "sectionRailLabel"
+    labelButton.dataset.sectionIndex = String(index)
+    labelButton.style.top = `${anchorY + (index - selectedIndex) * SECTION_RAIL_LABEL_STEP}px`
+    labelButton.style.setProperty("--proximity", proximity.toFixed(3))
+    labelButton.style.paddingLeft = `${6 + Math.max(0, level - 1) * 8}px`
+    labelButton.textContent = clampText(getSectionDisplayTitle(section) || "Untitled section", 84)
+    labelButton.title = getSectionDisplayTitle(section) || "Untitled section"
+    labelButton.addEventListener("mousedown", (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      jumpToRailSectionByIndex(index)
+    })
+    labelButton.addEventListener("click", (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+    })
+    if (index === selectedIndex) {
+      labelButton.classList.add("isSelected")
+    }
+    labels.append(labelButton)
+  }
+}
+
+function scheduleSectionRailRender() {
+  if (sectionRailState.renderFrame) {
+    return
+  }
+  sectionRailState.renderFrame = requestAnimationFrame(() => {
+    renderSectionRail()
+  })
+}
+
+function getSectionByRailIndex(sectionIndex) {
+  const index = Number(sectionIndex)
+  if (!Number.isFinite(index)) {
+    return null
+  }
+  const sections = getReadingMapSections()
+  return sections[Math.max(0, Math.floor(index))] || null
+}
+
+function jumpToRailSectionByIndex(sectionIndex) {
+  const section = getSectionByRailIndex(sectionIndex)
+  if (!section) {
+    return
+  }
+  const pageIndex = parseOptionalPageIndex(section.pageIndex) ?? 0
+  clearSectionRailCloseTimer()
+  sectionRailState.isHovering = true
+  void jumpToSection(pageIndex, getSectionDisplayTitle(section))
+}
+
+function handleSectionRailClick(event) {
+  const target = event.target instanceof Element ? event.target.closest("button[data-section-index]") : null
+  if (!(target instanceof HTMLButtonElement)) {
+    return
+  }
+  jumpToRailSectionByIndex(target.dataset.sectionIndex)
+}
+
+function handleSectionRailPointerMove(event) {
+  if (!(sectionRailEl instanceof HTMLElement)) {
+    return
+  }
+  const rect = sectionRailEl.getBoundingClientRect()
+  if (event.clientX - rect.left > SECTION_RAIL_MAX_HOVER_WIDTH) {
+    clearSectionRailCloseTimer()
+    sectionRailState.isHovering = false
+    scheduleSectionRailRender()
+    return
+  }
+  clearSectionRailCloseTimer()
+  sectionRailState.isHovering = true
+  sectionRailState.pointerY = event.clientY - rect.top
+  scheduleSectionRailRender()
 }
 
 function buildGroundingQuote(selectedText, contextWindow) {
@@ -4787,6 +4989,7 @@ function updatePdfControls() {
   zoomInBtn.disabled = !hasDocument || currentPdf.scale >= MAX_SCALE - 0.001;
   fitWidthBtn.disabled = !hasDocument;
   syncFitWidthUi();
+  scheduleSectionRailRender()
 }
 
 function disconnectPageObserver() {
@@ -4815,6 +5018,7 @@ function clearRenderedPages() {
   disconnectPageObserver();
   renderState.pageNodes = [];
   pdfRoot.innerHTML = "";
+  hideSectionRail()
   if (currentPdf && typeof currentPdf === "object") {
     currentPdf.retrievalBlockCache = null
   }
@@ -5187,6 +5391,7 @@ async function renderAllPages(targetPageNumber, loadToken) {
   setStatus(getLoadedStatusText());
   updatePdfControls();
   renderPdfIntentOverlays()
+  scheduleSectionRailRender()
 }
 
 function scheduleRender(targetPageNumber, loadToken = renderState.loadToken) {
@@ -5419,6 +5624,11 @@ async function handleFitWidth() {
     return;
   }
 
+  if (renderState.fitWidthEnabled) {
+    handleZoom(-ZOOM_STEP);
+    return;
+  }
+
   const wasFitWidthEnabled = renderState.fitWidthEnabled;
   setFitWidthEnabled(true);
 
@@ -5439,6 +5649,7 @@ function handleWindowResize() {
     sidebarState.width = clampSidebarWidth(sidebarState.width);
   }
   applySidebarLayout();
+  scheduleSectionRailRender()
 
   if (!renderState.fitWidthEnabled || !currentPdf || !renderState.pdfDoc) {
     return;
@@ -5561,6 +5772,41 @@ pdfRoot.addEventListener("click", (event) => {
   }
   void handlePdfIntentOverlayClick(target)
 });
+if (sectionRailEl instanceof HTMLElement) {
+  sectionRailEl.addEventListener("mouseover", (event) => {
+    const target = event.target
+    const overTracks =
+      target instanceof Element && Boolean(target.closest(".sectionRailMarkers"))
+    if (!sectionRailState.isHovering && !overTracks) {
+      return
+    }
+    handleSectionRailPointerMove(event)
+  })
+  sectionRailEl.addEventListener("mousemove", (event) => {
+    const target = event.target
+    const overTracks =
+      target instanceof Element && Boolean(target.closest(".sectionRailMarkers"))
+    if (!sectionRailState.isHovering && !overTracks) {
+      return
+    }
+    handleSectionRailPointerMove(event)
+  })
+  sectionRailEl.addEventListener("mouseout", (event) => {
+    const next = event.relatedTarget
+    if (next instanceof Node && sectionRailEl.contains(next)) {
+      return
+    }
+    scheduleSectionRailClose()
+  })
+  sectionRailEl.addEventListener("mousedown", () => {
+    clearSectionRailCloseTimer()
+  })
+  sectionRailEl.addEventListener("click", (event) => {
+    clearSectionRailCloseTimer()
+    sectionRailState.isHovering = true
+    handleSectionRailClick(event)
+  })
+}
 
 toggleSidebarBtn.addEventListener("click", () => {
   setSidebarCollapsed(!sidebarState.collapsed);

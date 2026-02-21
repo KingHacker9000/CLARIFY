@@ -51,6 +51,7 @@ html {
 }
 
 .pdfPane {
+  position: relative;
   display: grid;
   grid-template-rows: auto 1fr;
   border-right: 1px solid var(--border);
@@ -98,6 +99,22 @@ html {
   border-radius: 8px;
   font-size: 16px;
   line-height: 1;
+}
+
+.toolbarImageButton {
+  display: inline-grid;
+  place-items: center;
+}
+
+.toolbarIconImage {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  display: block;
+}
+
+#fitWidth .toolbarIconImage {
+  transform: translateX(-2.5px);
 }
 
 .pageIndicator {
@@ -272,6 +289,146 @@ html {
   min-height: 0;
   scrollbar-color: var(--scrollThumb) var(--scrollTrack);
   scrollbar-width: thin;
+}
+
+.sectionRail {
+  position: absolute;
+  top: 56px;
+  left: 12px;
+  width: 18px;
+  height: 220px;
+  z-index: 9;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  overflow: visible;
+}
+
+.sectionRail[hidden] {
+  display: none;
+}
+
+.sectionRailMarkers {
+  position: absolute;
+  inset: 0;
+}
+
+.sectionRailMarker {
+  position: absolute;
+  left: 50%;
+  top: calc(var(--position, 0.5) * 100%);
+  width: 10px;
+  height: 2px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.38);
+  transform: translate(-50%, -50%);
+  cursor: pointer;
+  padding: 0;
+  transition: height 120ms ease, width 120ms ease, background 120ms ease;
+}
+
+.sectionRailMarker:hover {
+  background: rgba(0, 0, 0, 0.56);
+}
+
+.sectionRailMarker.isSelected {
+  width: 14px;
+  height: 4px;
+  background: rgba(0, 0, 0, 0.84);
+}
+
+.sectionRailMarker:focus-visible {
+  outline: 2px solid #7b9ef5;
+  outline-offset: 1px;
+}
+
+.sectionRailLabels {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 18px;
+  width: min(32vw, 280px);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.sectionRail.isOpen .sectionRailLabels {
+  pointer-events: none;
+  opacity: 1;
+}
+
+.sectionRailLabels::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  -webkit-mask-image:
+    linear-gradient(
+      to right,
+      transparent 0%,
+      #000 14%,
+      #000 86%,
+      transparent 100%
+    ),
+    linear-gradient(
+      to bottom,
+      transparent 0%,
+      #000 12%,
+      #000 88%,
+      transparent 100%
+    );
+  -webkit-mask-composite: source-in;
+  mask-image:
+    linear-gradient(
+      to right,
+      transparent 0%,
+      #000 14%,
+      #000 86%,
+      transparent 100%
+    ),
+    linear-gradient(
+      to bottom,
+      transparent 0%,
+      #000 12%,
+      #000 88%,
+      transparent 100%
+    );
+  mask-composite: intersect;
+  pointer-events: none;
+}
+
+.sectionRailLabel {
+  position: absolute;
+  left: 6px;
+  right: 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(24, 24, 24, calc(0.45 + var(--proximity, 0) * 0.5));
+  font: inherit;
+  font-size: calc(11px + var(--proximity, 0) * 5px);
+  font-weight: calc(420 + var(--proximity, 0) * 260);
+  line-height: 1.2;
+  text-align: left;
+  padding-top: 2px;
+  padding-bottom: 2px;
+  transform: translateY(-50%);
+  cursor: pointer;
+  pointer-events: auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sectionRailLabel.isSelected,
+.sectionRailLabel:hover {
+  color: rgba(0, 0, 0, 0.98);
+  background: rgba(255, 255, 255, 0.45);
 }
 
 .pdfRoot.fitWidthMode {
@@ -1494,6 +1651,10 @@ body.resizingSidebar .sidebarResizeHandle::before,
     gap: 8px;
     padding: 8px 10px;
     flex-wrap: wrap;
+  }
+
+  .sectionRail {
+    display: none;
   }
 
   #status {
