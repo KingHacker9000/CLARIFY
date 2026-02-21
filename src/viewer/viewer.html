@@ -49,10 +49,30 @@
               <img class="toolbarIconImage" src="../../assets/icons/highlighter.png" alt="" />
             </button>
           </div>
+          <div class="toolbarGroup modeGroup" aria-label="Reading mode">
+            <div class="modeToggle" role="group" aria-label="Toggle reading mode">
+              <button
+                id="toolbarModeFlow"
+                class="modeToggleButton"
+                type="button"
+                data-mode="flow"
+                aria-pressed="true"
+              >
+                Flow
+              </button>
+              <button
+                id="toolbarModeStructure"
+                class="modeToggleButton"
+                type="button"
+                data-mode="structure"
+                aria-pressed="false"
+              >
+                Structure
+              </button>
+            </div>
+          </div>
           <span id="status">No PDF loaded</span>
-          <span id="readingModeStatus" class="readingModeStatus">Mode: Flow</span>
           <span id="contextScopeStatus" class="contextScopeStatus">Context: Selection</span>
-          <button id="toggleSidebar" type="button" aria-pressed="false">Hide Panel</button>
           <div class="toolbarRight">
             <button
               id="diagnosticsToggle"
@@ -180,7 +200,7 @@
           class="reopenSidebar"
           type="button"
           aria-label="Show sidebar panel"
-          title="Show Panel"
+          title="Show Sidebar"
         >
           &lsaquo;
         </button>
@@ -189,7 +209,7 @@
           <button class="tab" data-tab="explain">&#128161;</button>
           <button class="tab" data-tab="glossary">&#128278;</button>
           <button class="tab" data-tab="figures">&#128202;</button>
-          <button class="tab" data-tab="walkthrough">&#129513;</button>
+          <button id="walkthroughTabButton" class="tab" data-tab="walkthrough">&#129513;</button>
         </div>
 
         <section id="panel" class="panel">

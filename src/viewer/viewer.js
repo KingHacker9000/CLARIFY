@@ -33,6 +33,7 @@ import { extractOutline } from "./outline.js";
 import { buildPageTextCache, getPageText } from "./page_text.js";
 import { buildSectionTree } from "./reading_map_tree.js";
 import { createIntentManager } from "./intent_manager.js";
+import { applyMode } from "./mode_manager.js";
 
 const logger = createLogger("VIEWER");
 const DEFAULT_VIEWER_TITLE = "CLARIFY";
@@ -86,8 +87,9 @@ const sidebarEl = document.getElementById("sidebar");
 const sidebarResizeHandle = document.getElementById("sidebarResizeHandle");
 const panel = document.getElementById("panel");
 const statusEl = document.getElementById("status");
-const readingModeStatusEl = document.getElementById("readingModeStatus");
 const contextScopeStatusEl = document.getElementById("contextScopeStatus");
+const toolbarModeFlowBtn = document.getElementById("toolbarModeFlow");
+const toolbarModeStructureBtn = document.getElementById("toolbarModeStructure");
 const pdfRoot = document.getElementById("pdfRoot");
 const sectionRailEl = document.getElementById("sectionRail");
 const pdfToolbarEl = document.querySelector(".pdfToolbar");
@@ -100,7 +102,6 @@ const zoomOutBtn = document.getElementById("zoomOut");
 const zoomInBtn = document.getElementById("zoomIn");
 const fitWidthBtn = document.getElementById("fitWidth");
 const highlighterToggleBtn = document.getElementById("highlighterToggle");
-const toggleSidebarBtn = document.getElementById("toggleSidebar");
 const reopenSidebarBtn = document.getElementById("reopenSidebar");
 const diagnosticsToggleBtn = document.getElementById("diagnosticsToggle");
 const diagnosticsMenu = document.getElementById("diagnosticsMenu");
@@ -126,6 +127,7 @@ const wholePdfUploadRemember = document.getElementById("wholePdfUploadRemember")
 const promptCacheDefault = document.getElementById("promptCacheDefault");
 const promptCache24h = document.getElementById("promptCache24h");
 const wholePdfHelpText = document.getElementById("wholePdfHelpText");
+const walkthroughTabButton = document.getElementById("walkthroughTabButton");
 
 const renderState = {
   pdfDoc: null,
@@ -212,9 +214,14 @@ const sidebarUiState = {
   docId: "unknown",
   cards: [],
   glossaryTerms: [],
+  glossarySuggestions: [],
   walkthrough: createWalkthroughUiState(),
   toastMessage: "",
   activeTab: "orientation",
+  lastTabByMode: {
+    flow: "explain",
+    structure: "orientation"
+  },
   orientation: createOrientationUiState("flow")
 };
 let recentJumpState = null;
@@ -229,6 +236,19 @@ const sectionRailState = {
   renderFrame: 0,
   closeTimer: 0
 }
+const modeUiState = {
+  mode: "flow",
+  previousMode: "",
+  hasAppliedMode: false,
+  cardDetailsOpenByDefault: false,
+  maxGroundingQuotes: 1,
+  autoGenerateOnLoad: false,
+  autoBuildWalkthroughOnLoad: false,
+  autoPrewarmOnLoad: false,
+  walkthroughVisible: false
+}
+const structurePrewarmedDocIds = new Set()
+let pendingCardAutoScrollId = ""
 
 const RETRIEVAL_BLOCK_MIN_CHARS = 50;
 const RETRIEVAL_BLOCK_MAX_CHARS = 420;
@@ -391,12 +411,37 @@ function createGroundingSourceTrigger({ cardId, sourceText, pageIndex, label, co
 function normalizeTabName(tab) {
   const candidate = typeof tab === "string" ? tab : ""
   const validTabs = new Set(["orientation", "explain", "glossary", "figures", "walkthrough"])
-  return validTabs.has(candidate) ? candidate : "orientation"
+  if (!validTabs.has(candidate)) {
+    return "orientation"
+  }
+  if (candidate === "walkthrough" && !modeUiState.walkthroughVisible) {
+    return "explain"
+  }
+  return candidate
+}
+
+function isTabVisible(tab) {
+  if (tab === "walkthrough") {
+    return modeUiState.walkthroughVisible
+  }
+  return true
+}
+
+function getFlowPreferredTab() {
+  const lastUsed = normalizeTabName(sidebarUiState.lastTabByMode?.flow || "")
+  if (lastUsed && isTabVisible(lastUsed) && lastUsed !== "walkthrough") {
+    return lastUsed
+  }
+  return "explain"
+}
+
+function getStructurePreferredTab() {
+  return "orientation"
 }
 
 function getEmptyMessage(tab) {
   if (tab === "orientation") {
-    return "Open a PDF to generate purpose, focus points, key terms, and a reading map."
+    return "Open a PDF to generate purpose, focus points, and key terms."
   }
   if (tab === "explain") {
     return "No explanations yet. Select text in the PDF, then use Define or Explain."
@@ -543,8 +588,9 @@ function createCardNode(card) {
     pageIndex: Number.isFinite(card.grounding?.pageIndex) ? Number(card.grounding.pageIndex) : null,
     label: "Primary quote"
   })
+  const maxGroundingQuotes = Math.max(1, Number(modeUiState.maxGroundingQuotes) || 1)
   const citationQuotes = Array.isArray(card.grounding?.citationQuotes)
-    ? card.grounding.citationQuotes.filter(Boolean).slice(0, 4)
+    ? card.grounding.citationQuotes.filter(Boolean).slice(0, Math.max(0, maxGroundingQuotes - 1))
     : []
   const citationPages = Array.isArray(card.grounding?.citationPages)
     ? card.grounding.citationPages
@@ -593,6 +639,7 @@ function createCardNode(card) {
 
   const details = document.createElement("details")
   details.className = "cardDetails"
+  details.open = Boolean(modeUiState.cardDetailsOpenByDefault)
   const summary = document.createElement("summary")
   summary.textContent = "Details"
   details.append(summary)
@@ -696,6 +743,16 @@ function renderCardsTab(tab) {
     list.append(createCardNode(card))
   }
   panel.append(list)
+  if (pendingCardAutoScrollId) {
+    const targetCardId = pendingCardAutoScrollId
+    pendingCardAutoScrollId = ""
+    requestAnimationFrame(() => {
+      const target = panel.querySelector(`[data-card-id="${targetCardId}"]`)
+      if (target instanceof HTMLElement) {
+        target.scrollIntoView({ block: "nearest", behavior: "smooth" })
+      }
+    })
+  }
 }
 
 function getSortedGlossaryTerms(terms) {
@@ -753,18 +810,39 @@ function createGlossaryNode(term) {
 
 function renderGlossaryTab() {
   const terms = getSortedGlossaryTerms(sidebarUiState.glossaryTerms)
-  if (terms.length === 0) {
+  const suggestions = Array.isArray(sidebarUiState.glossarySuggestions) ? sidebarUiState.glossarySuggestions : []
+  if (terms.length === 0 && suggestions.length === 0) {
     renderEmpty("glossary")
     return
   }
 
   panel.innerHTML = ""
-  const list = document.createElement("div")
-  list.className = "glossaryList"
-  for (const term of terms) {
-    list.append(createGlossaryNode(term))
+  if (suggestions.length > 0) {
+    const suggested = document.createElement("section")
+    suggested.className = "orientationSection"
+    const heading = document.createElement("h4")
+    heading.className = "orientationSectionTitle"
+    heading.textContent = "Suggestions"
+    const chips = document.createElement("div")
+    chips.className = "orientationKeyTerms"
+    for (const suggestion of suggestions.slice(0, 12)) {
+      const chip = document.createElement("span")
+      chip.className = "orientationTermChip"
+      chip.textContent = clampText(suggestion, 48)
+      chips.append(chip)
+    }
+    suggested.append(heading, chips)
+    panel.append(suggested)
   }
-  panel.append(list)
+
+  if (terms.length > 0) {
+    const list = document.createElement("div")
+    list.className = "glossaryList"
+    for (const term of terms) {
+      list.append(createGlossaryNode(term))
+    }
+    panel.append(list)
+  }
 }
 
 function normalizeSectionTitleKey(title) {
@@ -1213,12 +1291,38 @@ function renderOrientationTab() {
   panel.innerHTML = ""
 
   if (orientationState.collapsed) {
+    const collapsedPanel = document.createElement("div")
+    collapsedPanel.className = "orientationCollapsedPanel"
     const chip = document.createElement("button")
     chip.type = "button"
     chip.className = "orientationChip"
     chip.dataset.orientationAction = "expand"
     chip.textContent = "Orientation"
-    panel.append(chip)
+    collapsedPanel.append(chip)
+
+    if (modeUiState.mode === "flow") {
+      const actionRow = document.createElement("div")
+      actionRow.className = "orientationMiniActions"
+
+      const summarizeButton = document.createElement("button")
+      summarizeButton.type = "button"
+      summarizeButton.className = "orientationMiniAction"
+      summarizeButton.dataset.orientationAction = "summarize-section"
+      summarizeButton.textContent = "Summarize current section"
+      summarizeButton.disabled = !Boolean(currentPdf && renderState.pdfDoc)
+
+      const keyTermsButton = document.createElement("button")
+      keyTermsButton.type = "button"
+      keyTermsButton.className = "orientationMiniAction"
+      keyTermsButton.dataset.orientationAction = "key-terms"
+      keyTermsButton.textContent = "Key terms so far"
+      keyTermsButton.disabled = !Boolean(currentPdf && renderState.pdfDoc)
+
+      actionRow.append(summarizeButton, keyTermsButton)
+      collapsedPanel.append(actionRow)
+    }
+
+    panel.append(collapsedPanel)
     return
   }
 
@@ -1477,6 +1581,24 @@ function formatWalkthroughExplanationHtml(explanation, sectionTitle) {
   return html
 }
 
+function getNextWalkthroughItem(items) {
+  const source = Array.isArray(items) ? items : []
+  if (source.length === 0) {
+    return null
+  }
+  const currentPageIndex = Math.max(0, (currentPdf?.pageNumber || 1) - 1)
+  for (const item of source) {
+    const itemPageIndex = parseOptionalPageIndex(item?.pageIndex)
+    if (itemPageIndex == null) {
+      continue
+    }
+    if (itemPageIndex > currentPageIndex) {
+      return item
+    }
+  }
+  return source[source.length - 1] || null
+}
+
 function renderWalkthroughTab() {
   if (!currentPdf || !renderState.pdfDoc) {
     renderEmpty("walkthrough")
@@ -1488,6 +1610,7 @@ function renderWalkthroughTab() {
 
   const container = document.createElement("div")
   container.className = "walkthroughPanel"
+  const isStructureMode = modeUiState.mode === "structure"
 
   const headingRow = document.createElement("div")
   headingRow.className = "walkthroughHeader"
@@ -1534,8 +1657,34 @@ function renderWalkthroughTab() {
     empty.className = "panelEmptyMessage"
     empty.textContent = getEmptyMessage("walkthrough")
     container.append(empty)
+    if (isStructureMode) {
+      const ctaButton = document.createElement("button")
+      ctaButton.type = "button"
+      ctaButton.className = "walkthroughAction"
+      ctaButton.dataset.walkthroughAction = "create-top-level"
+      ctaButton.textContent = "Create walkthrough (top-level)"
+      container.append(ctaButton)
+    }
     panel.append(container)
     return
+  }
+
+  if (isStructureMode) {
+    const nextItem = getNextWalkthroughItem(items)
+    if (nextItem) {
+      const hintRow = document.createElement("div")
+      hintRow.className = "walkthroughNextHint"
+      const nextTitle = clampText(nextItem.sectionTitle, 120)
+      const label = document.createElement("span")
+      label.textContent = `Next: ${nextTitle || "section"}`
+      const jumpButton = document.createElement("button")
+      jumpButton.type = "button"
+      jumpButton.className = "walkthroughAction"
+      jumpButton.dataset.walkthroughAction = "jump-next"
+      jumpButton.textContent = "Jump to next walkthrough section"
+      hintRow.append(label, jumpButton)
+      container.append(hintRow)
+    }
   }
 
   const list = document.createElement("div")
@@ -1574,7 +1723,7 @@ function renderWalkthroughTab() {
     if (previewHtml) {
       oneLinerPreview.innerHTML = previewHtml
     } else {
-      oneLinerPreview.textContent = "Add a one-line roadmap note."
+      oneLinerPreview.textContent = "Add a one-line section note."
     }
     row.append(jumpButton, oneLinerPreview)
     list.append(row)
@@ -1604,11 +1753,16 @@ function renderPanel() {
   renderEmpty(tab)
 }
 
-function setActiveTab(tab) {
+function setActiveTab(tab, options = {}) {
   const normalizedTab = normalizeTabName(tab)
+  const fromModeApply = Boolean(options?.fromModeApply)
   sidebarUiState.activeTab = normalizedTab
   if (normalizedTab !== "walkthrough") {
     sidebarUiState.walkthrough.confirmRebuild = false
+  }
+  const activeMode = modeUiState.mode === "structure" ? "structure" : "flow"
+  if (!fromModeApply && normalizedTab !== "walkthrough") {
+    sidebarUiState.lastTabByMode[activeMode] = normalizedTab
   }
   document.querySelectorAll(".tab").forEach((button) => {
     button.classList.toggle("active", button.dataset.tab === normalizedTab)
@@ -1624,8 +1778,92 @@ function setDiagnosticsMenuOpen(isOpen) {
   logger.debug("Diagnostics menu toggled", { open: isOpen });
 }
 
-function setStatus(text) {
-  statusEl.textContent = text;
+function setStatus(text, options = {}) {
+  const message = sanitizeText(text) || "No PDF loaded"
+  statusEl.textContent = message
+  const explicitTitle = sanitizeText(options?.title)
+  statusEl.title = explicitTitle || message
+}
+
+function getShortStatusLabel(value, maxLength = 42) {
+  const text = sanitizeText(value)
+  if (!text) {
+    return ""
+  }
+  return clampText(text, maxLength)
+}
+
+function getLoadedStatusSourceShort() {
+  if (!currentPdf) {
+    return ""
+  }
+  const localFilename = normalizePdfFilename(currentPdf.filename)
+  if (localFilename) {
+    return getShortStatusLabel(localFilename, 44)
+  }
+  if (currentPdf.sourceType === "remote") {
+    const inferredFilename = normalizePdfFilename(getFilenameFromUrl(currentPdf.url))
+    if (inferredFilename) {
+      return getShortStatusLabel(inferredFilename, 44)
+    }
+    const sanitizedUrl = sanitizeUrlForLog(currentPdf.url)
+    if (sanitizedUrl) {
+      try {
+        const parsed = new URL(sanitizedUrl)
+        return getShortStatusLabel(parsed.hostname || sanitizedUrl, 44)
+      } catch (_error) {
+        return getShortStatusLabel(sanitizedUrl, 44)
+      }
+    }
+  }
+  return "document.pdf"
+}
+
+function getLoadedStatusSourceFull() {
+  if (!currentPdf) {
+    return ""
+  }
+  if (currentPdf.sourceType === "local") {
+    return normalizePdfFilename(currentPdf.filename) || "Local PDF"
+  }
+  if (currentPdf.sourceType === "remote") {
+    const sanitizedUrl = sanitizeUrlForLog(currentPdf.url)
+    if (sanitizedUrl) {
+      return sanitizedUrl
+    }
+  }
+  return getCurrentPdfTitleLabel()
+}
+
+function getLoadedStatusTooltipText() {
+  if (!currentPdf) {
+    return ""
+  }
+  const fullSource = getLoadedStatusSourceFull()
+  const section = clampText(currentPdf.currentSectionTitle || "", 180)
+  const pageLabel = Number.isFinite(currentPdf.pageNumber) ? `Page ${currentPdf.pageNumber}` : "Page ?"
+  const parts = [
+    `Loaded: ${fullSource || "document.pdf"}`,
+    pageLabel
+  ]
+  if (section) {
+    parts.push(`Section: ${section}`)
+  }
+  return parts.join(" | ")
+}
+
+function updateLoadedStatusTooltip() {
+  if (!(statusEl instanceof HTMLElement)) {
+    return
+  }
+  const statusText = sanitizeText(statusEl.textContent)
+  if (!statusText.startsWith("Loaded:")) {
+    return
+  }
+  const tooltip = getLoadedStatusTooltipText()
+  if (tooltip) {
+    statusEl.title = tooltip
+  }
 }
 
 function clearTextSelection() {
@@ -1930,12 +2168,15 @@ function setSidebarWidth(width, options = {}) {
 function setSidebarCollapsed(collapsed, options = {}) {
   sidebarState.collapsed = Boolean(collapsed);
   layoutEl.classList.toggle("sidebarCollapsed", sidebarState.collapsed);
-  toggleSidebarBtn.setAttribute("aria-pressed", String(sidebarState.collapsed));
-  toggleSidebarBtn.textContent = sidebarState.collapsed ? "Show Panel" : "Hide Panel";
-  toggleSidebarBtn.setAttribute(
-    "aria-label",
-    sidebarState.collapsed ? "Show sidebar panel" : "Hide sidebar panel"
-  );
+  if (reopenSidebarBtn instanceof HTMLButtonElement) {
+    reopenSidebarBtn.setAttribute("aria-pressed", String(sidebarState.collapsed));
+    reopenSidebarBtn.textContent = sidebarState.collapsed ? "\u203A" : "\u2039";
+    reopenSidebarBtn.setAttribute(
+      "aria-label",
+      sidebarState.collapsed ? "Show sidebar panel" : "Hide sidebar panel"
+    );
+    reopenSidebarBtn.title = sidebarState.collapsed ? "Show Sidebar" : "Hide Sidebar";
+  }
   applySidebarLayout();
 
   if (!options.skipFitWidthResize) {
@@ -2123,12 +2364,121 @@ function getViewerBaseUrl() {
   return `${location.origin}${location.pathname}`;
 }
 
-function getReadingModeLabel(mode) {
-  return mode === "structure" ? "Structure" : "Flow";
+function setToolbarModeToggle(mode) {
+  const normalizedMode = mode === "structure" ? "structure" : "flow"
+  toolbarModeFlowBtn?.setAttribute("aria-pressed", String(normalizedMode === "flow"))
+  toolbarModeStructureBtn?.setAttribute("aria-pressed", String(normalizedMode === "structure"))
 }
 
-function updateReadingModeStatus(mode) {
-  readingModeStatusEl.textContent = `Mode: ${getReadingModeLabel(mode)}`;
+function setModeMicroActionsVisible(visible) {
+  void visible
+}
+
+function updateSectionStatus(sectionTitle = "") {
+  if (currentPdf && typeof currentPdf === "object") {
+    currentPdf.currentSectionTitle = clampText(sectionTitle, 180)
+  }
+  updateLoadedStatusTooltip()
+}
+
+function setWalkthroughTabVisibility(visible) {
+  modeUiState.walkthroughVisible = Boolean(visible)
+  if (walkthroughTabButton instanceof HTMLElement) {
+    walkthroughTabButton.classList.toggle("isModeHidden", !visible)
+  }
+  if (!visible && sidebarUiState.activeTab === "walkthrough") {
+    setActiveTab(getFlowPreferredTab(), { fromModeApply: true })
+  }
+}
+
+function setWalkthroughTabProminent(prominent) {
+  if (!(walkthroughTabButton instanceof HTMLElement)) {
+    return
+  }
+  walkthroughTabButton.classList.toggle("isProminent", Boolean(prominent))
+}
+
+function setOrientationCollapsedByMode(collapsed) {
+  if (modeUiState.hasAppliedMode && modeUiState.previousMode === modeUiState.mode) {
+    return
+  }
+  const orientationState = getOrientationState()
+  orientationState.collapsed = Boolean(collapsed)
+}
+
+function setModeConfig(config) {
+  modeUiState.previousMode = modeUiState.hasAppliedMode ? modeUiState.mode : ""
+  modeUiState.hasAppliedMode = true
+  modeUiState.mode = config.mode === "structure" ? "structure" : "flow"
+  modeUiState.cardDetailsOpenByDefault = Boolean(config.cardDetailsOpenByDefault)
+  modeUiState.maxGroundingQuotes = Math.max(1, Number(config.maxGroundingQuotes) || 1)
+  modeUiState.autoGenerateOnLoad = Boolean(config.autoGenerateOnLoad)
+  modeUiState.autoBuildWalkthroughOnLoad = Boolean(config.autoBuildWalkthroughOnLoad)
+  modeUiState.autoPrewarmOnLoad = Boolean(config.autoPrewarmOnLoad)
+}
+
+function resolvePreferredTabForMode(config) {
+  const modeChanged = modeUiState.previousMode !== modeUiState.mode
+  if (!modeChanged && isTabVisible(sidebarUiState.activeTab)) {
+    return null
+  }
+  if (config?.mode === "structure") {
+    return getStructurePreferredTab()
+  }
+  if (sidebarUiState.activeTab === "walkthrough" || sidebarUiState.activeTab === "orientation") {
+    return getFlowPreferredTab()
+  }
+  return isTabVisible(sidebarUiState.activeTab) ? sidebarUiState.activeTab : getFlowPreferredTab()
+}
+
+function refreshPanelAfterModeApply() {
+  if (sidebarUiState.activeTab && isTabVisible(sidebarUiState.activeTab)) {
+    renderPanel()
+    return
+  }
+  setActiveTab(modeUiState.mode === "structure" ? getStructurePreferredTab() : getFlowPreferredTab(), {
+    fromModeApply: true
+  })
+}
+
+function applyReadingMode(mode, settings = currentSettings || {}) {
+  return applyMode(mode, {
+    settings,
+    state: {
+      setModeConfig
+    },
+    toolbar: {
+      setModeToggle: setToolbarModeToggle,
+      setMicroActionsVisible: setModeMicroActionsVisible
+    },
+    sidebar: {
+      setWalkthroughVisibility: setWalkthroughTabVisibility,
+      setWalkthroughProminent: setWalkthroughTabProminent,
+      setOrientationCollapsed: setOrientationCollapsedByMode,
+      resolvePreferredTab: resolvePreferredTabForMode,
+      setActiveTab
+    },
+    docState: {
+      docId: sidebarUiState.docId,
+      currentSectionTitle: currentPdf?.currentSectionTitle || "",
+      pageNumber: currentPdf?.pageNumber || 0
+    },
+    storage: {
+      getSettings,
+      setSettings
+    },
+    cards: {
+      setCardDetailsOpenByDefault: (openByDefault) => {
+        modeUiState.cardDetailsOpenByDefault = Boolean(openByDefault)
+      },
+      setMaxGroundingQuotes: (count) => {
+        modeUiState.maxGroundingQuotes = Math.max(1, Number(count) || 1)
+      }
+    },
+    render: {
+      refreshPanel: refreshPanelAfterModeApply
+    }
+  })
 }
 
 function getContextScopeLabel(scope) {
@@ -2837,6 +3187,7 @@ function applyReadingMapToCurrentDocument(sections) {
     normalizedSections,
     orientationState.data?.sectionIntents
   )
+  updateSectionStatus(getCurrentSectionTitle(currentPdf.pageNumber || 1, normalizedSections))
   renderPdfIntentOverlays()
   scheduleSectionRailRender()
 }
@@ -3125,7 +3476,7 @@ async function generateOrientationForCurrentDocument(loadToken, { force = false 
 
     const sections = outlineSections
     applyReadingMapToCurrentDocument(sections)
-    updateOrientationLoadingMessage("Summarizing purpose and reading map...")
+    updateOrientationLoadingMessage("Summarizing purpose and section outline...")
 
     const orientationInput = await buildOrientationInput(renderState.pdfDoc, sections)
     if (!isOrientationRunCurrent(loadToken, runToken)) {
@@ -3167,11 +3518,247 @@ async function generateOrientationForCurrentDocument(loadToken, { force = false 
   }
 }
 
+async function ensureOutlineSectionsForCurrentDocument(loadToken) {
+  if (!isLoadTokenCurrent(loadToken) || !renderState.pdfDoc || !currentPdf) {
+    return []
+  }
+  const docId = deriveDocId(currentPdf)
+  const cachedOutline = docId && docId !== "unknown" ? await getOutline(docId) : null
+  let outlineSections = normalizeReadingMapSections(cachedOutline?.sections)
+  if (!isLoadTokenCurrent(loadToken)) {
+    return []
+  }
+  if (outlineSections.length === 0) {
+    const outline = await extractOutline(renderState.pdfDoc)
+    outlineSections = normalizeReadingMapSections(outline?.sections)
+    if (docId && docId !== "unknown") {
+      void setOutline(docId, {
+        updatedAt: Date.now(),
+        sections: toStoredOutlineSections(outlineSections)
+      })
+    }
+  }
+  if (!isLoadTokenCurrent(loadToken)) {
+    return []
+  }
+  applyReadingMapToCurrentDocument(outlineSections)
+  return outlineSections
+}
+
+async function applyNonGeneratingOrientationForCurrentDocument(loadToken) {
+  if (!isLoadTokenCurrent(loadToken) || !currentPdf) {
+    return
+  }
+  const docId = deriveDocId(currentPdf)
+  const sections = await ensureOutlineSectionsForCurrentDocument(loadToken)
+  if (!isLoadTokenCurrent(loadToken)) {
+    return
+  }
+  if (docId && docId !== "unknown") {
+    const cachedEntry = await getOrientationCache(docId)
+    if (cachedEntry && isLoadTokenCurrent(loadToken)) {
+      const summary = buildOrientationSummaryFromData(cachedEntry.summary)
+      const cachedIntents = await loadCachedSectionIntentsForDocument(docId, sections)
+      setOrientationReady({
+        ...summary,
+        sectionIntents: cachedIntents,
+        sections
+      })
+      if (sidebarUiState.activeTab === "orientation") {
+        renderPanel()
+      }
+      return
+    }
+  }
+  setOrientationReady({
+    ...createEmptyOrientationData(),
+    sections
+  })
+  if (sidebarUiState.activeTab === "orientation") {
+    renderPanel()
+  }
+}
+
+function isWalkthroughPlaceholder(oneLiner, sectionTitle) {
+  const text = sanitizeText(oneLiner).toLowerCase()
+  const title = sanitizeText(sectionTitle).toLowerCase()
+  if (!text) {
+    return true
+  }
+  if (text.startsWith("read this section")) {
+    return true
+  }
+  if (title && text === title) {
+    return true
+  }
+  return false
+}
+
+async function prefillWalkthroughIntentsIfMissing(loadToken, manager, topLevelNodes) {
+  if (!isLoadTokenCurrent(loadToken) || !currentPdf) {
+    return
+  }
+  const items = normalizeWalkthroughItems(sidebarUiState.walkthrough.items)
+  if (items.length === 0) {
+    return
+  }
+  const nodeByTitle = new Map()
+  for (const node of topLevelNodes) {
+    nodeByTitle.set(sanitizeText(node?.title).toLowerCase(), node)
+  }
+
+  let hasChanges = false
+  const nextItems = items.map((item) => ({ ...item }))
+  for (const item of nextItems) {
+    if (!isWalkthroughPlaceholder(item.oneLiner, item.sectionTitle)) {
+      continue
+    }
+    const node = nodeByTitle.get(sanitizeText(item.sectionTitle).toLowerCase())
+    if (!node) {
+      continue
+    }
+    const intent = clampText(await manager.getOrGenerateIntent(node), 220)
+    if (!intent || !isLoadTokenCurrent(loadToken)) {
+      continue
+    }
+    item.oneLiner = intent
+    hasChanges = true
+  }
+  if (!hasChanges || !isLoadTokenCurrent(loadToken)) {
+    return
+  }
+  sidebarUiState.walkthrough.items = normalizeWalkthroughItems(nextItems)
+  const docId = deriveDocId(currentPdf)
+  if (docId && docId !== "unknown") {
+    await setWalkthrough(docId, sidebarUiState.walkthrough.items)
+  }
+}
+
+async function runStructurePrewarmForCurrentDocument(loadToken) {
+  if (!modeUiState.autoPrewarmOnLoad || !isLoadTokenCurrent(loadToken) || !currentPdf) {
+    return
+  }
+  const docId = deriveDocId(currentPdf)
+  if (!docId || docId === "unknown" || structurePrewarmedDocIds.has(docId)) {
+    return
+  }
+  const manager = ensureSectionIntentManager()
+  if (!manager) {
+    return
+  }
+
+  structurePrewarmedDocIds.add(docId)
+  logger.info("Structure prewarm start", { docId })
+  try {
+    const sections = await ensureOutlineSectionsForCurrentDocument(loadToken)
+    if (!isLoadTokenCurrent(loadToken)) {
+      return
+    }
+    const topLevelNodes = buildSectionTree(sections).filter((node) => Number(node?.level) === 1).slice(0, 6)
+    if (topLevelNodes.length > 0) {
+      await manager.prewarmTopLevelIntents(topLevelNodes, { limit: 6 })
+      for (const node of topLevelNodes) {
+        const intent = clampText(await manager.getOrGenerateIntent(node), 220)
+        if (intent) {
+          upsertOrientationIntent(node.key, intent)
+        }
+      }
+      await prefillWalkthroughIntentsIfMissing(loadToken, manager, topLevelNodes)
+    }
+    if (sidebarUiState.activeTab === "orientation" || sidebarUiState.activeTab === "walkthrough") {
+      renderPanel()
+    }
+    logger.info("Structure prewarm complete", { docId, topLevelCount: topLevelNodes.length })
+  } catch (error) {
+    logger.warn("Structure prewarm failed", {
+      docId,
+      message: error?.message || "Unknown error"
+    })
+  }
+}
+
 function getReadingMapSections() {
   if (!Array.isArray(currentPdf?.readingMap?.sections)) {
     return []
   }
   return currentPdf.readingMap.sections
+}
+
+function getCurrentSectionTitle(pageNumber, sectionsOutline) {
+  const normalizedPageNumber = Number(pageNumber)
+  if (!Number.isFinite(normalizedPageNumber) || normalizedPageNumber < 1) {
+    return "Unknown section"
+  }
+  const pageIndex = Math.max(0, Math.floor(normalizedPageNumber) - 1)
+  const sections = Array.isArray(sectionsOutline) ? sectionsOutline : []
+  let latestTitle = ""
+  for (const section of sections) {
+    const sectionPageIndex = parseOptionalPageIndex(section?.pageIndex)
+    if (sectionPageIndex == null) {
+      continue
+    }
+    if (sectionPageIndex <= pageIndex) {
+      latestTitle = clampText(section?.title || section?.displayTitle, 180)
+      continue
+    }
+    break
+  }
+  if (latestTitle) {
+    return latestTitle
+  }
+  return `Page ${pageIndex + 1}`
+}
+
+function getCurrentSectionRange(pageNumber, sectionsOutline) {
+  const normalizedPageNumber = Number(pageNumber)
+  const pageIndex = Number.isFinite(normalizedPageNumber) && normalizedPageNumber > 0
+    ? Math.max(0, Math.floor(normalizedPageNumber) - 1)
+    : 0
+  const sections = Array.isArray(sectionsOutline) ? sectionsOutline : []
+  if (sections.length === 0) {
+    return {
+      sectionTitle: `Page ${pageIndex + 1}`,
+      startPageIndex: pageIndex,
+      endPageIndex: pageIndex
+    }
+  }
+
+  let selectedIndex = 0
+  for (let index = 0; index < sections.length; index += 1) {
+    const sectionPageIndex = parseOptionalPageIndex(sections[index]?.pageIndex)
+    if (sectionPageIndex == null) {
+      continue
+    }
+    if (sectionPageIndex <= pageIndex) {
+      selectedIndex = index
+      continue
+    }
+    break
+  }
+
+  const selected = sections[selectedIndex] || null
+  const startPageIndex = parseOptionalPageIndex(selected?.pageIndex) ?? pageIndex
+  let endPageIndex = startPageIndex
+  for (let index = selectedIndex + 1; index < sections.length; index += 1) {
+    const nextPageIndex = parseOptionalPageIndex(sections[index]?.pageIndex)
+    if (nextPageIndex == null) {
+      continue
+    }
+    endPageIndex = Math.max(startPageIndex, nextPageIndex - 1)
+    break
+  }
+  if (endPageIndex < startPageIndex) {
+    endPageIndex = startPageIndex
+  }
+  if (currentPdf?.numPages) {
+    endPageIndex = Math.min(endPageIndex, Math.max(0, currentPdf.numPages - 1))
+  }
+
+  return {
+    sectionTitle: getCurrentSectionTitle(pageIndex + 1, sections),
+    startPageIndex,
+    endPageIndex
+  }
 }
 
 function resolveSectionForPage(pageIndex) {
@@ -3196,15 +3783,11 @@ function resolveSectionForPage(pageIndex) {
 }
 
 function resolveSectionTitle(pageIndex) {
-  const section = resolveSectionForPage(pageIndex)
-  const title = sanitizeText(section?.title)
-  if (title) {
-    return title
+  const normalizedPageIndex = parseOptionalPageIndex(pageIndex)
+  if (normalizedPageIndex == null) {
+    return "Unknown section"
   }
-  if (Number.isFinite(pageIndex) && pageIndex >= 0) {
-    return `Page ${Math.floor(Number(pageIndex)) + 1}`
-  }
-  return "Unknown section"
+  return getCurrentSectionTitle(normalizedPageIndex + 1, getReadingMapSections())
 }
 
 function resolveSectionId(pageIndex) {
@@ -4920,6 +5503,7 @@ async function loadCardsForCurrentDocument() {
   ])
   sidebarUiState.cards = cards.map((card) => normalizeCard(card))
   sidebarUiState.glossaryTerms = glossaryTerms
+  sidebarUiState.glossarySuggestions = []
   sidebarUiState.walkthrough = {
     ...createWalkthroughUiState(),
     items: normalizeWalkthroughItems(walkthroughItems)
@@ -4959,6 +5543,9 @@ async function handleSelectionAction(payload) {
     setActiveTab("figures")
   } else {
     setActiveTab("explain")
+  }
+  if (modeUiState.mode === "flow") {
+    pendingCardAutoScrollId = finalCard.id
   }
 
   if (sidebarState.collapsed) {
@@ -5020,6 +5607,14 @@ async function handlePanelCardAction(event) {
       }
       return
     }
+    if (action === "summarize-section") {
+      void handleSummarizeCurrentSectionAction()
+      return
+    }
+    if (action === "key-terms") {
+      void handleKeyTermsSoFarAction()
+      return
+    }
     if (action === "build-walkthrough") {
       void buildWalkthroughFromOrientation()
       return
@@ -5038,6 +5633,10 @@ async function handlePanelCardAction(event) {
   const walkthroughButton = eventTarget.closest("button[data-walkthrough-action]")
   if (walkthroughButton && panel.contains(walkthroughButton)) {
     const action = walkthroughButton.dataset.walkthroughAction
+    if (action === "create-top-level") {
+      void buildWalkthroughFromOrientation({ forceRebuild: true })
+      return
+    }
     if (action === "rebuild") {
       const hasExisting = normalizeWalkthroughItems(sidebarUiState.walkthrough.items).length > 0
       if (hasExisting) {
@@ -5061,6 +5660,13 @@ async function handlePanelCardAction(event) {
       const pageIndex = parseOptionalPageIndex(walkthroughButton.dataset.sectionPageIndex)
       if (pageIndex != null) {
         void jumpToSection(pageIndex, walkthroughButton.dataset.sectionTitle, "smooth")
+      }
+      return
+    }
+    if (action === "jump-next") {
+      const nextItem = getNextWalkthroughItem(normalizeWalkthroughItems(sidebarUiState.walkthrough.items))
+      if (nextItem) {
+        void jumpToSection(nextItem.pageIndex, nextItem.sectionTitle, "smooth")
       }
       return
     }
@@ -5186,8 +5792,8 @@ function applySettingsToUi(settings) {
 
   readingModeFlowRadio.checked = settings.defaultReadingMode === "flow";
   readingModeStructureRadio.checked = settings.defaultReadingMode === "structure";
-  updateReadingModeStatus(settings.defaultReadingMode);
-  applyOrientationModeDefaults(settings.defaultReadingMode);
+  setToolbarModeToggle(settings.defaultReadingMode)
+  applyReadingMode(settings.defaultReadingMode, settings)
 
   const hasOpenAIKey = Boolean(settings.openaiApiKey);
   llmModeOpenAIOption.disabled = !hasOpenAIKey;
@@ -5215,8 +5821,11 @@ function applySettingsToUi(settings) {
   autoOpenPdfToggle.checked = settings.autoOpenPdf;
   setApiPresenceStatus(settings);
   updateContextScopeStatus();
-  if (sidebarUiState.activeTab === "orientation") {
-    renderPanel()
+  if (settings.defaultReadingMode === "structure" && currentPdf && renderState.pdfDoc) {
+    if (getOrientationState().status === "idle") {
+      void generateOrientationForCurrentDocument(renderState.loadToken)
+    }
+    void runStructurePrewarmForCurrentDocument(renderState.loadToken)
   }
   void syncWholePdfStatusFromCache(sidebarUiState.docId, settings);
 }
@@ -5539,6 +6148,7 @@ function setCurrentPage(pageNumber) {
   if (currentPdf.pageNumber !== clamped) {
     currentPdf.pageNumber = clamped;
   }
+  updateSectionStatus(getCurrentSectionTitle(clamped, getReadingMapSections()))
   updatePdfControls();
 }
 
@@ -5680,13 +6290,7 @@ function getLoadedStatusText() {
   if (!currentPdf) {
     return "No PDF loaded";
   }
-
-  const sourceLabel =
-    currentPdf.sourceType === "local"
-      ? currentPdf.filename
-      : sanitizeUrlForLog(currentPdf.url ?? "");
-
-  return `Loaded: ${sourceLabel} (${currentPdf.numPages} pages)`;
+  return `Loaded: ${getLoadedStatusSourceShort()}`;
 }
 
 function clampScale(scale) {
@@ -5873,7 +6477,7 @@ async function renderAllPages(targetPageNumber, loadToken) {
   if (!restoredJump) {
     scrollToPage(targetPageNumber, "instant");
   }
-  setStatus(getLoadedStatusText());
+  setStatus(getLoadedStatusText(), { title: getLoadedStatusTooltipText() });
   updatePdfControls();
   renderPdfIntentOverlays()
   scheduleSectionRailRender()
@@ -5917,9 +6521,11 @@ function handleLoadFailure(sourceType, error) {
   sidebarUiState.docId = "unknown";
   sidebarUiState.cards = [];
   sidebarUiState.glossaryTerms = [];
+  sidebarUiState.glossarySuggestions = [];
   sidebarUiState.walkthrough = createWalkthroughUiState()
   sidebarUiState.toastMessage = ""
   resetOrientationStateForDocument()
+  updateSectionStatus("")
   ensureScaleFactor();
   updatePdfControls();
   renderPanel();
@@ -5971,6 +6577,7 @@ async function loadPdfSource(source, documentParams) {
     scale: DEFAULT_SCALE,
     renderedScale: DEFAULT_SCALE,
     pageNumber: 1,
+    currentSectionTitle: "",
     retrievalBlockCache: null,
     readingMap: { sections: [] },
     pdfDocRef: null
@@ -5980,10 +6587,12 @@ async function loadPdfSource(source, documentParams) {
   sidebarUiState.docId = deriveDocId(currentPdf);
   sidebarUiState.cards = [];
   sidebarUiState.glossaryTerms = [];
+  sidebarUiState.glossarySuggestions = [];
   sidebarUiState.walkthrough = createWalkthroughUiState()
   sidebarUiState.toastMessage = ""
   resetOrientationStateForDocument()
   setOrientationLoading("Loading PDF...")
+  updateSectionStatus("")
   ensureScaleFactor();
   updatePdfControls();
   renderPanel();
@@ -6029,8 +6638,16 @@ async function loadPdfSource(source, documentParams) {
 
   logger.info("Loaded PDF: numPages", { numPages: pdfDoc.numPages });
   updatePdfControls();
-  void generateOrientationForCurrentDocument(loadToken);
+  await ensureOutlineSectionsForCurrentDocument(loadToken);
   await loadCardsForCurrentDocument();
+  if (modeUiState.autoGenerateOnLoad) {
+    void generateOrientationForCurrentDocument(loadToken);
+  } else {
+    void applyNonGeneratingOrientationForCurrentDocument(loadToken);
+  }
+  if (modeUiState.autoPrewarmOnLoad) {
+    void runStructurePrewarmForCurrentDocument(loadToken)
+  }
   await scheduleRender(1, loadToken);
 }
 
@@ -6045,8 +6662,10 @@ async function loadPdfFromLocalFile(file) {
     size: file.size
   });
 
-  setActiveTab("orientation");
-  setStatus(`Loading: ${file.name}`);
+  setActiveTab(modeUiState.mode === "structure" ? "orientation" : getFlowPreferredTab(), {
+    fromModeApply: true
+  });
+  setStatus(`Loading: ${getShortStatusLabel(file.name, 44)}`, { title: `Loading: ${file.name}` });
 
   try {
     const arrayBuffer = await file.arrayBuffer();
@@ -6078,12 +6697,15 @@ async function loadPdfFromRemoteUrl(srcUrl) {
     url: sanitizeUrlForLog(srcUrl)
   });
 
-  setActiveTab("orientation");
-  setStatus(
-    isFileUrl
-      ? `Loading file URL. ${FILE_URL_LOAD_HINT_MESSAGE}`
+  setActiveTab(modeUiState.mode === "structure" ? "orientation" : getFlowPreferredTab(), {
+    fromModeApply: true
+  });
+  const remoteLabel = normalizePdfFilename(getFilenameFromUrl(srcUrl)) || sanitizeUrlForLog(srcUrl)
+  setStatus(`Loading: ${getShortStatusLabel(remoteLabel, 44)}`, {
+    title: isFileUrl
+      ? `Loading file URL: ${sanitizeUrlForLog(srcUrl)}`
       : `Loading: ${sanitizeUrlForLog(srcUrl)}`
-  );
+  });
 
   await loadPdfSource(
     {
@@ -6158,15 +6780,145 @@ function handleWindowResize() {
   });
 }
 
+async function setReadingModeSetting(nextMode) {
+  const normalizedMode = nextMode === "structure" ? "structure" : "flow"
+  if (currentSettings?.defaultReadingMode === normalizedMode) {
+    return
+  }
+  const settings = await setSettings({ defaultReadingMode: normalizedMode })
+  applySettingsToUi(settings)
+  logger.info("Reading mode changed", { mode: settings.defaultReadingMode })
+}
+
 async function handleReadingModeChange(event) {
   if (!event.target?.checked) {
-    return;
+    return
   }
+  await setReadingModeSetting(event.target.value)
+}
 
-  const nextMode = event.target.value;
-  const settings = await setSettings({ defaultReadingMode: nextMode });
-  applySettingsToUi(settings);
-  logger.info("Reading mode changed", { mode: settings.defaultReadingMode });
+async function handleToolbarModeToggle(event) {
+  const target = event.target instanceof Element ? event.target.closest("button[data-mode]") : null
+  if (!(target instanceof HTMLButtonElement)) {
+    return
+  }
+  await setReadingModeSetting(target.dataset.mode)
+}
+
+async function handleSummarizeCurrentSectionAction() {
+  if (!currentPdf || !renderState.pdfDoc) {
+    return
+  }
+  const sections = getReadingMapSections()
+  const range = getCurrentSectionRange(currentPdf.pageNumber || 1, sections)
+  const pageStart = Math.max(0, range.startPageIndex)
+  const pageEnd = Math.max(pageStart, range.endPageIndex)
+  const maxPages = Math.min(pageEnd - pageStart + 1, 2)
+  const parts = []
+  for (let offset = 0; offset < maxPages; offset += 1) {
+    const pageText = await getPageText(renderState.pdfDoc, pageStart + offset)
+    const text = sanitizeText(pageText)
+    if (text) {
+      parts.push(text)
+    }
+  }
+  const sectionSnippet = truncateText(parts.join(" "), 1400)
+  if (!sectionSnippet) {
+    setStatus("No section text available yet.")
+    return
+  }
+  const sectionTitle = clampText(range.sectionTitle, 160) || `Page ${pageStart + 1}`
+  const grounding = buildGrounding({
+    pageIndex: pageStart,
+    selectedText: sectionTitle,
+    contextWindow: sectionSnippet
+  })
+  const { response, warnings, providerUsed } = await generateLLM("explanation", {
+    selectedText: sectionTitle,
+    contextWindow: sectionSnippet,
+    pageIndex: pageStart,
+    readingMode: getReadingModeOrDefault()
+  })
+  const generatedCard = normalizeCard({
+    id: makeId("card"),
+    type: "explanation",
+    title: `Section summary: ${sectionTitle}`,
+    shortAnswer: response?.shortAnswer || `Summary for ${sectionTitle}`,
+    details: {
+      eli5: response?.eli5,
+      steps: response?.steps || [],
+      paperUsage: response?.paperUsage || []
+    },
+    grounding: {
+      pageIndex: grounding.pageIndex,
+      sectionId: grounding.sectionId,
+      sectionTitle: grounding.sectionTitle,
+      quote: grounding.quote
+    },
+    selectedText: sectionTitle,
+    contextWindow: sectionSnippet,
+    createdAt: Date.now(),
+    meta: {
+      provider: providerUsed,
+      warnings: Array.isArray(warnings) ? warnings : []
+    }
+  })
+  const docId = deriveDocId(currentPdf)
+  sidebarUiState.docId = docId
+  const persistedCard = await appendCard(docId, generatedCard)
+  const finalCard = persistedCard ? normalizeCard(persistedCard) : generatedCard
+  sidebarUiState.cards = [...sidebarUiState.cards, finalCard]
+  pendingCardAutoScrollId = finalCard.id
+  setActiveTab("explain")
+  setStatus("Section summary added")
+}
+
+async function handleKeyTermsSoFarAction() {
+  if (!currentPdf || !renderState.pdfDoc) {
+    return
+  }
+  const currentPageIndex = Math.max(0, (currentPdf.pageNumber || 1) - 1)
+  const startPageIndex = Math.max(0, currentPageIndex - 2)
+  const parts = []
+  for (let pageIndex = startPageIndex; pageIndex <= currentPageIndex; pageIndex += 1) {
+    const pageText = await getPageText(renderState.pdfDoc, pageIndex)
+    const text = sanitizeText(pageText)
+    if (text) {
+      parts.push(text)
+    }
+  }
+  const snippet = truncateText(parts.join(" "), 1400)
+  if (!snippet) {
+    setStatus("No text available for key terms yet.")
+    return
+  }
+  const sections = getReadingMapSections()
+  const headings = sections
+    .filter((section) => (parseOptionalPageIndex(section?.pageIndex) ?? 0) <= currentPageIndex)
+    .map((section) => getSectionDisplayTitle(section))
+    .filter(Boolean)
+    .slice(0, 16)
+  const { response } = await generateLLM("orientation", {
+    title: currentPdf.filename || "Document",
+    contextWindow: snippet,
+    headings,
+    readingMode: getReadingModeOrDefault()
+  })
+  const terms = Array.isArray(response?.keyTerms)
+    ? response.keyTerms.map((term) => clampText(term, 48)).filter(Boolean).slice(0, 8)
+    : []
+  if (terms.length === 0) {
+    setStatus("No key terms generated.")
+    return
+  }
+  sidebarUiState.glossarySuggestions = [...new Set([...(sidebarUiState.glossarySuggestions || []), ...terms])].slice(
+    0,
+    24
+  )
+  if (sidebarUiState.activeTab === "glossary") {
+    renderPanel()
+  }
+  setStatus(`Added ${terms.length} key terms`)
 }
 
 async function handleLlmModeChange() {
@@ -6303,12 +7055,8 @@ if (sectionRailEl instanceof HTMLElement) {
   })
 }
 
-toggleSidebarBtn.addEventListener("click", () => {
-  setSidebarCollapsed(!sidebarState.collapsed);
-});
-
 reopenSidebarBtn?.addEventListener("click", () => {
-  setSidebarCollapsed(false);
+  setSidebarCollapsed(!sidebarState.collapsed);
 });
 
 sidebarResizeHandle.addEventListener("pointerdown", handleSidebarResizeStart);
@@ -6407,6 +7155,12 @@ copyDebugInfoBtn.addEventListener("click", async () => {
 
 readingModeFlowRadio.addEventListener("change", handleReadingModeChange);
 readingModeStructureRadio.addEventListener("change", handleReadingModeChange);
+toolbarModeFlowBtn?.addEventListener("click", (event) => {
+  void handleToolbarModeToggle(event)
+});
+toolbarModeStructureBtn?.addEventListener("click", (event) => {
+  void handleToolbarModeToggle(event)
+});
 llmModeSelect.addEventListener("change", handleLlmModeChange);
 contextScopeSelect.addEventListener("change", () => {
   void handleContextScopeChange();
@@ -6444,14 +7198,18 @@ if (src) {
 }
 
 logger.info("Viewer loaded");
-void Promise.all([loadVerboseState(), loadSettingsState()]);
-setActiveTab("orientation");
+const startupStatePromise = Promise.all([loadVerboseState(), loadSettingsState()]);
+void startupStatePromise.catch((error) => {
+  logger.warn("Startup settings load failed", { message: error?.message || "Unknown error" })
+});
+setActiveTab(getFlowPreferredTab(), { fromModeApply: true });
 ensureScaleFactor();
 initializeSidebarState();
 updatePdfControls();
 updateDocumentTitle();
+updateSectionStatus("");
 if (src) {
-  void loadPdfFromRemoteUrl(src);
+  void startupStatePromise.then(() => loadPdfFromRemoteUrl(src));
 } else {
   setStatus("No PDF loaded");
 }

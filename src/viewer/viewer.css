@@ -92,6 +92,33 @@ html {
   gap: 6px;
 }
 
+.modeToggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #f8f8f2;
+}
+
+.modeToggleButton {
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  color: var(--text) !important;
+  padding: 6px 10px !important;
+  font-size: 12px;
+  line-height: 1.1;
+}
+
+.modeToggleButton + .modeToggleButton {
+  border-left: 1px solid var(--border) !important;
+}
+
+.modeToggleButton[aria-pressed="true"] {
+  background: #ecece3 !important;
+  font-weight: 700;
+}
+
 .toolbarIconButton {
   width: 32px;
   height: 32px;
@@ -129,30 +156,15 @@ html {
   border-color: #d6d6cc;
 }
 
-#toggleSidebar[aria-pressed="true"] {
-  background: var(--toolbarButtonActive);
-  border-color: #d6d6cc;
-}
-
 #status {
   color: var(--text) !important;
   flex: 1 1 auto;
-  min-width: 180px;
-  max-width: 520px;
+  min-width: 140px;
+  max-width: 360px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   opacity: 0.8;
-}
-
-.readingModeStatus {
-  font-size: 12px;
-  color: var(--text) !important;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 2px 8px;
-  white-space: nowrap;
-  background: #f6f6f1;
 }
 
 .contextScopeStatus {
@@ -163,6 +175,9 @@ html {
   padding: 2px 8px;
   white-space: nowrap;
   background: #f6f6f1;
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .toolbarRight {
@@ -608,24 +623,20 @@ html {
 }
 
 .reopenSidebar {
-  display: none;
+  display: block;
   position: absolute;
   top: 10px;
   left: 8px;
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 10px;
   background: var(--toolbarButtonBg);
   color: var(--text);
   cursor: pointer;
-  font-size: 22px;
+  font-size: 20px;
   line-height: 1;
   z-index: 6;
-}
-
-.layout.sidebarCollapsed .reopenSidebar {
-  display: block;
 }
 
 .layout.sidebarCollapsed .tabs {
@@ -668,7 +679,7 @@ body.resizingSidebar .sidebarResizeHandle::before,
 
 .tabs {
   border-right: 1px solid var(--border);
-  padding: 10px 8px;
+  padding: 52px 8px 10px;
   display: grid;
   gap: 8px;
   align-content: start;
@@ -688,12 +699,44 @@ body.resizingSidebar .sidebarResizeHandle::before,
   border-color: #ddddcf;
 }
 
+.tab.isModeHidden {
+  display: none;
+}
+
+.tab.isProminent {
+  border-color: #cfd9c1;
+  background: #f3f7ed;
+  box-shadow: inset 0 0 0 1px rgba(128, 154, 104, 0.18);
+}
+
 .panel {
   padding: 14px;
   overflow: auto;
   min-height: 0;
   scrollbar-color: var(--scrollThumb) var(--scrollTrack);
   scrollbar-width: thin;
+}
+
+body[data-mode="flow"] .panel {
+  padding: 10px;
+}
+
+body[data-mode="flow"] .orientationPanel,
+body[data-mode="flow"] .walkthroughPanel,
+body[data-mode="flow"] .cardList,
+body[data-mode="flow"] .glossaryList {
+  gap: 8px;
+}
+
+body[data-mode="structure"] .panel {
+  padding: 16px;
+}
+
+body[data-mode="structure"] .orientationPanel,
+body[data-mode="structure"] .walkthroughPanel,
+body[data-mode="structure"] .cardList,
+body[data-mode="structure"] .glossaryList {
+  gap: 12px;
 }
 
 .panelTitle {
@@ -806,6 +849,41 @@ body.resizingSidebar .sidebarResizeHandle::before,
 
 .orientationChip {
   justify-self: start;
+}
+
+.orientationCollapsedPanel {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
+.orientationMiniActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.orientationMiniAction {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: #4f6243;
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.orientationMiniAction:hover {
+  color: #324127;
+}
+
+.orientationMiniAction:disabled {
+  opacity: 0.5;
+  text-decoration: none;
+  cursor: default;
 }
 
 .orientationSection {
@@ -1538,6 +1616,34 @@ body.resizingSidebar .sidebarResizeHandle::before,
 .cardDetails summary {
   cursor: pointer;
   color: var(--muted);
+}
+
+body[data-mode="flow"] .cardDetails summary {
+  font-size: 12px;
+}
+
+body[data-mode="structure"] .cardMeta,
+body[data-mode="structure"] .cardGroundingLabel {
+  color: #50574a;
+}
+
+body[data-mode="flow"] .walkthroughMetaSummary {
+  display: grid;
+  gap: 6px;
+}
+
+body[data-mode="structure"] .walkthroughHeader {
+  margin-bottom: 2px;
+}
+
+.walkthroughNextHint {
+  margin: 0;
+  padding: 7px 9px;
+  border: 1px solid #d9dece;
+  border-radius: 8px;
+  background: #f8fbf3;
+  color: #324226;
+  font-size: 12px;
 }
 
 .cardDetailSection {
