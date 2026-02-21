@@ -727,14 +727,27 @@ body.resizingSidebar .sidebarResizeHandle::before,
 
 .orientationPanel {
   display: grid;
-  gap: 12px;
+  gap: 14px;
 }
 
 .orientationHeader {
+  border: 1px solid #dddcd0;
+  border-radius: 12px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 248, 240, 0.98) 100%),
+    radial-gradient(circle at top right, rgba(188, 204, 170, 0.22) 0%, transparent 58%);
+  padding: 10px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
+}
+
+.orientationHeader .panelTitle {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
 }
 
 .orientationHeaderActions {
@@ -750,8 +763,11 @@ body.resizingSidebar .sidebarResizeHandle::before,
   border-radius: 999px;
   background: #fdfdfb;
   color: var(--text);
-  padding: 4px 10px;
+  padding: 5px 10px;
   font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
   cursor: pointer;
 }
 
@@ -793,18 +809,21 @@ body.resizingSidebar .sidebarResizeHandle::before,
 }
 
 .orientationSection {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: #fff;
-  padding: 10px;
+  border: 1px solid #e0dfd2;
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 1) 0%, rgba(251, 251, 247, 1) 100%);
+  box-shadow: 0 1px 0 rgba(29, 28, 22, 0.04);
+  padding: 11px;
   display: grid;
-  gap: 8px;
+  gap: 9px;
 }
 
 .orientationDetails summary {
   cursor: pointer;
-  color: var(--muted);
+  color: #5d5d53;
   font-size: 12px;
+  font-weight: 600;
 }
 
 .orientationDetails[open] summary {
@@ -813,53 +832,148 @@ body.resizingSidebar .sidebarResizeHandle::before,
 
 .orientationSectionTitle {
   margin: 0;
-  font-size: 13px;
-  color: var(--muted);
-  font-weight: 600;
+  font-size: 11px;
+  color: #65655b;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .orientationParagraph {
   margin: 0;
-  line-height: 1.45;
+  color: #2e2e29;
+  line-height: 1.58;
+  font-size: 13px;
+}
+
+.orientationLeadStack {
+  display: grid;
+  gap: 8px;
+}
+
+.orientationLeadItem {
+  border: 1px solid #e4e3d6;
+  border-radius: 10px;
+  background: #fcfcf9;
+  padding: 8px 9px;
+  display: grid;
+  gap: 4px;
+}
+
+.orientationLeadLabel {
+  margin: 0;
+  font-size: 10px;
+  color: #6a6a60;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-weight: 700;
+}
+
+.orientationLeadText {
+  margin: 0;
+  color: #262621;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.orientationParagraph strong,
+.orientationLeadText strong,
+.orientationBullets strong {
+  font-weight: 700;
+  color: #1f2818;
+}
+
+.orientationParagraph em,
+.orientationLeadText em,
+.orientationBullets em {
+  font-style: italic;
+  color: #2b2b25;
+}
+
+.orientationParagraph u,
+.orientationLeadText u,
+.orientationBullets u {
+  text-decoration-thickness: 2px;
+  text-decoration-color: #9fb18a;
+  text-underline-offset: 2px;
 }
 
 .orientationBullets {
+  list-style: none;
+  counter-reset: orientation-step;
   margin: 0;
-  padding-left: 18px;
-  line-height: 1.4;
+  padding-left: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.orientationBullets li {
+  counter-increment: orientation-step;
+  position: relative;
+  margin: 0;
+  padding: 7px 8px 7px 30px;
+  border: 1px solid #e6e5d8;
+  border-radius: 9px;
+  background: #fafaf6;
+  line-height: 1.45;
+  color: #2f2f2a;
+}
+
+.orientationBullets li::before {
+  content: counter(orientation-step);
+  position: absolute;
+  left: 8px;
+  top: 7px;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 1px solid #d0d4bf;
+  background: #f2f5e8;
+  color: #4c5a3e;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
 }
 
 .orientationBullets li + li {
-  margin-top: 4px;
+  margin-top: 0;
 }
 
 .orientationKeyTerms {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
   gap: 6px;
 }
 
 .orientationTermChip {
-  border: 1px solid #d8d8cb;
+  border: 1px solid #d9ddc7;
   border-radius: 999px;
-  background: #f7f7f2;
-  color: #4e4e46;
-  font-size: 12px;
-  padding: 3px 8px;
+  background: linear-gradient(180deg, #f9fbf2 0%, #f4f7ea 100%);
+  color: #4a5440;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+  padding: 4px 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .orientationLoading {
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  border: 1px solid #dfded1;
+  border-radius: 12px;
   background: #fff;
-  padding: 10px;
+  padding: 11px;
   display: grid;
   gap: 8px;
 }
 
 .orientationLoadingText {
   margin: 0;
-  color: var(--muted);
+  color: #5f5f56;
+  line-height: 1.45;
+  font-size: 13px;
 }
 
 .orientationSkeletonLine {
@@ -884,8 +998,15 @@ body.resizingSidebar .sidebarResizeHandle::before,
 
 .orientationMutedText {
   margin: 0;
-  color: var(--muted);
+  color: #5b5b52;
   font-size: 12px;
+  line-height: 1.45;
+}
+
+.orientationMutedHint {
+  color: #54544c;
+  border-top: 1px dashed #e3e2d6;
+  padding-top: 7px;
 }
 
 .orientationReadingMap {
@@ -1050,23 +1171,26 @@ body.resizingSidebar .sidebarResizeHandle::before,
 
 .orientationMapActions {
   display: flex;
+  align-items: center;
+  justify-content: space-between;
   flex-wrap: wrap;
   gap: 6px;
 }
 
 .orientationMapActionButton {
-  border: 1px solid var(--border);
+  border: 1px solid #d6d6c8;
   border-radius: 8px;
-  background: #fdfdfb;
-  color: var(--text);
-  padding: 5px 8px;
+  background: linear-gradient(180deg, #fefefb 0%, #f5f5ef 100%);
+  color: #2d2d28;
+  padding: 6px 10px;
   font: inherit;
   font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
 }
 
 .orientationMapActionButton:hover {
-  background: #f2f2eb;
+  background: linear-gradient(180deg, #f8f8f2 0%, #ecece2 100%);
 }
 
 .orientationMapActionButton:disabled {
@@ -1075,8 +1199,14 @@ body.resizingSidebar .sidebarResizeHandle::before,
 }
 
 .orientationError {
-  margin: 0;
+  margin: 0 0 -2px;
+  border: 1px solid #e5c9c9;
+  border-radius: 10px;
+  background: #fff6f6;
   color: #7a2c2c;
+  padding: 8px 9px;
+  font-size: 12px;
+  line-height: 1.42;
 }
 
 .walkthroughPanel {

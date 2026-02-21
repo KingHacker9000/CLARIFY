@@ -1048,14 +1048,50 @@ function createOrientationHeader({ actionLabel = "Start reading" }) {
   return header
 }
 
-function createOrientationParagraph(text) {
+function createOrientationParagraph(text, options = {}) {
   const paragraph = document.createElement("p")
   paragraph.className = "orientationParagraph"
-  paragraph.textContent = text
+  paragraph.innerHTML = formatInlineRichTextHtml(text, options)
   return paragraph
 }
 
-function createOrientationBullets(items) {
+function createOrientationLeadStack(entries, fallbackText, options = {}) {
+  const stack = document.createElement("div")
+  stack.className = "orientationLeadStack"
+  let hasRows = false
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const label = clampText(entry?.label, 48)
+    const text = clampText(entry?.text, 360)
+    if (!label || !text) {
+      continue
+    }
+    hasRows = true
+    const row = document.createElement("article")
+    row.className = "orientationLeadItem"
+
+    const rowLabel = document.createElement("h5")
+    rowLabel.className = "orientationLeadLabel"
+    rowLabel.textContent = label
+
+    const rowText = document.createElement("p")
+    rowText.className = "orientationLeadText"
+    rowText.innerHTML = formatInlineRichTextHtml(text, options)
+
+    row.append(rowLabel, rowText)
+    stack.append(row)
+  }
+  if (!hasRows) {
+    stack.append(
+      createOrientationParagraph(
+        clampText(fallbackText, 220) || "Orientation is still building. Start with the introduction and abstract.",
+        options
+      )
+    )
+  }
+  return stack
+}
+
+function createOrientationBullets(items, options = {}) {
   const list = document.createElement("ul")
   list.className = "orientationBullets"
   for (const item of items) {
@@ -1064,7 +1100,7 @@ function createOrientationBullets(items) {
       continue
     }
     const li = document.createElement("li")
-    li.textContent = text
+    li.innerHTML = formatInlineRichTextHtml(text, { ...options, context: "bullet" })
     list.append(li)
   }
   return list
@@ -1145,6 +1181,10 @@ function renderOrientationReadingMap(
     empty.className = "orientationMutedText"
     empty.textContent = "No outline detected for section markers."
     mapSection.append(empty)
+    const hint = document.createElement("p")
+    hint.className = "orientationMutedText orientationMutedHint"
+    hint.textContent = "Use the walkthrough to build a guided reading order from current headings."
+    mapSection.append(hint)
     container.append(mapSection)
     return
   }
@@ -1155,7 +1195,10 @@ function renderOrientationReadingMap(
     normalizedSections.length === 1
       ? "1 section marker is available on the left rail."
       : `${normalizedSections.length} section markers are available on the left rail.`
-  mapSection.append(summary)
+  const hint = document.createElement("p")
+  hint.className = "orientationMutedText orientationMutedHint"
+  hint.textContent = "Scan the rail first, then jump by section to keep context while reading."
+  mapSection.append(summary, hint)
   container.append(mapSection)
 }
 
@@ -1215,13 +1258,19 @@ function renderOrientationTab() {
   }
 
   const data = orientationState.data || createEmptyOrientationData()
+  const orientationKeyTerms = Array.isArray(data.keyTerms) ? data.keyTerms : []
+  const orientationTextOptions = { keyTerms: orientationKeyTerms, context: "orientation" }
   const glanceSection = createOrientationSection("Paper at a glance")
   const purpose = clampText(data.purpose, readingMode === "flow" ? 220 : 320)
   const contribution = clampText(data.contribution, readingMode === "flow" ? 220 : 320)
-  const glanceText = [purpose, contribution].filter(Boolean).join(" ")
   glanceSection.append(
-    createOrientationParagraph(
-      glanceText || "Orientation is still building. Start with the introduction and abstract."
+    createOrientationLeadStack(
+      [
+        { label: "Purpose", text: purpose },
+        { label: "Contribution", text: contribution }
+      ],
+      "Orientation is still building. Start with the introduction and abstract.",
+      orientationTextOptions
     )
   )
   container.append(glanceSection)
@@ -1233,11 +1282,11 @@ function renderOrientationTab() {
     Array.isArray(data.focusBullets) && data.focusBullets.length > 0
       ? data.focusBullets.slice(0, focusLimit)
       : ["Identify the main claim, method assumptions, and the evidence supporting conclusions."]
-  focusSection.append(createOrientationBullets(focusBullets))
+  focusSection.append(createOrientationBullets(focusBullets, orientationTextOptions))
   container.append(focusSection)
 
   const keyTermsSection = createOrientationSection("Key terms")
-  keyTermsSection.append(createOrientationKeyTerms(Array.isArray(data.keyTerms) ? data.keyTerms : []))
+  keyTermsSection.append(createOrientationKeyTerms(orientationKeyTerms))
   if (readingMode === "structure") {
     container.append(keyTermsSection)
   } else {
@@ -1285,6 +1334,99 @@ function escapeHtml(value) {
 
 function escapeKeywordRegExp(value) {
   return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+function formatInlineRichTextHtml(value, options = {}) {
+  const sourceText = sanitizeText(value)
+  const escaped = escapeHtml(sourceText)
+  if (!escaped) {
+    return ""
+  }
+
+  const source = options && typeof options === "object" ? options : {}
+  const context = sanitizeText(source.context).toLowerCase()
+  const keyTerms = Array.isArray(source.keyTerms) ? source.keyTerms : []
+  const hasManualFormatting = /(\*\*[^*]+\*\*|__[^_]+__|(^|[^*])\*[^*]+\*(?!\*))/g.test(sourceText)
+
+  // Supported inline markers:
+  // **bold**, *italic*, __underline__
+  let html = escaped
+  html = html.replace(/__(?=\S)(.+?\S)__/g, "<u>$1</u>")
+  html = html.replace(/\*\*(?=\S)(.+?\S)\*\*/g, "<strong>$1</strong>")
+  html = html.replace(/(^|[^*])\*(?=\S)(.+?\S)\*(?!\*)/g, "$1<em>$2</em>")
+  if (hasManualFormatting) {
+    return html
+  }
+
+  if (context === "bullet") {
+    html = autoItalicizeLeadingAction(html)
+  }
+
+  html = autoBoldKeyTerms(html, keyTerms)
+  if (!/<strong>/.test(html)) {
+    html = autoBoldFirstSignificantWord(html)
+  }
+  html = autoUnderlineFirstStrongToken(html)
+  return html
+}
+
+function replaceInTextSegments(html, transform) {
+  if (typeof html !== "string" || typeof transform !== "function") {
+    return ""
+  }
+  return html
+    .split(/(<[^>]+>)/g)
+    .map((segment) => (segment.startsWith("<") ? segment : transform(segment)))
+    .join("")
+}
+
+function autoItalicizeLeadingAction(html) {
+  const actionPattern =
+    /^\s*(Understand|Learn|Examine|Review|Identify|Compare|Evaluate|Trace|Track|Check|Note|Focus|Map|Scan)\b/i
+  return html.replace(actionPattern, "<em>$1</em>")
+}
+
+function autoBoldKeyTerms(html, keyTerms) {
+  const normalizedTerms = [...new Set(
+    keyTerms
+      .map((term) => sanitizeText(term))
+      .filter((term) => term.length >= 3)
+  )]
+    .sort((left, right) => right.length - left.length)
+    .slice(0, 6)
+  if (normalizedTerms.length === 0) {
+    return html
+  }
+
+  let output = html
+  for (const term of normalizedTerms) {
+    const escapedTerm = escapeKeywordRegExp(term)
+    const pattern = new RegExp(`(^|[^A-Za-z0-9])(${escapedTerm})(?=$|[^A-Za-z0-9])`, "gi")
+    output = replaceInTextSegments(output, (segment) =>
+      segment.replace(pattern, (_match, prefix, value) => `${prefix}<strong>${value}</strong>`)
+    )
+  }
+  return output
+}
+
+function autoUnderlineFirstStrongToken(html) {
+  if (/<u>/.test(html)) {
+    return html
+  }
+  return html.replace(/<strong>([^<]+)<\/strong>/, "<strong><u>$1</u></strong>")
+}
+
+function autoBoldFirstSignificantWord(html) {
+  let replaced = false
+  return replaceInTextSegments(html, (segment) => {
+    if (replaced) {
+      return segment
+    }
+    return segment.replace(/\b([A-Za-z][A-Za-z-]{3,})\b/, (_match, token) => {
+      replaced = true
+      return `<strong>${token}</strong>`
+    })
+  })
 }
 
 function splitSectionLabel(sectionTitle) {
@@ -5119,15 +5261,76 @@ function ensureScaleFactor() {
   pdfRoot.style.setProperty("--scale-factor", String(scale));
 }
 
+function getRenderedPageCount() {
+  let count = 0;
+  for (const node of renderState.pageNodes) {
+    if (node instanceof HTMLElement) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function getFirstRenderedPageNode() {
+  for (const node of renderState.pageNodes) {
+    if (node instanceof HTMLElement) {
+      return node;
+    }
+  }
+  return null;
+}
+
+function buildReseekRenderOrder(targetPageNumber, totalPages) {
+  if (!Number.isFinite(totalPages) || totalPages <= 0) {
+    return [];
+  }
+  const clampedTarget = Math.min(Math.max(Math.floor(Number(targetPageNumber) || 1), 1), totalPages);
+  const order = [clampedTarget];
+  let offset = 1;
+  while (order.length < totalPages) {
+    const above = clampedTarget - offset;
+    const below = clampedTarget + offset;
+    if (above >= 1) {
+      order.push(above);
+    }
+    if (below <= totalPages) {
+      order.push(below);
+    }
+    offset += 1;
+  }
+  return order;
+}
+
+function insertPageShellByPageNumber(pageShell, pageNumber) {
+  let inserted = false;
+  for (const child of Array.from(pdfRoot.children)) {
+    const childPageNumber = Number(child?.dataset?.pageNumber);
+    if (Number.isFinite(childPageNumber) && childPageNumber > pageNumber) {
+      pdfRoot.insertBefore(pageShell, child);
+      inserted = true;
+      break;
+    }
+  }
+  if (!inserted) {
+    pdfRoot.append(pageShell);
+  }
+}
+
 function captureViewportAnchor() {
   if (!currentPdf || renderState.pageNodes.length === 0) {
     return null;
   }
 
   const viewportCenterY = pdfRoot.scrollTop + pdfRoot.clientHeight / 2;
-  let activeNode = renderState.pageNodes[0];
+  let activeNode = getFirstRenderedPageNode();
+  if (!(activeNode instanceof HTMLElement)) {
+    return null;
+  }
 
   for (const node of renderState.pageNodes) {
+    if (!(node instanceof HTMLElement)) {
+      continue;
+    }
     const top = node.offsetTop;
     const bottom = top + node.offsetHeight;
     if (viewportCenterY >= top && viewportCenterY <= bottom) {
@@ -5181,6 +5384,9 @@ function applyVisualScale() {
   }
 
   for (const node of renderState.pageNodes) {
+    if (!(node instanceof HTMLElement)) {
+      continue;
+    }
     const pageSurface = node.firstElementChild;
     if (!pageSurface) {
       continue;
@@ -5234,7 +5440,7 @@ function getPdfAvailableWidth() {
 }
 
 function getRenderedPageDisplayWidth() {
-  const firstNode = renderState.pageNodes[0];
+  const firstNode = getFirstRenderedPageNode();
   if (!firstNode) {
     return null;
   }
@@ -5249,7 +5455,7 @@ function updatePdfControls() {
   const numPages = currentPdf?.numPages ?? 0;
   const pageNumber = currentPdf?.pageNumber ?? 0;
   const hasDocument = Boolean(renderState.pdfDoc && numPages);
-  const hasAllPagesRendered = hasDocument && renderState.pageNodes.length === numPages;
+  const hasAllPagesRendered = hasDocument && getRenderedPageCount() === numPages;
 
   pageIndicatorEl.textContent = numPages ? `Page ${pageNumber} / ${numPages}` : "Page - / -";
   prevPageBtn.disabled = !hasAllPagesRendered || pageNumber <= 1;
@@ -5346,6 +5552,9 @@ function getNearestPageFromViewportCenter() {
   let nearestDistance = Number.POSITIVE_INFINITY
 
   for (const node of renderState.pageNodes) {
+    if (!(node instanceof HTMLElement)) {
+      continue
+    }
     const pageNumber = Number(node.dataset.pageNumber)
     const pageCenter = node.offsetTop + node.offsetHeight / 2
     const distance = Math.abs(pageCenter - viewportCenter)
@@ -5412,7 +5621,7 @@ function handlePdfScroll() {
 function connectPageObserver() {
   disconnectPageObserver();
 
-  if (renderState.pageNodes.length === 0) {
+  if (getRenderedPageCount() === 0) {
     return;
   }
 
@@ -5434,6 +5643,9 @@ function connectPageObserver() {
   );
 
   for (const node of renderState.pageNodes) {
+    if (!(node instanceof HTMLElement)) {
+      continue;
+    }
     renderState.pageVisibility.set(Number(node.dataset.pageNumber), 0);
     renderState.visibilityObserver.observe(node);
   }
@@ -5519,18 +5731,20 @@ async function renderAllPages(targetPageNumber, loadToken) {
   }
 
   const pdfDoc = renderState.pdfDoc;
+  const pageRenderOrder = buildReseekRenderOrder(targetPageNumber, pdfDoc.numPages);
   const renderScale = currentPdf.renderedScale || currentPdf.scale;
   const renderToken = ++renderState.renderToken;
   clearRenderedPages();
+  renderState.pageNodes = new Array(pdfDoc.numPages);
   ensureScaleFactor();
   updatePdfControls();
 
-  for (let pageNumber = 1; pageNumber <= pdfDoc.numPages; pageNumber += 1) {
+  for (const pageNumber of pageRenderOrder) {
     if (loadToken !== renderState.loadToken || renderToken !== renderState.renderToken) {
       return;
     }
 
-    setStatus(`Loading page ${pageNumber}/${pdfDoc.numPages}`);
+    setStatus(`Loading page ${getRenderedPageCount() + 1}/${pdfDoc.numPages}`);
     logger.info("Render page i", { pageNumber });
 
     const page = await pdfDoc.getPage(pageNumber);
@@ -5572,8 +5786,8 @@ async function renderAllPages(targetPageNumber, loadToken) {
     pageSurface.append(textLayerDiv);
 
     pageShell.append(pageSurface);
-    pdfRoot.append(pageShell);
-    renderState.pageNodes.push(pageShell);
+    insertPageShellByPageNumber(pageShell, pageNumber);
+    renderState.pageNodes[pageNumber - 1] = pageShell;
 
     const outputScale = window.devicePixelRatio || 1;
     canvas.width = Math.max(Math.floor(pageWidth * outputScale), 1);
