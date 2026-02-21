@@ -99,6 +99,7 @@ const pageIndicatorEl = document.getElementById("pageIndicator");
 const zoomOutBtn = document.getElementById("zoomOut");
 const zoomInBtn = document.getElementById("zoomIn");
 const fitWidthBtn = document.getElementById("fitWidth");
+const highlighterToggleBtn = document.getElementById("highlighterToggle");
 const toggleSidebarBtn = document.getElementById("toggleSidebar");
 const reopenSidebarBtn = document.getElementById("reopenSidebar");
 const diagnosticsToggleBtn = document.getElementById("diagnosticsToggle");
@@ -148,6 +149,10 @@ let renderChain = Promise.resolve();
 let scrollTicking = false;
 let fitResizeFrame = null;
 let selectionSystem = null;
+const highlighterState = {
+  items: [],
+  nextId: 1
+}
 const sessionFileIdByDocId = new Map();
 const uploadPromiseByDocId = new Map();
 let contextScopeTransientStatus = "";
@@ -1479,6 +1484,264 @@ function setDiagnosticsMenuOpen(isOpen) {
 
 function setStatus(text) {
   statusEl.textContent = text;
+}
+
+function clearTextSelection() {
+  const selection = window.getSelection?.()
+  if (!selection) {
+    return
+  }
+  try {
+    selection.removeAllRanges()
+  } catch (_error) {
+    // Best effort.
+  }
+}
+
+function resetHighlighterState() {
+  highlighterState.items = []
+  highlighterState.nextId = 1
+}
+
+function clampRatio(value) {
+  if (!Number.isFinite(value)) {
+    return 0
+  }
+  return Math.min(1, Math.max(0, value))
+}
+
+function roundRectValue(value) {
+  return Math.round(clampRatio(value) * 10000) / 10000
+}
+
+function makeRectKey(rect) {
+  return `${roundRectValue(rect.x)}:${roundRectValue(rect.y)}:${roundRectValue(rect.width)}:${roundRectValue(rect.height)}`
+}
+
+function normalizeHighlightTextKey(value) {
+  return sanitizeText(value).toLowerCase()
+}
+
+function dedupeHighlightRects(rects) {
+  const result = []
+  const dedupe = new Set()
+  for (const rect of Array.isArray(rects) ? rects : []) {
+    const width = clampRatio(rect?.width)
+    const height = clampRatio(rect?.height)
+    if (width <= 0 || height <= 0) {
+      continue
+    }
+    const normalized = {
+      x: clampRatio(rect?.x),
+      y: clampRatio(rect?.y),
+      width,
+      height
+    }
+    const key = makeRectKey(normalized)
+    if (dedupe.has(key)) {
+      continue
+    }
+    dedupe.add(key)
+    result.push(normalized)
+  }
+  return result
+}
+
+function ensureHighlightLayer(pageShell) {
+  if (!(pageShell instanceof HTMLElement)) {
+    return null
+  }
+  let layer = pageShell.querySelector(".userHighlightLayer")
+  if (layer instanceof HTMLElement) {
+    return layer
+  }
+  const pageSurface = pageShell.querySelector(".pdfPageSurface")
+  if (!(pageSurface instanceof HTMLElement)) {
+    return null
+  }
+  layer = document.createElement("div")
+  layer.className = "userHighlightLayer"
+  pageSurface.append(layer)
+  return layer
+}
+
+function renderUserHighlightsForPage(pageIndex) {
+  const pageShell = getPageNodeByIndex(pageIndex)
+  if (!(pageShell instanceof HTMLElement)) {
+    return
+  }
+  const layer = ensureHighlightLayer(pageShell)
+  if (!(layer instanceof HTMLElement)) {
+    return
+  }
+  layer.innerHTML = ""
+
+  const highlights = highlighterState.items.filter((item) => item.pageIndex === pageIndex)
+  for (const item of highlights) {
+    for (const rect of item.rects) {
+      const node = document.createElement("button")
+      node.type = "button"
+      node.className = "userHighlightRect"
+      node.dataset.highlightId = item.id
+      node.style.left = `${Math.round(clampRatio(rect.x) * 10000) / 100}%`
+      node.style.top = `${Math.round(clampRatio(rect.y) * 10000) / 100}%`
+      node.style.width = `${Math.round(clampRatio(rect.width) * 10000) / 100}%`
+      node.style.height = `${Math.round(clampRatio(rect.height) * 10000) / 100}%`
+      node.title = "Click to remove highlight"
+      node.setAttribute("aria-label", node.title)
+      layer.append(node)
+    }
+  }
+}
+
+function renderAllUserHighlights() {
+  for (const pageNode of renderState.pageNodes) {
+    const pageIndex = Number(pageNode?.dataset?.pageIndex)
+    if (!Number.isFinite(pageIndex) || pageIndex < 0) {
+      continue
+    }
+    renderUserHighlightsForPage(pageIndex)
+  }
+}
+
+function addOrMergeHighlight(highlight) {
+  if (!highlight || !Number.isFinite(highlight.pageIndex) || highlight.pageIndex < 0) {
+    return false
+  }
+  const nextRects = dedupeHighlightRects(highlight.rects)
+  if (nextRects.length === 0) {
+    return false
+  }
+
+  const textKey = normalizeHighlightTextKey(highlight.selectedText)
+  if (!textKey) {
+    return false
+  }
+
+  const existingIndex = highlighterState.items.findIndex(
+    (item) => item.pageIndex === highlight.pageIndex && item.textKey === textKey
+  )
+  if (existingIndex >= 0) {
+    const existing = highlighterState.items[existingIndex]
+    const mergedRects = dedupeHighlightRects([...(existing?.rects || []), ...nextRects])
+    highlighterState.items[existingIndex] = {
+      ...existing,
+      rects: mergedRects
+    }
+    renderUserHighlightsForPage(highlight.pageIndex)
+    return true
+  }
+
+  highlighterState.items.push({
+    id: `hl_${highlighterState.nextId++}`,
+    pageIndex: Math.max(0, Math.floor(Number(highlight.pageIndex))),
+    textKey,
+    rects: nextRects
+  })
+  renderUserHighlightsForPage(highlight.pageIndex)
+  return true
+}
+
+function addOrMergeHighlightFromPayload(payload) {
+  return addOrMergeHighlight({
+    pageIndex: payload?.pageIndex,
+    selectedText: payload?.selectedText,
+    rects: payload?.highlightRects
+  })
+}
+
+function removeHighlightById(highlightId) {
+  if (!highlightId) {
+    return
+  }
+  const existing = highlighterState.items.find((item) => item.id === highlightId)
+  if (!existing) {
+    return
+  }
+  highlighterState.items = highlighterState.items.filter((item) => item.id !== highlightId)
+  renderUserHighlightsForPage(existing.pageIndex)
+}
+
+function buildManualHighlightFromSelection() {
+  const selection = window.getSelection?.()
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+    return null
+  }
+  const selectedText = sanitizeText(selection.toString())
+  if (!selectedText) {
+    return null
+  }
+  const range = selection.getRangeAt(0)
+  const startParent =
+    range.startContainer?.nodeType === Node.TEXT_NODE ? range.startContainer.parentElement : range.startContainer
+  const endParent =
+    range.endContainer?.nodeType === Node.TEXT_NODE ? range.endContainer.parentElement : range.endContainer
+
+  const startPage = startParent?.closest?.(".pdfPageShell")
+  const endPage = endParent?.closest?.(".pdfPageShell")
+  if (!(startPage instanceof HTMLElement) || !(endPage instanceof HTMLElement) || startPage !== endPage) {
+    return null
+  }
+  if (!pdfRoot.contains(startPage)) {
+    return null
+  }
+
+  const pageIndex = Number(startPage.dataset.pageIndex)
+  if (!Number.isFinite(pageIndex) || pageIndex < 0) {
+    return null
+  }
+  const textLayer = startPage.querySelector(".textLayer")
+  if (!(textLayer instanceof HTMLElement)) {
+    return null
+  }
+
+  const layerRect = textLayer.getBoundingClientRect()
+  if (!Number.isFinite(layerRect.width) || !Number.isFinite(layerRect.height) || layerRect.width <= 0 || layerRect.height <= 0) {
+    return null
+  }
+
+  const rects = []
+  for (const rawRect of Array.from(range.getClientRects())) {
+    const clippedLeft = Math.max(rawRect.left, layerRect.left)
+    const clippedTop = Math.max(rawRect.top, layerRect.top)
+    const clippedRight = Math.min(rawRect.right, layerRect.right)
+    const clippedBottom = Math.min(rawRect.bottom, layerRect.bottom)
+    const width = clippedRight - clippedLeft
+    const height = clippedBottom - clippedTop
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) {
+      continue
+    }
+    rects.push({
+      x: clampRatio((clippedLeft - layerRect.left) / layerRect.width),
+      y: clampRatio((clippedTop - layerRect.top) / layerRect.height),
+      width: clampRatio(width / layerRect.width),
+      height: clampRatio(height / layerRect.height)
+    })
+  }
+
+  if (rects.length === 0) {
+    return null
+  }
+
+  return {
+    pageIndex,
+    selectedText,
+    rects
+  }
+}
+
+function handleManualHighlightSelection() {
+  const highlight = buildManualHighlightFromSelection()
+  if (!highlight) {
+    return false
+  }
+  const didHighlight = addOrMergeHighlight(highlight)
+  if (!didHighlight) {
+    return false
+  }
+  clearTextSelection()
+  setStatus("Highlight added.")
+  return true
 }
 
 function syncFitWidthUi() {
@@ -4532,6 +4795,12 @@ async function loadCardsForCurrentDocument() {
 }
 
 async function handleSelectionAction(payload) {
+  if (payload?.type === "highlight") {
+    const didHighlight = addOrMergeHighlightFromPayload(payload) || handleManualHighlightSelection()
+    setStatus(didHighlight ? "Highlight added." : "Unable to highlight selection.")
+    return
+  }
+
   const card = await buildCardFromSelection(payload)
   if (!card) {
     return
@@ -4988,6 +5257,7 @@ function updatePdfControls() {
   zoomOutBtn.disabled = !hasDocument || currentPdf.scale <= MIN_SCALE + 0.001;
   zoomInBtn.disabled = !hasDocument || currentPdf.scale >= MAX_SCALE - 0.001;
   fitWidthBtn.disabled = !hasDocument;
+  highlighterToggleBtn.disabled = !hasDocument;
   syncFitWidthUi();
   scheduleSectionRailRender()
 }
@@ -5368,6 +5638,7 @@ async function renderAllPages(targetPageNumber, loadToken) {
   connectPageObserver();
   applyVisualScale();
   ensureSelectionSystemInitialized();
+  renderAllUserHighlights()
 
   if (renderState.fitWidthEnabled) {
     const correctedFitScale = await computeFitWidthScale(loadToken);
@@ -5422,6 +5693,7 @@ function handleLoadFailure(sourceType, error) {
     typeof failedUrl === "string" &&
     failedUrl.toLowerCase().startsWith("file://");
 
+  resetHighlighterState()
   currentPdf = null;
   updateDocumentTitle();
   clearContextScopeTransientStatus();
@@ -5462,6 +5734,7 @@ function handleLoadFailure(sourceType, error) {
 async function loadPdfSource(source, documentParams) {
   const loadToken = ++renderState.loadToken;
   setFitWidthEnabled(false);
+  resetHighlighterState()
 
   if (selectionSystem) {
     selectionSystem.destroy();
@@ -5766,6 +6039,14 @@ panel.addEventListener("click", (event) => {
   void handlePanelCardAction(event);
 });
 pdfRoot.addEventListener("click", (event) => {
+  const highlightTarget =
+    event.target instanceof Element ? event.target.closest(".userHighlightRect") : null
+  if (highlightTarget instanceof HTMLButtonElement) {
+    removeHighlightById(highlightTarget.dataset.highlightId)
+    setStatus("Highlight removed.")
+    return
+  }
+
   const target = event.target instanceof Element ? event.target.closest("button[data-pdf-intent-action]") : null
   if (!(target instanceof HTMLButtonElement)) {
     return
@@ -5856,6 +6137,16 @@ zoomInBtn.addEventListener("click", () => {
 
 fitWidthBtn.addEventListener("click", () => {
   void handleFitWidth();
+});
+
+highlighterToggleBtn?.addEventListener("click", () => {
+  if (!currentPdf || !renderState.pdfDoc) {
+    return
+  }
+  const didHighlight = handleManualHighlightSelection()
+  if (!didHighlight) {
+    setStatus("Select text, then click Highlighter.")
+  }
 });
 
 pdfRoot.addEventListener("scroll", handlePdfScroll, { passive: true });

@@ -8,10 +8,13 @@ const CAPTURE_DEBOUNCE_MS = 50;
 const POPOVER_OFFSET = 8;
 const POPOVER_MARGIN = 8;
 
+const HIGHLIGHT_ICON_URL = new URL("../../assets/icons/highlighter.png", import.meta.url).toString();
+
 const ACTIONS = [
-  { type: "define", label: "Define", icon: "📖" },
-  { type: "explain", label: "Explain", icon: "💡" },
-  { type: "translate", label: "Translate (Figures)", icon: "📊" }
+  { type: "highlight", label: "Highlight", iconUrl: HIGHLIGHT_ICON_URL },
+  { type: "define", label: "Define", icon: "\uD83D\uDCD6" },
+  { type: "explain", label: "Explain", icon: "\uD83D\uDCA1" },
+  { type: "translate", label: "Translate (Figures)", icon: "\uD83D\uDCCA" }
 ];
 
 function normalizeSelectionText(value) {
@@ -129,6 +132,49 @@ function findTextLayerForRange(range, pageShell) {
   return pageShell?.querySelector?.(".textLayer") ?? null;
 }
 
+function getNormalizedSelectionRects(range, textLayer) {
+  if (!range || !(textLayer instanceof HTMLElement)) {
+    return [];
+  }
+  const layerRect = textLayer.getBoundingClientRect();
+  if (!Number.isFinite(layerRect.width) || !Number.isFinite(layerRect.height) || layerRect.width <= 0 || layerRect.height <= 0) {
+    return [];
+  }
+
+  const rects = [];
+  const dedupe = new Set();
+  for (const clientRect of Array.from(range.getClientRects())) {
+    const left = Math.max(clientRect.left, layerRect.left);
+    const top = Math.max(clientRect.top, layerRect.top);
+    const right = Math.min(clientRect.right, layerRect.right);
+    const bottom = Math.min(clientRect.bottom, layerRect.bottom);
+    const width = right - left;
+    const height = bottom - top;
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) {
+      continue;
+    }
+
+    const normalized = {
+      x: Math.min(1, Math.max(0, (left - layerRect.left) / layerRect.width)),
+      y: Math.min(1, Math.max(0, (top - layerRect.top) / layerRect.height)),
+      width: Math.min(1, Math.max(0, width / layerRect.width)),
+      height: Math.min(1, Math.max(0, height / layerRect.height))
+    };
+    const key = [
+      Math.round(normalized.x * 10000),
+      Math.round(normalized.y * 10000),
+      Math.round(normalized.width * 10000),
+      Math.round(normalized.height * 10000)
+    ].join(":");
+    if (dedupe.has(key)) {
+      continue;
+    }
+    dedupe.add(key);
+    rects.push(normalized);
+  }
+  return rects;
+}
+
 function collapseTextWithMap(text) {
   let collapsed = "";
   const map = [];
@@ -212,6 +258,9 @@ function resolveShortcutAction(event) {
   if (key === "d") {
     return "define";
   }
+  if (key === "h") {
+    return "highlight";
+  }
   if (key === "e") {
     return "explain";
   }
@@ -221,11 +270,12 @@ function resolveShortcutAction(event) {
   return null;
 }
 
-export function initSelectionSystem({ pdfRoot, onAction }) {
+export function initSelectionSystem({ pdfRoot, onAction, isEnabled }) {
   if (!(pdfRoot instanceof HTMLElement)) {
     throw new Error("initSelectionSystem requires a valid pdfRoot element.");
   }
   const onActionHandler = typeof onAction === "function" ? onAction : () => {};
+  const isEnabledHandler = typeof isEnabled === "function" ? isEnabled : () => true;
 
   let popoverEl = null;
   let activeSelection = null;
@@ -291,7 +341,8 @@ export function initSelectionSystem({ pdfRoot, onAction }) {
       type,
       selectedText: activeSelection.selectedText,
       pageIndex: activeSelection.pageIndex,
-      contextWindow: activeSelection.contextWindow
+      contextWindow: activeSelection.contextWindow,
+      highlightRects: activeSelection.highlightRects
     });
     clearSelectionState();
   }
@@ -310,7 +361,15 @@ export function initSelectionSystem({ pdfRoot, onAction }) {
       button.type = "button";
       button.className = "selectionPopoverButton";
       button.dataset.action = action.type;
-      button.textContent = action.icon;
+      if (action.iconUrl) {
+        const icon = document.createElement("img");
+        icon.className = "selectionPopoverIconImage";
+        icon.src = action.iconUrl;
+        icon.alt = "";
+        button.append(icon);
+      } else {
+        button.textContent = action.icon;
+      }
       button.title = action.label;
       button.setAttribute("aria-label", action.label);
       button.addEventListener("click", (event) => {
@@ -359,11 +418,17 @@ export function initSelectionSystem({ pdfRoot, onAction }) {
       selectedText,
       pageIndex,
       boundingRect: rect,
-      contextWindow
+      contextWindow,
+      highlightRects: getNormalizedSelectionRects(range, textLayer)
     };
   }
 
   function captureSelection() {
+    if (!isEnabledHandler()) {
+      clearSelectionState();
+      return;
+    }
+
     const selectionData = captureSelectionData();
     if (!selectionData) {
       clearSelectionState();
@@ -393,6 +458,10 @@ export function initSelectionSystem({ pdfRoot, onAction }) {
   }
 
   function handleKeyDown(event) {
+    if (!isEnabledHandler()) {
+      return;
+    }
+
     if (event.key === "Escape") {
       clearSelectionState();
       return;
@@ -454,3 +523,4 @@ export function initSelectionSystem({ pdfRoot, onAction }) {
     }
   };
 }
+

@@ -469,6 +469,35 @@ html {
   user-select: text;
 }
 
+.userHighlightLayer {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.userHighlightRect {
+  position: absolute;
+  border: 0;
+  border-radius: 2px;
+  background: rgba(98, 193, 95, 0.34);
+  box-shadow: inset 0 0 0 1px rgba(58, 136, 57, 0.2);
+  pointer-events: auto;
+  cursor: pointer;
+  padding: 0;
+}
+
+.userHighlightRect:hover {
+  background: rgba(98, 193, 95, 0.44);
+}
+
+.selectionPopoverIconImage {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  display: block;
+}
+
 .pdfIntentOverlay {
   position: absolute;
   z-index: 6;
