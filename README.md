@@ -95,28 +95,11 @@ Open the 3-dot menu in the viewer toolbar.
 - ✅ Whole-PDF behavior is explicit and opt-in.
 - 🧾 OpenAI key is stored in extension local storage (`chrome.storage.local`).
 
-## 🖼️ Screenshots (optional, recommended)
-
-If you want a visual README, add screenshots in `assets/screenshots/` using these filenames:
-
-- `viewer-overview.png`
-- `selection-popover.png`
-- `orientation-tab.png`
-- `glossary-walkthrough.png`
-
-Then paste this section into the README:
-
-```md
 ## 🖼️ Screenshots
 
-| Viewer | Selection Actions |
-| --- | --- |
-| ![Viewer overview](assets/screenshots/viewer-overview.png) | ![Selection popover](assets/screenshots/selection-popover.png) |
+![Paper orientation overview](assets/images/paper-orientation-overview.png)
 
-| Orientation | Glossary + Walkthrough |
-| --- | --- |
-| ![Orientation tab](assets/screenshots/orientation-tab.png) | ![Glossary and walkthrough](assets/screenshots/glossary-walkthrough.png) |
-```
+![Paper text classification example](assets/images/paper-text-classification-example.png)
 
 ## 🛠️ Development
 
