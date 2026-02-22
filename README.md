@@ -1,61 +1,61 @@
-﻿# CLARIFY
+﻿# CLARIFY 📚✨
 
-In-context PDF reading assistant for Chrome (Manifest V3).
+> In-context PDF reading assistant for Chrome (Manifest V3)
 
-CLARIFY opens PDFs in a custom viewer and lets you define terms, explain passages, translate figure captions, and build reading structure without leaving the document.
+![Chrome Manifest V3](https://img.shields.io/badge/Chrome-Manifest%20V3-4285F4?logo=googlechrome&logoColor=white)
+![Status](https://img.shields.io/badge/status-prototype-F2994A)
+![Build](https://img.shields.io/badge/build-no%20build%20step-2D9CDB)
 
-## Why CLARIFY
+CLARIFY opens PDFs in a custom viewer and helps you define terms, explain passages, translate figures, and build reading structure without leaving the document.
 
-Reading research papers often breaks flow because you need to jump across tabs for definitions and explanations. CLARIFY keeps those actions in the same PDF view and stores helpful context (cards, glossary, walkthrough) per document.
+## ✨ Why CLARIFY
 
-## What It Does Today
+Reading research papers usually means constant context switching across tabs and tools. CLARIFY keeps assistance in the same PDF view and stores useful context per document.
 
-- Opens local and remote PDFs in a custom PDF.js viewer.
-- Shows selection popover actions: Highlight, Define, Explain, Translate (Figures).
-- Generates orientation summaries and section-level reading guidance.
-- Maintains per-document:
-  - Explanation/definition cards
-  - Glossary entries
-  - Walkthrough notes
-  - Orientation cache and section intents
-- Supports light/dark theme, flow/structure reading modes, and diagnostics.
-- Supports `mock` and `OpenAI` LLM providers (with fallback handling).
+## ✅ What It Does
 
-## Quick Start
+- 📂 Opens local and remote PDFs in a custom PDF.js viewer.
+- 🖱️ Shows selection actions: `Highlight`, `Define`, `Explain`, `Translate (Figures)`.
+- 🧭 Generates orientation summaries and section-level reading guidance.
+- 💾 Stores per-document cards, glossary entries, walkthrough notes, and orientation cache.
+- 🎨 Supports light/dark themes, flow/structure reading modes, and diagnostics.
+- 🤖 Supports `mock` and `OpenAI` LLM providers with fallback handling.
+
+## 🚀 Quick Start
 
 ### 1. Load the extension
 
 1. Open `chrome://extensions`.
 2. Enable **Developer mode**.
 3. Click **Load unpacked**.
-4. Select this repository root (the folder containing `manifest.json`).
+4. Select this repository root (the folder with `manifest.json`).
 
 ### 2. Open CLARIFY viewer
 
-Use any of these paths:
+Use one of these:
 
 - Extension popup -> **Open CLARIFY Viewer**
 - Extension popup -> **Open current tab (if PDF)**
 - Right-click a PDF link -> **Open PDF in CLARIFY**
-- Enable **Auto-open PDF links in CLARIFY** in viewer settings
+- Viewer settings -> enable **Auto-open PDF links in CLARIFY**
 
 ### 3. Load a PDF
 
-- Click the folder/open icon in the viewer toolbar to open a local PDF, or
-- Open from a PDF URL via popup/context menu.
+- Click the open-file icon in the viewer toolbar for a local PDF.
+- Or open from a PDF URL via popup/context menu.
 
-## How To Use
+## 🧠 How To Use
 
 ### Selection actions
 
 1. Select text inside the PDF.
-2. Use the popover action:
-   - `Highlight`
-   - `Define`
-   - `Explain`
-   - `Translate (Figures)`
+2. Choose one action from the popover:
+- `Highlight`
+- `Define`
+- `Explain`
+- `Translate (Figures)`
 
-### Keyboard shortcuts
+### ⌨️ Keyboard shortcuts
 
 | Action | Windows/Linux | macOS |
 | --- | --- | --- |
@@ -67,15 +67,15 @@ Use any of these paths:
 
 ### Sidebar tabs
 
-- `Orientation`: Purpose, contribution, focus bullets, key terms, reading map.
-- `Explain`: Definition/explanation cards grounded to page/section snippets.
-- `Glossary`: Saved terms with one-line definitions and source context.
-- `Figures`: Figure/table translation cards.
-- `Walkthrough`: Section-by-section one-liners for guided reading.
+- 📘 `Orientation`: Purpose, contribution, focus bullets, key terms, reading map.
+- 💡 `Explain`: Definition/explanation cards grounded to page/section snippets.
+- 🔖 `Glossary`: Saved terms with one-line definitions and source context.
+- 📊 `Figures`: Figure/table translation cards.
+- 🧩 `Walkthrough`: Section-by-section one-liners for guided reading.
 
-## Settings, LLM Modes, and Privacy
+## ⚙️ Settings, LLM Modes, and Privacy
 
-Open the 3-dot menu in the viewer toolbar to access settings.
+Open the 3-dot menu in the viewer toolbar.
 
 ### LLM modes
 
@@ -85,17 +85,40 @@ Open the 3-dot menu in the viewer toolbar to access settings.
 
 ### Context scope
 
-- `selection`: Use selected text + nearby context.
-- `page`: Use page context.
+- `selection`: Selected text + nearby context.
+- `page`: Page-level context.
 - `whole_pdf`: Uses uploaded PDF context (requires OpenAI key + upload enabled).
 
 ### Privacy notes
 
-- By default, CLARIFY does not upload full documents.
-- Whole-PDF behavior is explicit and opt-in.
-- OpenAI key is saved in extension local storage (`chrome.storage.local`).
+- 🔒 CLARIFY does not upload full documents by default.
+- ✅ Whole-PDF behavior is explicit and opt-in.
+- 🧾 OpenAI key is stored in extension local storage (`chrome.storage.local`).
 
-## Development
+## 🖼️ Screenshots (optional, recommended)
+
+If you want a visual README, add screenshots in `assets/screenshots/` using these filenames:
+
+- `viewer-overview.png`
+- `selection-popover.png`
+- `orientation-tab.png`
+- `glossary-walkthrough.png`
+
+Then paste this section into the README:
+
+```md
+## 🖼️ Screenshots
+
+| Viewer | Selection Actions |
+| --- | --- |
+| ![Viewer overview](assets/screenshots/viewer-overview.png) | ![Selection popover](assets/screenshots/selection-popover.png) |
+
+| Orientation | Glossary + Walkthrough |
+| --- | --- |
+| ![Orientation tab](assets/screenshots/orientation-tab.png) | ![Glossary and walkthrough](assets/screenshots/glossary-walkthrough.png) |
+```
+
+## 🛠️ Development
 
 No build step is required.
 
@@ -103,13 +126,13 @@ No build step is required.
 2. Reload the extension in `chrome://extensions`.
 3. Refresh any open CLARIFY viewer tab.
 
-Helpful debug entry points:
+Debug entry points:
 
 - Service worker logs: `chrome://extensions` -> **Inspect service worker**
 - Viewer logs: DevTools in the viewer tab
 - Debug bundle: Viewer menu -> **Copy debug info**
 
-## Repository Layout
+## 🧱 Repository Layout
 
 ```text
 .
@@ -137,15 +160,14 @@ Helpful debug entry points:
         `-- mode_manager.js
 ```
 
-## Known Limitations
+## ⚠️ Known Limitations
 
-- Some remote PDFs cannot be fetched due to CORS/auth restrictions. Download locally and open the file when this happens.
+- Some remote PDFs cannot be fetched due to CORS/auth restrictions.
 - `file://` auto-redirect behavior can vary by browser settings.
 - This is a prototype and does not yet include automated tests.
 
-## Roadmap Direction
+## 🗺️ Roadmap Direction
 
 - Better citation grounding controls
 - Stronger document-level retrieval for long PDFs
 - UX polish for orientation and walkthrough workflows
-

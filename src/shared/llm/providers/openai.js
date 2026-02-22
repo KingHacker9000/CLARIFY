@@ -407,23 +407,14 @@ export async function generate(task, input, config = {}) {
       logger.info("OpenAI request", {
         endpoint: OPENAI_RESPONSES_API_URL,
         task: normalizedTask,
+        model: requestPayload.model,
         hasOpenAIFile: Boolean(normalizedInput.openaiFileId),
         retention: useRetention ? "24h" : "default",
-        body: {
-          ...requestPayload,
-          input: Array.isArray(requestPayload.input)
-            ? requestPayload.input.map((item) => ({
-                ...item,
-                content: Array.isArray(item?.content)
-                  ? item.content.map((contentItem) =>
-                      contentItem?.type === "input_file"
-                        ? { ...contentItem, file_id: "[attached]" }
-                        : contentItem
-                    )
-                  : item?.content
-              }))
-            : requestPayload.input
-        }
+        selectedTextLength: normalizedInput.selectedText.length,
+        contextWindowLength: normalizedInput.contextWindow.length,
+        snippetLength: normalizedInput.snippet.length,
+        headingCount: normalizedInput.headings.length,
+        sectionCount: normalizedInput.sections.length
       })
 
       try {
@@ -442,7 +433,7 @@ export async function generate(task, input, config = {}) {
           status: response.status,
           rawTextLength: rawText.length,
           extractedJsonLength: extractedJsonText.length,
-          parsed
+          responseFields: Object.keys(parsed || {}).slice(0, 12)
         })
         return {
           ...parsed,

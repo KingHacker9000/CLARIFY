@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "CLARIFY (Prototype)",
+  "name": "CLARIFY",
+  "short_name": "CLARIFY",
   "version": "0.1.0",
-  "description": "In-context reading assistant for PDFs (prototype).",
+  "description": "In-context reading assistant for PDFs.",
   "action": {
     "default_title": "CLARIFY",
     "default_popup": "src/popup/popup.html"
@@ -18,14 +19,17 @@
     "declarativeNetRequestWithHostAccess",
     "contextMenus"
   ],
-  "host_permissions": ["<all_urls>"],
+  "host_permissions": ["http://*/*", "https://*/*", "file://*/*"],
   "icons": {
     "48": "assets/icons/icon48.png"
   },
   "web_accessible_resources": [
     {
-      "resources": ["src/viewer/*", "src/vendor/pdfjs/*", "assets/*"],
-      "matches": ["<all_urls>"]
+      "resources": ["src/viewer/redirect.html", "src/viewer/redirect.js"],
+      "matches": ["http://*/*", "https://*/*", "file://*/*"]
     }
-  ]
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
 }

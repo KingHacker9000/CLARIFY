@@ -34,6 +34,43 @@ function buildViewerUrl(srcUrl) {
   return `${viewerUrl}?src=${encodeURIComponent(srcUrl)}`;
 }
 
+function normalizeViewerSourceUrl(url) {
+  if (typeof url !== "string") {
+    return "";
+  }
+  const trimmed = url.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    const protocol = parsed.protocol.toLowerCase();
+    if (
+      protocol !== "http:" &&
+      protocol !== "https:" &&
+      protocol !== "file:" &&
+      protocol !== "blob:"
+    ) {
+      return "";
+    }
+    return parsed.toString();
+  } catch (_error) {
+    return "";
+  }
+}
+
+function isLikelyPdfSourceUrl(url) {
+  const normalized = normalizeViewerSourceUrl(url);
+  if (!normalized) {
+    return false;
+  }
+  if (normalized.toLowerCase().startsWith("blob:")) {
+    return true;
+  }
+  return normalized.toLowerCase().includes(".pdf");
+}
+
 function isFilePdfUrl(url) {
   if (typeof url !== "string") {
     return false;
@@ -138,20 +175,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg?.type === "OPEN_VIEWER") {
       logger.info("OPEN_VIEWER received");
       await chrome.tabs.create({ url: viewerUrl });
+      return;
     }
 
     if (msg?.type === "OPEN_VIEWER_FROM_TAB") {
       logger.info("OPEN_VIEWER_FROM_TAB received");
-      const url = msg?.url || "";
-      // If it's a PDF URL, pass it to the viewer as a query param.
-      // Otherwise just open viewer empty.
-      const isPdf = url.toLowerCase().includes(".pdf") || url.startsWith("blob:");
-      const target = isPdf ? buildViewerUrl(url) : viewerUrl;
+      const normalizedSourceUrl = normalizeViewerSourceUrl(msg?.url || "");
+      const target = isLikelyPdfSourceUrl(normalizedSourceUrl)
+        ? buildViewerUrl(normalizedSourceUrl)
+        : viewerUrl;
       await chrome.tabs.create({ url: target });
     }
-  })();
-
-  sendResponse({ ok: true });
+  })()
+    .then(() => {
+      sendResponse({ ok: true });
+    })
+    .catch((error) => {
+      logger.warn("Message handling failed", {
+        type: msg?.type ?? "unknown",
+        message: error?.message ?? "Unknown error"
+      });
+      sendResponse({ ok: false, error: "Message handling failed." });
+    });
   return true;
 });
 
@@ -206,7 +251,13 @@ chrome.contextMenus.onClicked.addListener((info) => {
     return;
   }
 
-  chrome.tabs.create({ url: buildViewerUrl(info.linkUrl) }).catch((error) => {
+  const normalizedSourceUrl = normalizeViewerSourceUrl(info.linkUrl);
+  if (!normalizedSourceUrl) {
+    logger.warn("Rejected unsupported context-menu link URL");
+    return;
+  }
+
+  chrome.tabs.create({ url: buildViewerUrl(normalizedSourceUrl) }).catch((error) => {
     logger.warn("Failed to open PDF link from context menu", {
       message: error?.message ?? "Unknown error"
     });

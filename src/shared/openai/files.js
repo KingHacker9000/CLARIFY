@@ -8,10 +8,13 @@ function normalizeText(value) {
 
 function sanitizeFilename(value) {
   const normalized = normalizeText(value)
+    .replace(/[\\/:*?"<>|]/g, "_")
+    .replace(/[\u0000-\u001F\u007F]/g, "")
+    .slice(0, 120)
   if (!normalized) {
     return "document.pdf"
   }
-  return normalized
+  return normalized.toLowerCase().endsWith(".pdf") ? normalized : `${normalized}.pdf`
 }
 
 function readApiErrorMessage(payload) {

@@ -21,6 +21,7 @@ const MIN_QUOTE_CHARS = 80;
 const MAX_QUOTE_CHARS = 480;
 const MIN_CITATIONS = 1;
 const MAX_CITATIONS = 6;
+const MAX_API_KEY_LENGTH = 512;
 
 function normalizeApiKey(value) {
   if (typeof value !== "string") {
@@ -28,7 +29,13 @@ function normalizeApiKey(value) {
   }
 
   const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
+  if (!trimmed || trimmed.length > MAX_API_KEY_LENGTH) {
+    return null;
+  }
+  if (/[\u0000-\u001F\u007F]/.test(trimmed)) {
+    return null;
+  }
+  return trimmed;
 }
 
 function normalizeNumber(value, fallback, min, max) {

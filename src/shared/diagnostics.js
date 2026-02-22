@@ -40,7 +40,6 @@ function normalizeOpenedPdfSource(value) {
 
 export function createLogger(scope) {
   const prefix = `[CLARIFY][${scope}]`;
-  const alwaysInfo = scope === "OPENAI";
 
   function logIfVerbose(method, args) {
     void (async () => {
@@ -60,10 +59,6 @@ export function createLogger(scope) {
       logIfVerbose("debug", args);
     },
     info(...args) {
-      if (alwaysInfo) {
-        writeLog("info", prefix, args);
-        return;
-      }
       logIfVerbose("info", args);
     },
     warn(...args) {
@@ -108,6 +103,6 @@ export async function getDebugInfo(context = {}) {
     viewerUrl: contextViewerUrl ?? getViewerUrlFallback(),
     openedPdfSource: normalizeOpenedPdfSource(context.openedPdfSource),
     timestamp: new Date().toISOString(),
-    build: "dev"
+    build: "release"
   };
 }

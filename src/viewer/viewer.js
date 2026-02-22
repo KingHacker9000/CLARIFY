@@ -100,6 +100,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   "../vendor/pdfjs/pdf.worker.mjs",
   import.meta.url
 ).toString();
+const PDFJS_WASM_BASE_URL = new URL("../vendor/pdfjs/wasm/", import.meta.url).toString();
 
 const layoutEl = document.getElementById("layout");
 const sidebarEl = document.getElementById("sidebar");
@@ -2413,16 +2414,34 @@ function setCopyStatus(text) {
 }
 
 function inferOpenedPdfSourceFromSrc(src) {
-  if (!src) {
+  const normalizedSrc = normalizeRemotePdfSourceUrl(src)
+  if (!normalizedSrc) {
     return null;
   }
 
-  const lowered = src.toLowerCase();
-  if (lowered.startsWith("http:") || lowered.startsWith("https:")) {
-    return "remote";
+  if (normalizedSrc.toLowerCase().startsWith("file:")) {
+    return "local"
   }
 
   return "remote";
+}
+
+function normalizeRemotePdfSourceUrl(url) {
+  const normalizedUrl = sanitizeText(url)
+  if (!normalizedUrl) {
+    return ""
+  }
+
+  try {
+    const parsed = new URL(normalizedUrl)
+    const protocol = parsed.protocol.toLowerCase()
+    if (protocol !== "http:" && protocol !== "https:" && protocol !== "file:" && protocol !== "blob:") {
+      return ""
+    }
+    return parsed.toString()
+  } catch (_error) {
+    return ""
+  }
 }
 
 function sanitizeUrlForLog(url) {
@@ -7607,7 +7626,10 @@ async function loadPdfSource(source, documentParams) {
   renderPanel();
   showPdfMessage("Loading PDF...");
 
-  const loadingTask = pdfjsLib.getDocument(documentParams);
+  const loadingTask = pdfjsLib.getDocument({
+    ...documentParams,
+    wasmUrl: PDFJS_WASM_BASE_URL
+  });
   renderState.loadingTask = loadingTask;
 
   let pdfDoc;
@@ -7696,34 +7718,38 @@ async function loadPdfFromLocalFile(file) {
 }
 
 async function loadPdfFromRemoteUrl(srcUrl) {
-  if (!srcUrl) {
+  const normalizedSrcUrl = normalizeRemotePdfSourceUrl(srcUrl)
+  if (!normalizedSrcUrl) {
+    showPdfMessage("Unsupported PDF URL. Use http(s), file://, or blob: URL.")
+    setStatus("Unsupported PDF URL")
+    logger.warn("Rejected unsupported remote PDF URL")
     return;
   }
 
-  const isFileUrl = srcUrl.toLowerCase().startsWith("file://");
-  openedPdfSource = "remote";
+  const isFileUrl = normalizedSrcUrl.toLowerCase().startsWith("file://");
+  openedPdfSource = inferOpenedPdfSourceFromSrc(normalizedSrcUrl) || "remote";
   logger.info("Loading PDF remote: url (ok), but do not log tokens", {
-    url: sanitizeUrlForLog(srcUrl)
+    url: sanitizeUrlForLog(normalizedSrcUrl)
   });
 
   setActiveTab(modeUiState.mode === "structure" ? "orientation" : getFlowPreferredTab(), {
     fromModeApply: true
   });
-  const remoteLabel = normalizePdfFilename(getFilenameFromUrl(srcUrl)) || sanitizeUrlForLog(srcUrl)
+  const remoteLabel = normalizePdfFilename(getFilenameFromUrl(normalizedSrcUrl)) || sanitizeUrlForLog(normalizedSrcUrl)
   setStatus(`Loading: ${getShortStatusLabel(remoteLabel, 44)}`, {
     title: isFileUrl
-      ? `Loading file URL: ${sanitizeUrlForLog(srcUrl)}`
-      : `Loading: ${sanitizeUrlForLog(srcUrl)}`
+      ? `Loading file URL: ${sanitizeUrlForLog(normalizedSrcUrl)}`
+      : `Loading: ${sanitizeUrlForLog(normalizedSrcUrl)}`
   });
 
   await loadPdfSource(
     {
       sourceType: "remote",
-      filename: normalizePdfFilename(getFilenameFromUrl(srcUrl)),
-      url: srcUrl
+      filename: normalizePdfFilename(getFilenameFromUrl(normalizedSrcUrl)),
+      url: normalizedSrcUrl
     },
     {
-      url: srcUrl
+      url: normalizedSrcUrl
     }
   );
 }
@@ -7995,6 +8021,11 @@ async function handleSaveApiKey() {
   const settings = await setSettings({ openaiApiKey: apiKey });
   openaiApiKeyInput.value = "";
   applySettingsToUi(settings);
+  if (!settings.openaiApiKey) {
+    setApiStatus("Invalid key");
+    logger.warn("Rejected OpenAI key format");
+    return;
+  }
   setApiStatus("Saved");
   logger.info("OpenAI key set");
 }
@@ -8210,11 +8241,14 @@ autoOpenPdfToggle.addEventListener("change", async () => {
 
 // Load optional ?src= URL.
 const params = new URLSearchParams(location.search);
-const src = params.get("src");
+const srcParam = params.get("src");
+const src = normalizeRemotePdfSourceUrl(srcParam);
 if (src) {
   openedPdfSource = inferOpenedPdfSourceFromSrc(src);
   logger.info("?src parameter detected", { source: openedPdfSource });
   logger.debug("?src parameter present", { source: openedPdfSource });
+} else if (srcParam) {
+  logger.warn("Rejected unsupported ?src parameter");
 }
 
 logger.info("Viewer loaded");
@@ -8230,6 +8264,9 @@ updateDocumentTitle();
 updateSectionStatus("");
 if (src) {
   void startupStatePromise.then(() => loadPdfFromRemoteUrl(src));
+} else if (srcParam) {
+  showPdfMessage("Unsupported PDF URL. Use http(s), file://, or blob: URL.");
+  setStatus("Unsupported PDF URL");
 } else {
   setStatus("No PDF loaded");
 }
