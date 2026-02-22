@@ -7,6 +7,13 @@ const FALLBACK_OVERLAY_MS = 700;
 let activeOverlays = [];
 let clearTimer = null;
 
+function clampRatio(value) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(1, Number(value)));
+}
+
 function sanitizeNeedle(value) {
   if (typeof value !== "string") {
     return "";
@@ -484,7 +491,7 @@ function createOverlayRectsForRanges(textLayer, ranges, durationMs = AUTO_CLEAR_
     return 0;
   }
 
-  let count = 0;
+  const rects = [];
   for (const rangeInfo of ranges) {
     if (!rangeInfo?.node || rangeInfo.endOffset <= rangeInfo.startOffset) {
       continue;
@@ -493,19 +500,73 @@ function createOverlayRectsForRanges(textLayer, ranges, durationMs = AUTO_CLEAR_
       const range = document.createRange();
       range.setStart(rangeInfo.node, rangeInfo.startOffset);
       range.setEnd(rangeInfo.node, rangeInfo.endOffset);
-      const rects = rangeToOverlayRects(textLayer, range);
+      const rangeRects = rangeToOverlayRects(textLayer, range);
       range.detach?.();
-      for (const rect of rects) {
-        const overlay = createOverlay(textLayer, rect, durationMs, false, exact);
-        if (overlay) {
-          count += 1;
-        }
-      }
+      rects.push(...rangeRects);
     } catch (_error) {
       // Ignore invalid range and continue.
     }
   }
+  let count = 0;
+  for (const rect of rects) {
+    const overlay = createOverlay(textLayer, rect, durationMs, false, exact);
+    if (overlay) {
+      count += 1;
+    }
+  }
   return count;
+}
+
+function collectRectsForRanges(textLayer, ranges) {
+  if (!(textLayer instanceof HTMLElement) || !Array.isArray(ranges) || ranges.length === 0) {
+    return [];
+  }
+  const rects = [];
+  for (const rangeInfo of ranges) {
+    if (!rangeInfo?.node || rangeInfo.endOffset <= rangeInfo.startOffset) {
+      continue;
+    }
+    try {
+      const range = document.createRange();
+      range.setStart(rangeInfo.node, rangeInfo.startOffset);
+      range.setEnd(rangeInfo.node, rangeInfo.endOffset);
+      rects.push(...rangeToOverlayRects(textLayer, range));
+      range.detach?.();
+    } catch (_error) {
+      // Ignore invalid range and continue.
+    }
+  }
+  return rects;
+}
+
+function normalizeRectsForTextLayer(textLayer, rects) {
+  if (!(textLayer instanceof HTMLElement) || !Array.isArray(rects) || rects.length === 0) {
+    return [];
+  }
+  const layerWidth = Number(textLayer.clientWidth);
+  const layerHeight = Number(textLayer.clientHeight);
+  if (!Number.isFinite(layerWidth) || !Number.isFinite(layerHeight) || layerWidth <= 0 || layerHeight <= 0) {
+    return [];
+  }
+
+  const normalized = [];
+  const dedupe = new Set();
+  for (const rect of rects) {
+    const width = clampRatio((Number(rect?.width) || 0) / layerWidth);
+    const height = clampRatio((Number(rect?.height) || 0) / layerHeight);
+    if (width <= 0 || height <= 0) {
+      continue;
+    }
+    const x = clampRatio((Number(rect?.left) || 0) / layerWidth);
+    const y = clampRatio((Number(rect?.top) || 0) / layerHeight);
+    const key = `${Math.round(x * 10000)}:${Math.round(y * 10000)}:${Math.round(width * 10000)}:${Math.round(height * 10000)}`;
+    if (dedupe.has(key)) {
+      continue;
+    }
+    dedupe.add(key);
+    normalized.push({ x, y, width, height });
+  }
+  return normalized;
 }
 
 function buildApproxOverlayRect(textLayer, needleText) {
@@ -609,32 +670,29 @@ export function clearHighlights(_pdfRoot) {
   activeOverlays = [];
 }
 
-export function highlightOnPage({ pdfRoot, pageIndex, needleText, preferExact = true }) {
-  clearHighlights(pdfRoot);
-
-  if (!(pdfRoot instanceof HTMLElement)) {
-    return { success: false, matchesCount: 0 };
-  }
-
+function getTextLayerForPage(pdfRoot, pageIndex) {
   const normalizedPageIndex = Number.isFinite(pageIndex) ? Math.max(0, Number(pageIndex)) : null;
   if (normalizedPageIndex == null) {
-    return { success: false, matchesCount: 0 };
+    return null;
   }
-
   const pageNode = pdfRoot.querySelector(`.pdfPageShell[data-page-index="${normalizedPageIndex}"]`);
   if (!(pageNode instanceof HTMLElement)) {
-    return { success: false, matchesCount: 0 };
+    return null;
   }
-
   const textLayer = pageNode.querySelector(".textLayer");
+  return textLayer instanceof HTMLElement ? textLayer : null;
+}
+
+function highlightNeedleInTextLayer(textLayer, needleText, preferExact = true, fallbackOnMiss = true) {
   if (!(textLayer instanceof HTMLElement)) {
     return { success: false, matchesCount: 0 };
   }
 
   const needleCandidates = buildNeedleCandidates(needleText);
   if (needleCandidates.length === 0) {
-    createOverlay(textLayer, null, FALLBACK_OVERLAY_MS, true);
-    startAutoClear(pdfRoot);
+    if (fallbackOnMiss) {
+      createOverlay(textLayer, null, FALLBACK_OVERLAY_MS, true);
+    }
     return { success: false, matchesCount: 0 };
   }
 
@@ -647,15 +705,195 @@ export function highlightOnPage({ pdfRoot, pageIndex, needleText, preferExact = 
 
     const ranges = buildRangesForMatch(positions, match.start, match.end);
     const overlayCount = createOverlayRectsForRanges(textLayer, ranges, AUTO_CLEAR_MS, true);
-
     if (overlayCount > 0) {
-      startAutoClear(pdfRoot);
       return { success: true, matchesCount: 1 };
     }
   }
 
-  const approxRect = buildApproxOverlayRect(textLayer, needleCandidates[0]);
-  createOverlay(textLayer, approxRect, FALLBACK_OVERLAY_MS, true);
-  startAutoClear(pdfRoot);
+  if (fallbackOnMiss) {
+    const approxRect = buildApproxOverlayRect(textLayer, needleCandidates[0]);
+    createOverlay(textLayer, approxRect, FALLBACK_OVERLAY_MS, true);
+  }
   return { success: false, matchesCount: 0 };
+}
+
+function collectNeedleRectsInTextLayer(textLayer, needleText, preferExact = true) {
+  if (!(textLayer instanceof HTMLElement)) {
+    return { success: false, rects: [] };
+  }
+
+  const needleCandidates = buildNeedleCandidates(needleText);
+  if (needleCandidates.length === 0) {
+    return { success: false, rects: [] };
+  }
+
+  const { text, positions } = collectTextMap(textLayer);
+  for (const needle of needleCandidates) {
+    const match = findMatchRange(text, needle, Boolean(preferExact));
+    if (!match) {
+      continue;
+    }
+    const ranges = buildRangesForMatch(positions, match.start, match.end);
+    const rects = normalizeRectsForTextLayer(textLayer, collectRectsForRanges(textLayer, ranges));
+    if (rects.length > 0) {
+      return {
+        success: true,
+        needleText: needle,
+        rects
+      };
+    }
+  }
+
+  return { success: false, rects: [] };
+}
+
+export function highlightOnPage({ pdfRoot, pageIndex, needleText, preferExact = true }) {
+  clearHighlights(pdfRoot);
+
+  if (!(pdfRoot instanceof HTMLElement)) {
+    return { success: false, matchesCount: 0 };
+  }
+
+  const textLayer = getTextLayerForPage(pdfRoot, pageIndex);
+  if (!(textLayer instanceof HTMLElement)) {
+    return { success: false, matchesCount: 0 };
+  }
+
+  const result = highlightNeedleInTextLayer(textLayer, needleText, preferExact, true);
+  startAutoClear(pdfRoot);
+  return result;
+}
+
+export function highlightOnPages({
+  pdfRoot,
+  pageIndices,
+  needleTexts,
+  preferExact = true,
+  maxMatches = 8
+}) {
+  clearHighlights(pdfRoot);
+
+  if (!(pdfRoot instanceof HTMLElement)) {
+    return { success: false, matchesCount: 0 };
+  }
+
+  const normalizedPageIndices = Array.from(
+    new Set(
+      (Array.isArray(pageIndices) ? pageIndices : [pageIndices])
+        .map((value) => (Number.isFinite(Number(value)) ? Math.max(0, Math.floor(Number(value))) : null))
+        .filter((value) => value != null)
+    )
+  );
+  const normalizedNeedles = Array.from(
+    new Set(
+      (Array.isArray(needleTexts) ? needleTexts : [needleTexts])
+        .map((value) => sanitizeNeedle(value))
+        .filter(Boolean)
+    )
+  );
+  if (normalizedPageIndices.length === 0 || normalizedNeedles.length === 0) {
+    return { success: false, matchesCount: 0 };
+  }
+
+  const maxTotalMatches = Number.isFinite(maxMatches) ? Math.max(1, Math.floor(Number(maxMatches))) : 8;
+  let totalMatches = 0;
+  let fallbackTextLayer = null;
+
+  for (const pageIndex of normalizedPageIndices) {
+    const textLayer = getTextLayerForPage(pdfRoot, pageIndex);
+    if (!(textLayer instanceof HTMLElement)) {
+      continue;
+    }
+    if (!fallbackTextLayer) {
+      fallbackTextLayer = textLayer;
+    }
+
+    for (const needleText of normalizedNeedles) {
+      if (totalMatches >= maxTotalMatches) {
+        break;
+      }
+      const result = highlightNeedleInTextLayer(textLayer, needleText, preferExact, false);
+      if (result.success) {
+        totalMatches += result.matchesCount;
+      }
+    }
+    if (totalMatches >= maxTotalMatches) {
+      break;
+    }
+  }
+
+  if (totalMatches === 0 && fallbackTextLayer) {
+    const approxRect = buildApproxOverlayRect(fallbackTextLayer, normalizedNeedles[0]);
+    createOverlay(fallbackTextLayer, approxRect, FALLBACK_OVERLAY_MS, true);
+  }
+
+  if (totalMatches > 0 || fallbackTextLayer) {
+    startAutoClear(pdfRoot);
+  }
+  return { success: totalMatches > 0, matchesCount: totalMatches };
+}
+
+export function collectHighlightMatchesOnPages({
+  pdfRoot,
+  pageIndices,
+  needleTexts,
+  preferExact = true,
+  maxMatches = 8
+}) {
+  if (!(pdfRoot instanceof HTMLElement)) {
+    return { success: false, matchesCount: 0, matches: [] };
+  }
+
+  const normalizedPageIndices = Array.from(
+    new Set(
+      (Array.isArray(pageIndices) ? pageIndices : [pageIndices])
+        .map((value) => (Number.isFinite(Number(value)) ? Math.max(0, Math.floor(Number(value))) : null))
+        .filter((value) => value != null)
+    )
+  );
+  const normalizedNeedles = Array.from(
+    new Set(
+      (Array.isArray(needleTexts) ? needleTexts : [needleTexts])
+        .map((value) => sanitizeNeedle(value))
+        .filter(Boolean)
+    )
+  );
+  if (normalizedPageIndices.length === 0 || normalizedNeedles.length === 0) {
+    return { success: false, matchesCount: 0, matches: [] };
+  }
+
+  const maxTotalMatches = Number.isFinite(maxMatches) ? Math.max(1, Math.floor(Number(maxMatches))) : 8;
+  const matches = [];
+  let totalMatches = 0;
+
+  for (const pageIndex of normalizedPageIndices) {
+    const textLayer = getTextLayerForPage(pdfRoot, pageIndex);
+    if (!(textLayer instanceof HTMLElement)) {
+      continue;
+    }
+    for (const needleText of normalizedNeedles) {
+      if (totalMatches >= maxTotalMatches) {
+        break;
+      }
+      const result = collectNeedleRectsInTextLayer(textLayer, needleText, preferExact);
+      if (!result.success || !Array.isArray(result.rects) || result.rects.length === 0) {
+        continue;
+      }
+      matches.push({
+        pageIndex,
+        needleText: result.needleText || needleText,
+        rects: result.rects
+      });
+      totalMatches += 1;
+    }
+    if (totalMatches >= maxTotalMatches) {
+      break;
+    }
+  }
+
+  return {
+    success: totalMatches > 0,
+    matchesCount: totalMatches,
+    matches
+  };
 }

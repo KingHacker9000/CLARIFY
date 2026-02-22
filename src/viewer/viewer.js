@@ -1,7 +1,7 @@
 import * as pdfjsLib from "../vendor/pdfjs/pdf.mjs";
 import { createLogger, getDebugInfo } from "../shared/diagnostics.js";
 import { initSelectionSystem } from "./selection.js";
-import { clearHighlights, highlightOnPage } from "./highlight.js";
+import { clearHighlights, collectHighlightMatchesOnPages, highlightOnPage } from "./highlight.js";
 import {
   addGlossaryTerm,
   appendCard,
@@ -62,6 +62,14 @@ const SECTION_RAIL_LABEL_STEP = 28;
 const SECTION_RAIL_LABEL_RADIUS = 4;
 const SECTION_RAIL_MAX_HOVER_WIDTH = 220;
 const SECTION_JUMP_VIEWPORT_MARGIN_TOP = 120;
+const SECTION_CLICK_ORDER_TOLERANCE = 10;
+const SECTION_MULTI_COLUMN_MIN_SAMPLES = 28;
+const SECTION_MULTI_COLUMN_MIN_GAP_RATIO = 0.14;
+const FLOW_DIGEST_MAX_SCAN_PAGES = 3;
+const FLOW_DIGEST_MAX_KEYWORDS = 6;
+const FLOW_DIGEST_MAX_OVERVIEW_PHRASES = 4;
+const FLOW_DIGEST_MAX_TECHNICAL_TERMS = 2;
+const FLOW_DIGEST_MAX_HIGHLIGHTS = 10;
 const REMOTE_LOAD_ERROR_MESSAGE =
   "This PDF could not be loaded due to site restrictions (CORS/login). Try downloading and opening it locally.";
 const FILE_URL_LOAD_HINT_MESSAGE =
@@ -71,11 +79,22 @@ const WHOLE_PDF_LOCAL_REQUIRED_MESSAGE =
 const ICON_PIN = "\uD83D\uDCCC";
 const ICON_COPY = "\uD83D\uDCCB";
 const ICON_DELETE = "\uD83D\uDDD1\uFE0F";
-const ICON_REGENERATE_LIGHT_URL = new URL("../../assets/icons/regenerate.png", import.meta.url).toString();
-const ICON_REGENERATE_DARK_URL = new URL(
+const ICON_REGENERATE_LIGHT_THEME_URL = new URL("../../assets/icons/regenerate.png", import.meta.url).toString();
+const ICON_REGENERATE_DARK_THEME_URL = new URL(
   "../../assets/icons/regenerate-dark.png",
   import.meta.url
 ).toString();
+const ICON_OPEN_LIGHT_THEME_URL = new URL("../../assets/icons/open.png", import.meta.url).toString();
+const ICON_OPEN_DARK_THEME_URL = new URL("../../assets/icons/open-dark.png", import.meta.url).toString();
+const ICON_FIT_WIDTH_LIGHT_THEME_URL = new URL("../../assets/icons/fit-width.png", import.meta.url).toString();
+const ICON_FIT_WIDTH_DARK_THEME_URL = new URL("../../assets/icons/fit-width-dark.png", import.meta.url).toString();
+const ICON_HIGHLIGHTER_LIGHT_THEME_URL = new URL("../../assets/icons/highlighter.png", import.meta.url).toString();
+const ICON_HIGHLIGHTER_DARK_THEME_URL = new URL(
+  "../../assets/icons/highlighter-dark.png",
+  import.meta.url
+).toString();
+const ICON_THEME_TO_DARK_URL = new URL("../../assets/icons/to-dark-mode.png", import.meta.url).toString();
+const ICON_THEME_TO_LIGHT_URL = new URL("../../assets/icons/to-light-mode.png", import.meta.url).toString();
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   "../vendor/pdfjs/pdf.worker.mjs",
@@ -102,6 +121,7 @@ const zoomOutBtn = document.getElementById("zoomOut");
 const zoomInBtn = document.getElementById("zoomIn");
 const fitWidthBtn = document.getElementById("fitWidth");
 const highlighterToggleBtn = document.getElementById("highlighterToggle");
+const themeToggleBtn = document.getElementById("themeToggle");
 const reopenSidebarBtn = document.getElementById("reopenSidebar");
 const diagnosticsToggleBtn = document.getElementById("diagnosticsToggle");
 const diagnosticsMenu = document.getElementById("diagnosticsMenu");
@@ -128,6 +148,10 @@ const promptCacheDefault = document.getElementById("promptCacheDefault");
 const promptCache24h = document.getElementById("promptCache24h");
 const wholePdfHelpText = document.getElementById("wholePdfHelpText");
 const walkthroughTabButton = document.getElementById("walkthroughTabButton");
+const openFileIconEl = openFileBtn?.querySelector(".toolbarIconImage");
+const fitWidthIconEl = fitWidthBtn?.querySelector(".toolbarIconImage");
+const highlighterIconEl = highlighterToggleBtn?.querySelector(".toolbarIconImage");
+const themeToggleIconEl = themeToggleBtn?.querySelector(".toolbarIconImage");
 
 const renderState = {
   pdfDoc: null,
@@ -182,6 +206,9 @@ function createReadingMapUiState() {
     expandedKeys: new Set(),
     visibleIntentKeys: new Set(),
     intentLoadingByKey: {},
+    digestByKey: {},
+    digestLoadingByKey: {},
+    visibleDigestKeys: new Set(),
     topLevelPrewarming: false,
     groupPrewarmByKey: {}
   }
@@ -340,6 +367,27 @@ const RETRIEVAL_STOP_WORDS = new Set([
   "within",
   "without",
   "would"
+]);
+const FLOW_DIGEST_GENERIC_TERMS = new Set([
+  "abstract",
+  "acknowledgments",
+  "appendix",
+  "conclusion",
+  "conclusions",
+  "discussion",
+  "experiment",
+  "experiments",
+  "figure",
+  "introduction",
+  "method",
+  "methods",
+  "paper",
+  "references",
+  "result",
+  "results",
+  "section",
+  "study",
+  "table"
 ]);
 
 function sanitizeText(value) {
@@ -973,6 +1021,106 @@ function isIntentVisible(sectionKey) {
   return readingMapState.visibleIntentKeys.has(sectionKey)
 }
 
+function setDigestLoading(sectionKey, isLoading) {
+  const key = sanitizeText(sectionKey)
+  if (!key) {
+    return
+  }
+  const readingMapState = getReadingMapState()
+  readingMapState.digestLoadingByKey[key] = Boolean(isLoading)
+}
+
+function isDigestLoading(sectionKey) {
+  const key = sanitizeText(sectionKey)
+  if (!key) {
+    return false
+  }
+  const readingMapState = getReadingMapState()
+  return Boolean(readingMapState.digestLoadingByKey[key])
+}
+
+function setDigestVisible(sectionKey, visible) {
+  const key = sanitizeText(sectionKey)
+  if (!key) {
+    return
+  }
+  const readingMapState = getReadingMapState()
+  if (visible) {
+    readingMapState.visibleDigestKeys.add(key)
+    return
+  }
+  readingMapState.visibleDigestKeys.delete(key)
+}
+
+function isDigestVisible(sectionKey) {
+  const key = sanitizeText(sectionKey)
+  if (!key) {
+    return false
+  }
+  const readingMapState = getReadingMapState()
+  return readingMapState.visibleDigestKeys.has(key)
+}
+
+function normalizeDigestHighlightsList(value, limit = FLOW_DIGEST_MAX_KEYWORDS) {
+  const maxItems = Number.isFinite(limit) ? Math.max(1, Math.floor(Number(limit))) : FLOW_DIGEST_MAX_KEYWORDS
+  const source = Array.isArray(value) ? value : []
+  const dedupe = new Set()
+  const result = []
+  for (const item of source) {
+    const text = truncateText(sanitizeText(item), 96)
+    if (!text) {
+      continue
+    }
+    const wordCount = text.split(/\s+/).filter(Boolean).length
+    if (wordCount < 2) {
+      continue
+    }
+    const key = text.toLowerCase()
+    if (dedupe.has(key)) {
+      continue
+    }
+    dedupe.add(key)
+    result.push(text)
+    if (result.length >= maxItems) {
+      break
+    }
+  }
+  return result
+}
+
+function setDigestEntry(sectionKey, entry) {
+  const key = sanitizeText(sectionKey)
+  if (!key || !entry || typeof entry !== "object") {
+    return
+  }
+  const summary = clampText(entry.summary, 260)
+  const keywords = normalizeDigestHighlightsList(entry.keywords, FLOW_DIGEST_MAX_KEYWORDS)
+  const pageIndex = parseOptionalPageIndex(entry.pageIndex)
+  const readingMapState = getReadingMapState()
+  readingMapState.digestByKey[key] = {
+    summary,
+    keywords,
+    pageIndex
+  }
+}
+
+function getDigestEntry(sectionKey) {
+  const key = sanitizeText(sectionKey)
+  if (!key) {
+    return null
+  }
+  const readingMapState = getReadingMapState()
+  const entry = readingMapState.digestByKey[key]
+  if (!entry || typeof entry !== "object") {
+    return null
+  }
+  return {
+    summary: clampText(entry.summary, 260),
+    keywords: normalizeDigestHighlightsList(entry.keywords, FLOW_DIGEST_MAX_KEYWORDS),
+    pageIndex: parseOptionalPageIndex(entry.pageIndex)
+  }
+}
+
 function setNodeExpanded(sectionKey, expanded) {
   if (!sectionKey) {
     return
@@ -1107,10 +1255,7 @@ function createOrientationHeader({ actionLabel = "Start reading" }) {
   const regenerateIcon = document.createElement("img")
   regenerateIcon.className = "orientationIconImage"
   regenerateIcon.alt = ""
-  regenerateIcon.src =
-    window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
-      ? ICON_REGENERATE_LIGHT_URL
-      : ICON_REGENERATE_DARK_URL
+  regenerateIcon.src = isDarkThemeEnabled() ? ICON_REGENERATE_DARK_THEME_URL : ICON_REGENERATE_LIGHT_THEME_URL
   regenerateButton.append(regenerateIcon)
   actions.append(regenerateButton)
 
@@ -2374,11 +2519,35 @@ function setModeMicroActionsVisible(visible) {
   void visible
 }
 
-function updateSectionStatus(sectionTitle = "") {
+function updateSectionStatus(sectionTitle = "", options = {}) {
+  const normalizedTitle = clampText(sectionTitle, 180)
+  const normalizedSectionId = sanitizeText(options?.sectionId) || null
+  const normalizedSectionKey = sanitizeText(options?.sectionKey)
+  const normalizedSectionPageIndex = parseOptionalPageIndex(options?.pageIndex)
+
   if (currentPdf && typeof currentPdf === "object") {
-    currentPdf.currentSectionTitle = clampText(sectionTitle, 180)
+    currentPdf.currentSectionTitle = normalizedTitle
+    if (!normalizedTitle && !normalizedSectionId && !normalizedSectionKey) {
+      currentPdf.currentSectionId = null
+      currentPdf.currentSectionKey = ""
+      currentPdf.currentSectionPageIndex = null
+    } else {
+      currentPdf.currentSectionId = normalizedSectionId
+      currentPdf.currentSectionKey = normalizedSectionKey
+      currentPdf.currentSectionPageIndex = normalizedSectionPageIndex
+    }
   }
-  updateLoadedStatusTooltip()
+
+  if (!currentPdf) {
+    setStatus("No PDF loaded")
+    return
+  }
+  if (!normalizedTitle && !(Number(currentPdf.numPages) > 0)) {
+    return
+  }
+
+  const statusText = normalizedTitle ? `Section: ${normalizedTitle}` : getLoadedStatusText()
+  setStatus(statusText, { title: getLoadedStatusTooltipText() })
 }
 
 function setWalkthroughTabVisibility(visible) {
@@ -2550,6 +2719,45 @@ function setApiStatus(text) {
     apiStatusTimer = null;
     setApiPresenceStatus(currentSettings);
   }, 1400);
+}
+
+function normalizeTheme(theme) {
+  return theme === "dark" ? "dark" : "light"
+}
+
+function isDarkThemeEnabled(theme = currentSettings?.theme) {
+  return normalizeTheme(theme) === "dark"
+}
+
+function updateThemeSensitiveIcons(theme = currentSettings?.theme) {
+  const darkThemeEnabled = isDarkThemeEnabled(theme)
+
+  if (openFileIconEl instanceof HTMLImageElement) {
+    openFileIconEl.src = darkThemeEnabled ? ICON_OPEN_DARK_THEME_URL : ICON_OPEN_LIGHT_THEME_URL
+  }
+  if (fitWidthIconEl instanceof HTMLImageElement) {
+    fitWidthIconEl.src = darkThemeEnabled ? ICON_FIT_WIDTH_DARK_THEME_URL : ICON_FIT_WIDTH_LIGHT_THEME_URL
+  }
+  if (highlighterIconEl instanceof HTMLImageElement) {
+    highlighterIconEl.src = darkThemeEnabled
+      ? ICON_HIGHLIGHTER_DARK_THEME_URL
+      : ICON_HIGHLIGHTER_LIGHT_THEME_URL
+  }
+  if (themeToggleIconEl instanceof HTMLImageElement) {
+    themeToggleIconEl.src = darkThemeEnabled ? ICON_THEME_TO_LIGHT_URL : ICON_THEME_TO_DARK_URL
+  }
+  if (themeToggleBtn instanceof HTMLButtonElement) {
+    const nextModeLabel = darkThemeEnabled ? "Enable light mode" : "Enable dark mode"
+    themeToggleBtn.setAttribute("aria-label", nextModeLabel)
+    themeToggleBtn.title = nextModeLabel
+  }
+}
+
+function applyThemeToUi(theme = currentSettings?.theme) {
+  const normalizedTheme = normalizeTheme(theme)
+  document.body.dataset.theme = normalizedTheme
+  document.documentElement.style.colorScheme = normalizedTheme
+  updateThemeSensitiveIcons(normalizedTheme)
 }
 
 function getWholePdfHelpMessage(settings) {
@@ -3043,10 +3251,439 @@ function findSectionAnchorInPage(pageNode, title) {
   }
 }
 
+async function getSectionSnippetFromRange(range, { maxPages = FLOW_DIGEST_MAX_SCAN_PAGES, maxChars = 1400 } = {}) {
+  if (!renderState.pdfDoc || !range) {
+    return ""
+  }
+  const normalizedMaxPages = Math.max(1, Math.floor(Number(maxPages) || FLOW_DIGEST_MAX_SCAN_PAGES))
+  const pageStart = Math.max(0, parseOptionalPageIndex(range.startPageIndex) ?? 0)
+  const pageEnd = Math.max(pageStart, parseOptionalPageIndex(range.endPageIndex) ?? pageStart)
+  const pageLimit = Math.min(pageEnd, pageStart + normalizedMaxPages - 1)
+  const parts = []
+
+  for (let pageIndex = pageStart; pageIndex <= pageLimit; pageIndex += 1) {
+    const pageText = await getPageText(renderState.pdfDoc, pageIndex)
+    const text = sanitizeText(pageText)
+    if (text) {
+      parts.push(text)
+    }
+  }
+
+  return truncateText(parts.join(" "), maxChars)
+}
+
+function buildSectionDigestFallbackSummary(sectionTitle, snippet) {
+  const sectionLabel = clampText(sectionTitle, 120) || "this section"
+  const source = sanitizeText(snippet)
+  if (!source) {
+    return `This section introduces ${sectionLabel}.`
+  }
+  const sentence = source
+    .split(/(?<=[.!?])\s+/)
+    .map((item) => sanitizeText(item))
+    .find(Boolean)
+  return clampText(sentence || source, 220) || `This section covers ${sectionLabel}.`
+}
+
+function tokenizeDigestSignalWords(text, { minLength = 3, maxItems = 80 } = {}) {
+  const normalizedMinLength = Number.isFinite(minLength) ? Math.max(2, Math.floor(Number(minLength))) : 3
+  const normalizedMaxItems = Number.isFinite(maxItems) ? Math.max(1, Math.floor(Number(maxItems))) : 80
+  return sanitizeText(text)
+    .toLowerCase()
+    .split(/\s+/)
+    .map((token) => token.replace(/^[^a-z0-9]+|[^a-z0-9-]+$/g, ""))
+    .filter((token) => token.length >= normalizedMinLength)
+    .filter((token) => !RETRIEVAL_STOP_WORDS.has(token))
+    .filter((token) => !/^\d+$/.test(token))
+    .slice(0, normalizedMaxItems)
+}
+
+function normalizeDigestPhraseCandidate(text, { minWords = 3, maxWords = 12, maxChars = 96 } = {}) {
+  const normalizedMinWords = Number.isFinite(minWords) ? Math.max(1, Math.floor(Number(minWords))) : 3
+  const normalizedMaxWords = Number.isFinite(maxWords) ? Math.max(3, Math.floor(Number(maxWords))) : 12
+  const normalizedMaxChars = Number.isFinite(maxChars) ? Math.max(24, Math.floor(Number(maxChars))) : 96
+  let phrase = sanitizeText(text)
+  if (!phrase) {
+    return ""
+  }
+  phrase = phrase
+    .replace(/\[[^\]]+\]/g, " ")
+    .replace(/\(\s*(fig(?:ure)?|table)\.?[^)]*\)/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^in this section[:,]?\s*/i, "")
+    .replace(/^this section\s+(?:presents|describes|shows|evaluates|introduces)\s+/i, "")
+    .replace(/^we\s+(?:present|show|evaluate|introduce|study|analyze)\s+/i, "")
+    .trim()
+  if (!phrase) {
+    return ""
+  }
+  const clauses = phrase
+    .split(/[;:]/)
+    .map((item) => sanitizeText(item))
+    .filter(Boolean)
+  if (clauses.length > 0) {
+    phrase = clauses[0]
+  }
+  if (phrase.includes(",")) {
+    const commaClauses = phrase
+      .split(",")
+      .map((item) => sanitizeText(item))
+      .filter(Boolean)
+    const candidate = commaClauses.find((item) => {
+      const wordCount = item.split(/\s+/).filter(Boolean).length
+      return wordCount >= 4 && wordCount <= normalizedMaxWords
+    })
+    if (candidate) {
+      phrase = candidate
+    }
+  }
+  const words = phrase.split(/\s+/).filter(Boolean)
+  if (words.length < normalizedMinWords) {
+    return ""
+  }
+  if (words.length > normalizedMaxWords) {
+    phrase = words.slice(0, normalizedMaxWords).join(" ")
+  }
+  phrase = phrase.replace(/^[^a-z0-9(]+|[^a-z0-9)\]]+$/gi, "")
+  return truncateText(phrase, normalizedMaxChars)
+}
+
+function scoreDigestPhrase(phrase, summaryTerms, titleTerms, sentenceIndex = 0) {
+  const signalWords = tokenizeDigestSignalWords(phrase, { minLength: 3, maxItems: 40 })
+  if (signalWords.length < 3) {
+    return Number.NEGATIVE_INFINITY
+  }
+  const uniqueSignalWords = [...new Set(signalWords)]
+  const summaryOverlap = uniqueSignalWords.filter((token) => summaryTerms.has(token)).length
+  const titleOverlap = uniqueSignalWords.filter((token) => titleTerms.has(token)).length
+  let score = uniqueSignalWords.length * 1.2 + summaryOverlap * 2.8 + titleOverlap * 3.2
+  if (/\d/.test(phrase)) {
+    score += 0.8
+  }
+  if (/[A-Z]{2,}/.test(phrase)) {
+    score += 0.9
+  }
+  if (/\b(dataset|model|baseline|accuracy|precision|recall|loss|ablation|experiment|classification|regression)\b/i.test(phrase)) {
+    score += 0.9
+  }
+  if (/^(it|this|that|there)\b/i.test(phrase)) {
+    score -= 0.8
+  }
+  if (phrase.length < 20) {
+    score -= 1.2
+  }
+  if (phrase.length > 90) {
+    score -= 0.9
+  }
+  score += Math.max(0, 0.5 - Math.min(Math.max(sentenceIndex, 0), 8) * 0.06)
+  return score
+}
+
+function tokenizeDigestPhraseSet(phrase) {
+  return new Set(tokenizeDigestSignalWords(phrase, { minLength: 3, maxItems: 30 }))
+}
+
+function isDigestPhraseDuplicate(candidatePhrase, selectedPhrases) {
+  const candidateTokens = tokenizeDigestPhraseSet(candidatePhrase)
+  if (candidateTokens.size === 0) {
+    return true
+  }
+  for (const selected of selectedPhrases) {
+    const selectedTokens = tokenizeDigestPhraseSet(selected)
+    if (selectedTokens.size === 0) {
+      continue
+    }
+    let overlap = 0
+    for (const token of candidateTokens) {
+      if (selectedTokens.has(token)) {
+        overlap += 1
+      }
+    }
+    const ratio = overlap / Math.min(candidateTokens.size, selectedTokens.size)
+    if (ratio >= 0.75) {
+      return true
+    }
+  }
+  return false
+}
+
+function buildSectionDigestOverviewPhrases(sectionTitle, summaryText, snippetText) {
+  const summaryTerms = new Set(tokenizeDigestSignalWords(summaryText, { minLength: 3, maxItems: 48 }))
+  const titleTerms = new Set(tokenizeDigestSignalWords(sectionTitle, { minLength: 3, maxItems: 24 }))
+  const sentences = sanitizeText(snippetText)
+    .split(/(?<=[.!?])\s+/)
+    .map((item) => sanitizeText(item))
+    .filter(Boolean)
+    .slice(0, 40)
+
+  const candidates = []
+  const dedupe = new Set()
+  sentences.forEach((sentence, sentenceIndex) => {
+    const parts = sentence
+      .split(/[.?!]/)
+      .flatMap((chunk) => chunk.split(/[;:]/))
+      .flatMap((chunk) => chunk.split(","))
+      .map((item) => normalizeDigestPhraseCandidate(item))
+      .filter(Boolean)
+    for (const part of parts) {
+      const key = part.toLowerCase()
+      if (dedupe.has(key)) {
+        continue
+      }
+      dedupe.add(key)
+      const score = scoreDigestPhrase(part, summaryTerms, titleTerms, sentenceIndex)
+      if (!Number.isFinite(score) || score <= 0) {
+        continue
+      }
+      candidates.push({ text: part, score })
+    }
+  })
+
+  candidates.sort((left, right) => {
+    if (right.score !== left.score) {
+      return right.score - left.score
+    }
+    return right.text.length - left.text.length
+  })
+
+  const selected = []
+  for (const candidate of candidates) {
+    if (selected.length >= FLOW_DIGEST_MAX_OVERVIEW_PHRASES) {
+      break
+    }
+    if (isDigestPhraseDuplicate(candidate.text, selected)) {
+      continue
+    }
+    selected.push(candidate.text)
+  }
+  return selected
+}
+
+function addDigestTermCandidate(scoreMap, term, score) {
+  const text = normalizeDigestPhraseCandidate(term, { minWords: 2, maxWords: 5, maxChars: 48 })
+  if (!text) {
+    return
+  }
+  const wordCount = text.split(/\s+/).filter(Boolean).length
+  if (wordCount < 2) {
+    return
+  }
+  const key = text.toLowerCase()
+  if (key.length < 2 || RETRIEVAL_STOP_WORDS.has(key) || FLOW_DIGEST_GENERIC_TERMS.has(key)) {
+    return
+  }
+  scoreMap.set(key, {
+    text,
+    score: (scoreMap.get(key)?.score || 0) + (Number.isFinite(score) ? Number(score) : 1)
+  })
+}
+
+function buildSectionDigestTechnicalTerms(sectionTitle, summaryText, snippetText) {
+  const scores = new Map()
+  const combined = `${sanitizeText(sectionTitle)} ${sanitizeText(summaryText)} ${sanitizeText(snippetText)}`
+
+  for (const match of combined.matchAll(/\b([A-Za-z][A-Za-z0-9-]{2,}(?:\s+[A-Za-z][A-Za-z0-9-]{2,}){1,3})\s*\(([A-Z]{2,8})\)/g)) {
+    addDigestTermCandidate(scores, match[1], 4.4)
+  }
+  for (const match of combined.matchAll(/\b([A-Za-z][A-Za-z0-9-]{2,}\s+[A-Za-z][A-Za-z0-9-]{2,}(?:\s+[A-Za-z][A-Za-z0-9-]{2,}){0,2})\b/g)) {
+    addDigestTermCandidate(scores, match[1], 1.2)
+  }
+
+  return [...scores.values()]
+    .sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score
+      }
+      return right.text.length - left.text.length
+    })
+    .map((item) => item.text)
+    .slice(0, FLOW_DIGEST_MAX_TECHNICAL_TERMS)
+}
+
+function buildSectionDigestKeywords(sectionTitle, summaryText, snippetText) {
+  const overviewPhrases = buildSectionDigestOverviewPhrases(sectionTitle, summaryText, snippetText)
+  const terms = buildSectionDigestTechnicalTerms(sectionTitle, summaryText, snippetText)
+  const combined = []
+  const dedupe = new Set()
+  for (const phrase of [...overviewPhrases, ...terms]) {
+    const text = normalizeDigestPhraseCandidate(phrase, { minWords: 2, maxWords: 12, maxChars: 96 })
+    if (!text) {
+      continue
+    }
+    const key = text.toLowerCase()
+    if (dedupe.has(key)) {
+      continue
+    }
+    dedupe.add(key)
+    combined.push(text)
+    if (combined.length >= FLOW_DIGEST_MAX_KEYWORDS) {
+      break
+    }
+  }
+  if (combined.length === 0) {
+    const fallback = normalizeDigestPhraseCandidate(summaryText, { minWords: 2, maxWords: 12, maxChars: 96 })
+    if (fallback) {
+      combined.push(fallback)
+    }
+  }
+  return combined
+}
+
+function getSectionPageIndicesFromRange(range, maxPages = FLOW_DIGEST_MAX_SCAN_PAGES) {
+  const start = Math.max(0, parseOptionalPageIndex(range?.startPageIndex) ?? 0)
+  const end = Math.max(start, parseOptionalPageIndex(range?.endPageIndex) ?? start)
+  const pageCap = Math.max(1, Math.floor(Number(maxPages) || FLOW_DIGEST_MAX_SCAN_PAGES))
+  const pageIndices = []
+  for (let pageIndex = start; pageIndex <= end && pageIndices.length < pageCap; pageIndex += 1) {
+    pageIndices.push(pageIndex)
+  }
+  return pageIndices
+}
+
+function getDigestHighlightSectionSlug(sectionKey) {
+  const normalized = sanitizeText(sectionKey).toLowerCase()
+  if (!normalized) {
+    return ""
+  }
+  return normalized.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
+}
+
+function buildDigestHighlightText(sectionKey, phrase) {
+  const slug = getDigestHighlightSectionSlug(sectionKey)
+  const content = truncateText(sanitizeText(phrase), 110)
+  if (!slug || !content) {
+    return ""
+  }
+  return `[flow-digest:${slug}] ${content}`
+}
+
+function clearDigestHighlightsForSection(sectionKey) {
+  const slug = getDigestHighlightSectionSlug(sectionKey)
+  if (!slug) {
+    return
+  }
+  const prefix = `[flow-digest:${slug}]`
+  const affectedPages = new Set()
+  highlighterState.items = highlighterState.items.filter((item) => {
+    if (typeof item?.textKey !== "string") {
+      return true
+    }
+    const isDigestItem = item.textKey.startsWith(prefix)
+    if (isDigestItem && Number.isFinite(item.pageIndex) && item.pageIndex >= 0) {
+      affectedPages.add(item.pageIndex)
+    }
+    return !isDigestItem
+  })
+  for (const pageIndex of affectedPages) {
+    renderUserHighlightsForPage(pageIndex)
+  }
+}
+
+function applyDigestHighlightsForSection(sectionKey, matches) {
+  clearDigestHighlightsForSection(sectionKey)
+  const normalizedMatches = Array.isArray(matches) ? matches : []
+  let addedCount = 0
+  for (const match of normalizedMatches) {
+    const selectedText = buildDigestHighlightText(sectionKey, match?.needleText)
+    const didAdd = addOrMergeHighlight({
+      pageIndex: match?.pageIndex,
+      selectedText,
+      rects: Array.isArray(match?.rects) ? match.rects : []
+    })
+    if (didAdd) {
+      addedCount += 1
+    }
+  }
+  return addedCount
+}
+
+function createDigestBubble(sectionKey, anchor, topOffset = 20) {
+  const bubble = document.createElement("div")
+  bubble.className = "pdfIntentBubble pdfIntentDigestBubble"
+  bubble.style.left = `${Math.min(anchor.left + 24, Math.max(anchor.pageSurface.clientWidth - 260, 10))}px`
+  bubble.style.top = `${Math.max(anchor.top + topOffset, 4)}px`
+
+  if (isDigestLoading(sectionKey)) {
+    bubble.textContent = "Summarizing section..."
+    return bubble
+  }
+
+  const digest = getDigestEntry(sectionKey)
+  if (!digest?.summary) {
+    bubble.textContent = "No summary available yet."
+    return bubble
+  }
+
+  const title = document.createElement("div")
+  title.className = "pdfIntentDigestLabel"
+  title.textContent = "Quick summary"
+
+  const summary = document.createElement("p")
+  summary.className = "pdfIntentDigestSummary"
+  summary.textContent = digest.summary
+
+  bubble.append(title, summary)
+  if (Array.isArray(digest.keywords) && digest.keywords.length > 0) {
+    const keywordsWrap = document.createElement("div")
+    keywordsWrap.className = "pdfIntentDigestKeywords"
+    for (const keyword of digest.keywords) {
+      const chip = document.createElement("span")
+      chip.className = "pdfIntentDigestKeyword"
+      chip.textContent = keyword
+      keywordsWrap.append(chip)
+    }
+    bubble.append(keywordsWrap)
+  }
+  return bubble
+}
+
+async function ensureDigestForSection(sectionKey) {
+  const key = sanitizeText(sectionKey)
+  if (!key || !currentPdf || !renderState.pdfDoc) {
+    return null
+  }
+
+  const sections = getReadingMapSections()
+  const range = getSectionRangeForSectionKey(key, sections, currentPdf.pageNumber || 1)
+  const sectionTitle = clampText(range.sectionTitle, 180) || `Page ${Math.max(0, range.startPageIndex) + 1}`
+  const snippet = await getSectionSnippetFromRange(range, {
+    maxPages: FLOW_DIGEST_MAX_SCAN_PAGES,
+    maxChars: 2200
+  })
+  if (!snippet) {
+    setDigestEntry(key, {
+      summary: `No text available yet for ${sectionTitle}.`,
+      keywords: [],
+      pageIndex: range.startPageIndex
+    })
+    return getDigestEntry(key)
+  }
+
+  const { response } = await generateLLM("explanation", {
+    selectedText: sectionTitle,
+    contextWindow: snippet,
+    pageIndex: Math.max(0, range.startPageIndex),
+    readingMode: getReadingModeOrDefault()
+  })
+  const summary = clampText(
+    response?.shortAnswer || response?.eli5 || buildSectionDigestFallbackSummary(sectionTitle, snippet),
+    260
+  )
+  const keywords = buildSectionDigestKeywords(sectionTitle, summary, snippet)
+  setDigestEntry(key, {
+    summary,
+    keywords,
+    pageIndex: range.startPageIndex
+  })
+  return getDigestEntry(key)
+}
+
 function renderPdfIntentOverlays() {
   clearPdfIntentOverlays()
   const sections = getReadingMapSections()
   const intentMap = getSectionIntentMapFromOrientationData(getOrientationState().data?.sectionIntents)
+  const showFlowDigest = modeUiState.mode === "flow"
   if (!Array.isArray(sections) || sections.length === 0) {
     return
   }
@@ -3074,7 +3711,23 @@ function renderPdfIntentOverlays() {
     button.textContent = "?"
     button.style.left = `${anchor.left}px`
     button.style.top = `${anchor.top}px`
+    button.title = "Section intent"
+    button.setAttribute("aria-label", "Section intent")
     anchor.pageSurface.append(button)
+
+    if (showFlowDigest) {
+      const digestButton = document.createElement("button")
+      digestButton.type = "button"
+      digestButton.className = "pdfIntentOverlay pdfIntentOverlayDigest"
+      digestButton.dataset.pdfIntentAction = "digest"
+      digestButton.dataset.sectionKey = sectionKey
+      digestButton.textContent = "S"
+      digestButton.style.left = `${anchor.left + 20}px`
+      digestButton.style.top = `${anchor.top}px`
+      digestButton.title = "Highlight section takeaways"
+      digestButton.setAttribute("aria-label", "Highlight section takeaways")
+      anchor.pageSurface.append(digestButton)
+    }
 
     if (isIntentVisible(sectionKey)) {
       const bubble = document.createElement("div")
@@ -3085,10 +3738,78 @@ function renderPdfIntentOverlays() {
       bubble.style.top = `${Math.max(anchor.top - 2, 4)}px`
       anchor.pageSurface.append(bubble)
     }
+
   }
 }
 
+async function handlePdfDigestOverlayClick(buttonEl) {
+  const sectionKey = sanitizeText(buttonEl?.dataset?.sectionKey)
+  if (!sectionKey) {
+    return
+  }
+  setDigestVisible(sectionKey, false)
+
+  let digest = getDigestEntry(sectionKey)
+  if (!digest?.summary) {
+    setDigestLoading(sectionKey, true)
+    try {
+      digest = await ensureDigestForSection(sectionKey)
+    } catch (error) {
+      logger.warn("Digest overlay generation failed", {
+        sectionKey,
+        message: error?.message || "Unknown error"
+      })
+      setDigestEntry(sectionKey, {
+        summary: "Unable to summarize this section right now.",
+        keywords: [],
+        pageIndex: parseOptionalPageIndex(currentPdf?.pageNumber) ?? 0
+      })
+      digest = getDigestEntry(sectionKey)
+    } finally {
+      setDigestLoading(sectionKey, false)
+    }
+  }
+
+  if (Array.isArray(digest?.keywords) && digest.keywords.length > 0) {
+    const sections = getReadingMapSections()
+    const range = getSectionRangeForSectionKey(sectionKey, sections, currentPdf?.pageNumber || 1)
+    const pageIndices = getSectionPageIndicesFromRange(range, FLOW_DIGEST_MAX_SCAN_PAGES)
+    let matchResult = collectHighlightMatchesOnPages({
+      pdfRoot,
+      pageIndices,
+      needleTexts: digest.keywords,
+      preferExact: true,
+      maxMatches: FLOW_DIGEST_MAX_HIGHLIGHTS
+    })
+    if (!matchResult.success) {
+      matchResult = collectHighlightMatchesOnPages({
+        pdfRoot,
+        pageIndices,
+        needleTexts: digest.keywords,
+        preferExact: false,
+        maxMatches: FLOW_DIGEST_MAX_HIGHLIGHTS
+      })
+    }
+    if (matchResult.success && Array.isArray(matchResult.matches) && matchResult.matches.length > 0) {
+      applyDigestHighlightsForSection(sectionKey, matchResult.matches)
+    } else {
+      clearDigestHighlightsForSection(sectionKey)
+    }
+  } else {
+    clearDigestHighlightsForSection(sectionKey)
+  }
+  renderPdfIntentOverlays()
+}
+
 async function handlePdfIntentOverlayClick(buttonEl) {
+  const action = sanitizeText(buttonEl?.dataset?.pdfIntentAction)
+  if (action === "digest") {
+    await handlePdfDigestOverlayClick(buttonEl)
+    return
+  }
+  if (action && action !== "toggle") {
+    return
+  }
   const sectionKey = sanitizeText(buttonEl?.dataset?.sectionKey)
   if (!sectionKey) {
     return
@@ -3187,7 +3908,7 @@ function applyReadingMapToCurrentDocument(sections) {
     normalizedSections,
     orientationState.data?.sectionIntents
   )
-  updateSectionStatus(getCurrentSectionTitle(currentPdf.pageNumber || 1, normalizedSections))
+  syncSectionStatusForCurrentPage({ preferCurrent: true })
   renderPdfIntentOverlays()
   scheduleSectionRailRender()
 }
@@ -3684,29 +4405,133 @@ function getReadingMapSections() {
   return currentPdf.readingMap.sections
 }
 
+function toSectionSnapshot(section) {
+  const sectionTitle = clampText(getSectionDisplayTitle(section), 180)
+  const sectionPageIndex = parseOptionalPageIndex(section?.pageIndex)
+  if (!sectionTitle || sectionPageIndex == null) {
+    return null
+  }
+  return {
+    key: getSectionKey(section),
+    id: sanitizeText(section?.id) || null,
+    title: sectionTitle,
+    pageIndex: sectionPageIndex,
+    section
+  }
+}
+
+function getCurrentSectionSnapshotForPage(pageIndex, sections = getReadingMapSections()) {
+  const normalizedPageIndex = parseOptionalPageIndex(pageIndex)
+  if (normalizedPageIndex == null || !currentPdf) {
+    return null
+  }
+  const currentSectionKey = sanitizeText(currentPdf.currentSectionKey)
+  const currentSectionPageIndex = parseOptionalPageIndex(currentPdf.currentSectionPageIndex)
+  if (!currentSectionKey || currentSectionPageIndex == null || currentSectionPageIndex !== normalizedPageIndex) {
+    return null
+  }
+  for (const section of Array.isArray(sections) ? sections : []) {
+    const snapshot = toSectionSnapshot(section)
+    if (!snapshot) {
+      continue
+    }
+    if (snapshot.key === currentSectionKey) {
+      return snapshot
+    }
+  }
+  return null
+}
+
+function resolveSectionForPage(pageIndex, sectionsOutline = getReadingMapSections()) {
+  const normalizedPageIndex = parseOptionalPageIndex(pageIndex)
+  if (normalizedPageIndex == null) {
+    return null
+  }
+  const sections = Array.isArray(sectionsOutline) ? sectionsOutline : []
+  let latest = null
+  for (const section of sections) {
+    const snapshot = toSectionSnapshot(section)
+    if (!snapshot) {
+      continue
+    }
+    if (snapshot.pageIndex <= normalizedPageIndex) {
+      latest = section
+      continue
+    }
+    break
+  }
+  return latest
+}
+
+function resolveSectionSnapshotForPage(pageIndex, options = {}) {
+  const sections = Array.isArray(options?.sections) ? options.sections : getReadingMapSections()
+  const normalizedPageIndex = parseOptionalPageIndex(pageIndex)
+  if (normalizedPageIndex == null) {
+    return null
+  }
+  if (options?.preferCurrent === true) {
+    const currentSnapshot = getCurrentSectionSnapshotForPage(normalizedPageIndex, sections)
+    if (currentSnapshot) {
+      return currentSnapshot
+    }
+  }
+  return toSectionSnapshot(resolveSectionForPage(normalizedPageIndex, sections))
+}
+
 function getCurrentSectionTitle(pageNumber, sectionsOutline) {
   const normalizedPageNumber = Number(pageNumber)
   if (!Number.isFinite(normalizedPageNumber) || normalizedPageNumber < 1) {
     return "Unknown section"
   }
   const pageIndex = Math.max(0, Math.floor(normalizedPageNumber) - 1)
-  const sections = Array.isArray(sectionsOutline) ? sectionsOutline : []
-  let latestTitle = ""
-  for (const section of sections) {
-    const sectionPageIndex = parseOptionalPageIndex(section?.pageIndex)
-    if (sectionPageIndex == null) {
-      continue
-    }
-    if (sectionPageIndex <= pageIndex) {
-      latestTitle = clampText(section?.title || section?.displayTitle, 180)
-      continue
-    }
-    break
-  }
-  if (latestTitle) {
-    return latestTitle
+  const section = toSectionSnapshot(resolveSectionForPage(pageIndex, sectionsOutline))
+  if (section?.title) {
+    return section.title
   }
   return `Page ${pageIndex + 1}`
+}
+
+function getSectionRangeFromIndex(sectionIndex, sectionsOutline, fallbackPageIndex = 0) {
+  const sections = Array.isArray(sectionsOutline) ? sectionsOutline : []
+  const fallbackIndex = parseOptionalPageIndex(fallbackPageIndex) ?? 0
+  if (sections.length === 0 || sectionIndex < 0 || sectionIndex >= sections.length) {
+    return {
+      sectionTitle: `Page ${fallbackIndex + 1}`,
+      sectionKey: "",
+      sectionId: null,
+      startPageIndex: fallbackIndex,
+      endPageIndex: fallbackIndex
+    }
+  }
+
+  const selected = sections[sectionIndex]
+  const selectedSnapshot = toSectionSnapshot(selected)
+  const startPageIndex = parseOptionalPageIndex(selected?.pageIndex) ?? fallbackIndex
+  let endPageIndex = startPageIndex
+
+  for (let index = sectionIndex + 1; index < sections.length; index += 1) {
+    const nextPageIndex = parseOptionalPageIndex(sections[index]?.pageIndex)
+    if (nextPageIndex == null) {
+      continue
+    }
+    endPageIndex = Math.max(startPageIndex, nextPageIndex - 1)
+    break
+  }
+
+  if (endPageIndex < startPageIndex) {
+    endPageIndex = startPageIndex
+  }
+  if (currentPdf?.numPages) {
+    endPageIndex = Math.min(endPageIndex, Math.max(0, currentPdf.numPages - 1))
+  }
+
+  return {
+    sectionTitle: selectedSnapshot?.title || `Page ${startPageIndex + 1}`,
+    sectionKey: selectedSnapshot?.key || "",
+    sectionId: selectedSnapshot?.id || null,
+    startPageIndex,
+    endPageIndex
+  }
 }
 
 function getCurrentSectionRange(pageNumber, sectionsOutline) {
@@ -3718,82 +4543,54 @@ function getCurrentSectionRange(pageNumber, sectionsOutline) {
   if (sections.length === 0) {
     return {
       sectionTitle: `Page ${pageIndex + 1}`,
+      sectionKey: "",
+      sectionId: null,
       startPageIndex: pageIndex,
       endPageIndex: pageIndex
     }
   }
 
-  let selectedIndex = 0
+  const selectedIndex = getSectionIndexForPage(pageIndex, sections)
+  return getSectionRangeFromIndex(selectedIndex, sections, pageIndex)
+}
+
+function getSectionRangeForSectionKey(sectionKey, sectionsOutline, fallbackPageNumber = 1) {
+  const sections = Array.isArray(sectionsOutline) ? sectionsOutline : []
+  const key = sanitizeText(sectionKey)
+  const fallbackPageIndex = Math.max(0, Math.floor(Number(fallbackPageNumber) || 1) - 1)
+  if (!key || sections.length === 0) {
+    return getCurrentSectionRange(fallbackPageNumber, sections)
+  }
+
+  let selectedIndex = -1
   for (let index = 0; index < sections.length; index += 1) {
-    const sectionPageIndex = parseOptionalPageIndex(sections[index]?.pageIndex)
-    if (sectionPageIndex == null) {
-      continue
-    }
-    if (sectionPageIndex <= pageIndex) {
+    const section = sections[index]
+    if (getSectionKey(section) === key) {
       selectedIndex = index
-      continue
+      break
     }
-    break
   }
-
-  const selected = sections[selectedIndex] || null
-  const startPageIndex = parseOptionalPageIndex(selected?.pageIndex) ?? pageIndex
-  let endPageIndex = startPageIndex
-  for (let index = selectedIndex + 1; index < sections.length; index += 1) {
-    const nextPageIndex = parseOptionalPageIndex(sections[index]?.pageIndex)
-    if (nextPageIndex == null) {
-      continue
-    }
-    endPageIndex = Math.max(startPageIndex, nextPageIndex - 1)
-    break
+  if (selectedIndex < 0) {
+    return getCurrentSectionRange(fallbackPageNumber, sections)
   }
-  if (endPageIndex < startPageIndex) {
-    endPageIndex = startPageIndex
-  }
-  if (currentPdf?.numPages) {
-    endPageIndex = Math.min(endPageIndex, Math.max(0, currentPdf.numPages - 1))
-  }
-
-  return {
-    sectionTitle: getCurrentSectionTitle(pageIndex + 1, sections),
-    startPageIndex,
-    endPageIndex
-  }
+  return getSectionRangeFromIndex(selectedIndex, sections, fallbackPageIndex)
 }
 
-function resolveSectionForPage(pageIndex) {
-  const normalizedPageIndex = parseOptionalPageIndex(pageIndex)
-  if (normalizedPageIndex == null) {
-    return null
-  }
-  const sections = getReadingMapSections()
-  let latest = null
-  for (const section of sections) {
-    if (!Number.isFinite(section?.pageIndex)) {
-      continue
-    }
-    const sectionPageIndex = Math.max(0, Math.floor(Number(section.pageIndex)))
-    if (sectionPageIndex <= normalizedPageIndex) {
-      latest = section
-      continue
-    }
-    break
-  }
-  return latest
-}
-
-function resolveSectionTitle(pageIndex) {
+function resolveSectionTitle(pageIndex, options = {}) {
   const normalizedPageIndex = parseOptionalPageIndex(pageIndex)
   if (normalizedPageIndex == null) {
     return "Unknown section"
   }
-  return getCurrentSectionTitle(normalizedPageIndex + 1, getReadingMapSections())
+  const snapshot = resolveSectionSnapshotForPage(normalizedPageIndex, options)
+  if (snapshot?.title) {
+    return snapshot.title
+  }
+  return `Page ${normalizedPageIndex + 1}`
 }
 
-function resolveSectionId(pageIndex) {
-  const section = resolveSectionForPage(pageIndex)
-  const sectionId = sanitizeText(section?.id)
-  return sectionId || null
+function resolveSectionId(pageIndex, options = {}) {
+  const snapshot = resolveSectionSnapshotForPage(pageIndex, options)
+  return snapshot?.id || null
 }
 
 function clampNumber(value, min, max) {
@@ -3804,6 +4601,208 @@ function clampNumber(value, min, max) {
     return value
   }
   return Math.min(max, Math.max(min, value))
+}
+
+function syncSectionStatusForCurrentPage(options = {}) {
+  if (!currentPdf) {
+    return
+  }
+  const pageIndex = Math.max(0, (Number(currentPdf.pageNumber) || 1) - 1)
+  const snapshot = resolveSectionSnapshotForPage(pageIndex, {
+    preferCurrent: options?.preferCurrent !== false
+  })
+  if (snapshot) {
+    updateSectionStatus(snapshot.title, {
+      sectionId: snapshot.id,
+      sectionKey: snapshot.key,
+      pageIndex: snapshot.pageIndex
+    })
+    return
+  }
+  updateSectionStatus(`Page ${pageIndex + 1}`, {
+    sectionId: null,
+    sectionKey: "",
+    pageIndex
+  })
+}
+
+function detectPageColumnLayout(pageNode, pageSurface) {
+  if (!(pageNode instanceof HTMLElement) || !(pageSurface instanceof HTMLElement)) {
+    return { columnCount: 1, splitX: null, pageHeight: 1 }
+  }
+  const textLayer = pageNode.querySelector(".textLayer")
+  if (!(textLayer instanceof HTMLElement)) {
+    return { columnCount: 1, splitX: null, pageHeight: Math.max(pageSurface.clientHeight, 1) }
+  }
+  const surfaceRect = pageSurface.getBoundingClientRect()
+  const pageWidth = Math.max(surfaceRect.width, 1)
+  const pageHeight = Math.max(surfaceRect.height, 1)
+  const samples = []
+
+  const spans = Array.from(textLayer.querySelectorAll("span"))
+  for (const span of spans) {
+    if (!(span instanceof HTMLElement)) {
+      continue
+    }
+    const text = sanitizeText(span.textContent || "")
+    if (text.length < 2) {
+      continue
+    }
+    const rect = span.getBoundingClientRect()
+    if (!Number.isFinite(rect.width) || !Number.isFinite(rect.height) || rect.width < 6 || rect.height < 4) {
+      continue
+    }
+    const centerX = rect.left - surfaceRect.left + rect.width / 2
+    if (!Number.isFinite(centerX) || centerX < 0 || centerX > pageWidth) {
+      continue
+    }
+    samples.push(centerX)
+  }
+
+  if (samples.length < SECTION_MULTI_COLUMN_MIN_SAMPLES) {
+    return { columnCount: 1, splitX: null, pageHeight }
+  }
+
+  samples.sort((a, b) => a - b)
+  let bestGap = 0
+  let splitIndex = -1
+  for (let index = 1; index < samples.length; index += 1) {
+    const gap = samples[index] - samples[index - 1]
+    if (gap > bestGap) {
+      bestGap = gap
+      splitIndex = index
+    }
+  }
+  if (splitIndex <= 0) {
+    return { columnCount: 1, splitX: null, pageHeight }
+  }
+
+  const minGap = pageWidth * SECTION_MULTI_COLUMN_MIN_GAP_RATIO
+  if (bestGap < minGap) {
+    return { columnCount: 1, splitX: null, pageHeight }
+  }
+
+  const leftCount = splitIndex
+  const rightCount = samples.length - splitIndex
+  const minSideCount = Math.max(8, Math.floor(samples.length * 0.2))
+  if (leftCount < minSideCount || rightCount < minSideCount) {
+    return { columnCount: 1, splitX: null, pageHeight }
+  }
+
+  const splitX = (samples[splitIndex - 1] + samples[splitIndex]) / 2
+  return {
+    columnCount: 2,
+    splitX: clampNumber(splitX, 0, pageWidth),
+    pageHeight
+  }
+}
+
+function getColumnIndexForX(xPosition, columnLayout) {
+  const normalizedX = Number(xPosition)
+  if (columnLayout?.columnCount !== 2 || !Number.isFinite(columnLayout?.splitX) || !Number.isFinite(normalizedX)) {
+    return 0
+  }
+  return normalizedX >= columnLayout.splitX ? 1 : 0
+}
+
+function getSectionReadingOrderPosition(yPosition, columnIndex, columnLayout) {
+  const pageHeight = Math.max(Number(columnLayout?.pageHeight) || 1, 1)
+  const clampedY = clampNumber(Number(yPosition), 0, pageHeight)
+  if (columnLayout?.columnCount === 2 && columnIndex > 0) {
+    return pageHeight + clampedY
+  }
+  return clampedY
+}
+
+function resolveSectionSnapshotFromClickPoint(pageNode, pageIndex, clickX, clickY) {
+  const normalizedPageIndex = parseOptionalPageIndex(pageIndex)
+  if (normalizedPageIndex == null || !(pageNode instanceof HTMLElement)) {
+    return null
+  }
+
+  const sections = getReadingMapSections()
+  const fallback = toSectionSnapshot(resolveSectionForPage(normalizedPageIndex, sections))
+  const samePageSections = sections
+    .map((section) => toSectionSnapshot(section))
+    .filter((snapshot) => snapshot && snapshot.pageIndex === normalizedPageIndex)
+  if (samePageSections.length === 0) {
+    return fallback
+  }
+
+  const pageSurface = pageNode.querySelector(".pdfPageSurface")
+  if (!(pageSurface instanceof HTMLElement)) {
+    return fallback
+  }
+  const columnLayout = detectPageColumnLayout(pageNode, pageSurface)
+  const clickColumn = getColumnIndexForX(clickX, columnLayout)
+  const clickOrder = getSectionReadingOrderPosition(clickY, clickColumn, columnLayout)
+
+  let bestSnapshot = null
+  let bestOrder = Number.NEGATIVE_INFINITY
+  for (const snapshot of samePageSections) {
+    const anchor = findSectionAnchorInPage(pageNode, snapshot.title)
+    if (!anchor) {
+      continue
+    }
+    const anchorColumn = getColumnIndexForX(anchor.left, columnLayout)
+    const anchorOrder = getSectionReadingOrderPosition(anchor.top, anchorColumn, columnLayout)
+    if (anchorOrder > clickOrder + SECTION_CLICK_ORDER_TOLERANCE) {
+      continue
+    }
+    if (anchorOrder > bestOrder) {
+      bestSnapshot = snapshot
+      bestOrder = anchorOrder
+    }
+  }
+
+  return bestSnapshot || fallback
+}
+
+function updateCurrentSectionFromPdfClick(event) {
+  if (!currentPdf) {
+    return
+  }
+  const target = event.target instanceof Element ? event.target : null
+  if (!(target instanceof Element)) {
+    return
+  }
+  const textLayer = target.closest(".textLayer")
+  if (!(textLayer instanceof HTMLElement)) {
+    return
+  }
+  const pageNode = textLayer.closest(".pdfPageShell")
+  if (!(pageNode instanceof HTMLElement)) {
+    return
+  }
+  const pageIndex = parseOptionalPageIndex(pageNode.dataset.pageIndex)
+  if (pageIndex == null) {
+    return
+  }
+  const pageSurface = pageNode.querySelector(".pdfPageSurface")
+  if (!(pageSurface instanceof HTMLElement)) {
+    return
+  }
+
+  const surfaceRect = pageSurface.getBoundingClientRect()
+  const clickX = clampNumber(event.clientX - surfaceRect.left, 0, Math.max(surfaceRect.width, 1))
+  const clickY = clampNumber(event.clientY - surfaceRect.top, 0, Math.max(surfaceRect.height, 1))
+  const snapshot =
+    resolveSectionSnapshotFromClickPoint(pageNode, pageIndex, clickX, clickY) ||
+    resolveSectionSnapshotForPage(pageIndex, { preferCurrent: false })
+  if (snapshot) {
+    updateSectionStatus(snapshot.title, {
+      sectionId: snapshot.id,
+      sectionKey: snapshot.key,
+      pageIndex: snapshot.pageIndex
+    })
+    return
+  }
+
+  updateSectionStatus(`Page ${pageIndex + 1}`, {
+    sectionId: null,
+    sectionKey: "",
+    pageIndex
+  })
 }
 
 function ensureSectionRailStructure() {
@@ -4095,10 +5094,12 @@ function buildGrounding(payload) {
   const resolvedPageIndex = Number.isFinite(payload?.pageIndex)
     ? Math.max(0, Number(payload.pageIndex))
     : 0
+  const explicitSectionId = sanitizeText(payload?.sectionId)
+  const explicitSectionTitle = clampText(payload?.sectionTitle, 180)
   return {
     pageIndex: resolvedPageIndex,
-    sectionId: resolveSectionId(resolvedPageIndex),
-    sectionTitle: resolveSectionTitle(resolvedPageIndex),
+    sectionId: explicitSectionId || resolveSectionId(resolvedPageIndex, { preferCurrent: true }),
+    sectionTitle: explicitSectionTitle || resolveSectionTitle(resolvedPageIndex, { preferCurrent: true }),
     quote: buildGroundingQuote(payload?.selectedText, payload?.contextWindow),
     textRange: null
   }
@@ -4653,8 +5654,8 @@ function resolveGroundingFromDocument({
 
   return {
     pageIndex: primary.pageIndex,
-    sectionId: resolveSectionId(primary.pageIndex),
-    sectionTitle: resolveSectionTitle(primary.pageIndex),
+    sectionId: resolveSectionId(primary.pageIndex, { preferCurrent: true }),
+    sectionTitle: resolveSectionTitle(primary.pageIndex, { preferCurrent: true }),
     quote: makeSnippetAroundAnchor(primary.text, primary.bestAnchor, RETRIEVAL_PRIMARY_QUOTE_MAX),
     citationPages,
     citationQuotes
@@ -4977,8 +5978,8 @@ async function buildCardFromSelection(payload) {
   const resolvedGroundingPageIndex = Number.isFinite(retrievedGrounding.pageIndex)
     ? Math.max(0, Number(retrievedGrounding.pageIndex))
     : grounding.pageIndex
-  const resolvedSectionTitle = resolveSectionTitle(resolvedGroundingPageIndex)
-  const resolvedSectionId = resolveSectionId(resolvedGroundingPageIndex)
+  const resolvedSectionTitle = resolveSectionTitle(resolvedGroundingPageIndex, { preferCurrent: true })
+  const resolvedSectionId = resolveSectionId(resolvedGroundingPageIndex, { preferCurrent: true })
 
   return normalizeCard({
     id: makeId("card"),
@@ -5789,6 +6790,7 @@ function ensureSelectionSystemInitialized() {
 
 function applySettingsToUi(settings) {
   currentSettings = settings;
+  applyThemeToUi(settings.theme)
 
   readingModeFlowRadio.checked = settings.defaultReadingMode === "flow";
   readingModeStructureRadio.checked = settings.defaultReadingMode === "structure";
@@ -5827,6 +6829,9 @@ function applySettingsToUi(settings) {
     }
     void runStructurePrewarmForCurrentDocument(renderState.loadToken)
   }
+  if (currentPdf && renderState.pageNodes.length > 0) {
+    renderPdfIntentOverlays()
+  }
   void syncWholePdfStatusFromCache(sidebarUiState.docId, settings);
 }
 
@@ -5848,6 +6853,7 @@ async function loadSettingsState() {
   logger.info("Settings loaded", {
     llmMode: settings.llmMode,
     hasOpenAIKey: Boolean(settings.openaiApiKey),
+    theme: settings.theme,
     contextScope: settings.contextScope,
     wholePdfUpload: settings.wholePdfUpload,
     promptCacheRetention: settings.promptCacheRetention,
@@ -6148,7 +7154,7 @@ function setCurrentPage(pageNumber) {
   if (currentPdf.pageNumber !== clamped) {
     currentPdf.pageNumber = clamped;
   }
-  updateSectionStatus(getCurrentSectionTitle(clamped, getReadingMapSections()))
+  syncSectionStatusForCurrentPage({ preferCurrent: true })
   updatePdfControls();
 }
 
@@ -6477,7 +7483,7 @@ async function renderAllPages(targetPageNumber, loadToken) {
   if (!restoredJump) {
     scrollToPage(targetPageNumber, "instant");
   }
-  setStatus(getLoadedStatusText(), { title: getLoadedStatusTooltipText() });
+  syncSectionStatusForCurrentPage({ preferCurrent: true })
   updatePdfControls();
   renderPdfIntentOverlays()
   scheduleSectionRailRender()
@@ -6578,6 +7584,9 @@ async function loadPdfSource(source, documentParams) {
     renderedScale: DEFAULT_SCALE,
     pageNumber: 1,
     currentSectionTitle: "",
+    currentSectionId: null,
+    currentSectionKey: "",
+    currentSectionPageIndex: null,
     retrievalBlockCache: null,
     readingMap: { sections: [] },
     pdfDocRef: null
@@ -6780,6 +7789,17 @@ function handleWindowResize() {
   });
 }
 
+async function handleThemeToggle() {
+  const nextTheme = isDarkThemeEnabled() ? "light" : "dark"
+  const settings = await setSettings({ theme: nextTheme })
+  currentSettings = settings
+  applyThemeToUi(settings.theme)
+  if (sidebarUiState.activeTab && isTabVisible(sidebarUiState.activeTab)) {
+    renderPanel()
+  }
+  logger.info("Theme changed", { theme: settings.theme })
+}
+
 async function setReadingModeSetting(nextMode) {
   const normalizedMode = nextMode === "structure" ? "structure" : "flow"
   if (currentSettings?.defaultReadingMode === normalizedMode) {
@@ -6810,19 +7830,12 @@ async function handleSummarizeCurrentSectionAction() {
     return
   }
   const sections = getReadingMapSections()
-  const range = getCurrentSectionRange(currentPdf.pageNumber || 1, sections)
+  const activeSectionKey = sanitizeText(currentPdf.currentSectionKey)
+  const range = activeSectionKey
+    ? getSectionRangeForSectionKey(activeSectionKey, sections, currentPdf.pageNumber || 1)
+    : getCurrentSectionRange(currentPdf.pageNumber || 1, sections)
   const pageStart = Math.max(0, range.startPageIndex)
-  const pageEnd = Math.max(pageStart, range.endPageIndex)
-  const maxPages = Math.min(pageEnd - pageStart + 1, 2)
-  const parts = []
-  for (let offset = 0; offset < maxPages; offset += 1) {
-    const pageText = await getPageText(renderState.pdfDoc, pageStart + offset)
-    const text = sanitizeText(pageText)
-    if (text) {
-      parts.push(text)
-    }
-  }
-  const sectionSnippet = truncateText(parts.join(" "), 1400)
+  const sectionSnippet = await getSectionSnippetFromRange(range, { maxPages: 2, maxChars: 1400 })
   if (!sectionSnippet) {
     setStatus("No section text available yet.")
     return
@@ -6830,6 +7843,8 @@ async function handleSummarizeCurrentSectionAction() {
   const sectionTitle = clampText(range.sectionTitle, 160) || `Page ${pageStart + 1}`
   const grounding = buildGrounding({
     pageIndex: pageStart,
+    sectionId: range.sectionId,
+    sectionTitle,
     selectedText: sectionTitle,
     contextWindow: sectionSnippet
   })
@@ -6870,7 +7885,8 @@ async function handleSummarizeCurrentSectionAction() {
   sidebarUiState.cards = [...sidebarUiState.cards, finalCard]
   pendingCardAutoScrollId = finalCard.id
   setActiveTab("explain")
-  setStatus("Section summary added")
+  showPanelToast("Section summary added")
+  syncSectionStatusForCurrentPage({ preferCurrent: true })
 }
 
 async function handleKeyTermsSoFarAction() {
@@ -7015,6 +8031,7 @@ pdfRoot.addEventListener("click", (event) => {
 
   const target = event.target instanceof Element ? event.target.closest("button[data-pdf-intent-action]") : null
   if (!(target instanceof HTMLButtonElement)) {
+    updateCurrentSectionFromPdfClick(event)
     return
   }
   void handlePdfIntentOverlayClick(target)
@@ -7109,6 +8126,9 @@ highlighterToggleBtn?.addEventListener("click", () => {
   if (!didHighlight) {
     setStatus("Select text, then click Highlighter.")
   }
+});
+themeToggleBtn?.addEventListener("click", () => {
+  void handleThemeToggle()
 });
 
 pdfRoot.addEventListener("scroll", handlePdfScroll, { passive: true });

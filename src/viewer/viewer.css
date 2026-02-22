@@ -1,4 +1,5 @@
 :root {
+  color-scheme: light;
   --bg: #f4f4f1;
   --panel: #fcfcfa;
   --border: #dfdfd8;
@@ -13,6 +14,20 @@
   --sidebar-collapsed-width: 56px;
   --sidebar-min-width: 240px;
   --sidebar-max-width: 640px;
+}
+
+body[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #212121;
+  --panel: #2b2b2b;
+  --border: #3d3d3d;
+  --text: #ececec;
+  --muted: #ababab;
+  --toolbarButtonBg: #303030;
+  --toolbarButtonActive: #3a3a3a;
+  --scrollTrack: #2a2a2a;
+  --scrollThumb: #5c5c5c;
+  --scrollThumbHover: #737373;
 }
 
 * {
@@ -540,6 +555,16 @@ html {
   outline-offset: 1px;
 }
 
+.pdfIntentOverlayDigest {
+  width: 18px;
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  background: rgba(237, 248, 229, 0.9);
+  color: #35543d;
+}
+
 .pdfIntentBubble {
   position: absolute;
   z-index: 6;
@@ -552,6 +577,42 @@ html {
   line-height: 1.35;
   color: #33332e;
   box-shadow: 0 4px 12px rgba(22, 20, 16, 0.12);
+}
+
+.pdfIntentDigestBubble {
+  max-width: 260px;
+  padding: 7px 9px;
+}
+
+.pdfIntentDigestLabel {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #6e6b5e;
+  margin-bottom: 4px;
+}
+
+.pdfIntentDigestSummary {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.pdfIntentDigestKeywords {
+  margin-top: 7px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.pdfIntentDigestKeyword {
+  border-radius: 999px;
+  border: 1px solid #d5dec7;
+  background: #f4f8ec;
+  color: #425242;
+  font-size: 10px;
+  line-height: 1.2;
+  padding: 4px 6px;
 }
 
 .pdfMessage {
@@ -1866,6 +1927,241 @@ body[data-mode="structure"] .walkthroughHeader {
 .pdfRoot::-webkit-scrollbar-thumb:hover,
 .panel::-webkit-scrollbar-thumb:hover {
   background: var(--scrollThumbHover);
+}
+
+body[data-theme="dark"] .modeToggle {
+  background: #303030;
+}
+
+body[data-theme="dark"] .modeToggleButton[aria-pressed="true"] {
+  background: #3c3c3c !important;
+}
+
+body[data-theme="dark"] #fitWidth[aria-pressed="true"] {
+  border-color: #555;
+}
+
+body[data-theme="dark"] .contextScopeStatus {
+  background: #303030;
+}
+
+body[data-theme="dark"] .diagnosticsMenu {
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
+}
+
+body[data-theme="dark"] #wholePdfSettings,
+body[data-theme="dark"] .diagnosticsMenu select,
+body[data-theme="dark"] .diagnosticsMenu .apiKeyInput {
+  background: #262626;
+  border-color: #414141;
+  color: var(--text);
+}
+
+body[data-theme="dark"] .sectionRailMarker {
+  background: rgba(230, 230, 230, 0.4);
+}
+
+body[data-theme="dark"] .sectionRailMarker:hover {
+  background: rgba(245, 245, 245, 0.68);
+}
+
+body[data-theme="dark"] .sectionRailMarker.isSelected {
+  background: rgba(255, 255, 255, 0.95);
+}
+
+body[data-theme="dark"] .sectionRailLabels::before {
+  background: rgba(28, 28, 28, 0.42);
+}
+
+body[data-theme="dark"] .sectionRailLabel {
+  color: rgba(238, 238, 238, calc(0.45 + var(--proximity, 0) * 0.5));
+}
+
+body[data-theme="dark"] .sectionRailLabel.isSelected,
+body[data-theme="dark"] .sectionRailLabel:hover {
+  color: #fff;
+  background: rgba(64, 64, 64, 0.65);
+}
+
+body[data-theme="dark"] .reopenSidebar,
+body[data-theme="dark"] .tab.active {
+  background: #3a3a3a;
+  border-color: #4a4a4a;
+}
+
+body[data-theme="dark"] .tab.isProminent {
+  border-color: #496056;
+  background: #324238;
+  box-shadow: inset 0 0 0 1px rgba(133, 171, 150, 0.16);
+}
+
+body[data-theme="dark"] .panelToast {
+  border-color: #4b6654;
+  background: #2f3f35;
+  color: #d8efdd;
+}
+
+body[data-theme="dark"] .orientationHeader,
+body[data-theme="dark"] .orientationSection,
+body[data-theme="dark"] .orientationLoading,
+body[data-theme="dark"] .orientationLeadItem,
+body[data-theme="dark"] .orientationBullets li,
+body[data-theme="dark"] .orientationMapRow,
+body[data-theme="dark"] .walkthroughConfirm,
+body[data-theme="dark"] .walkthroughItem,
+body[data-theme="dark"] .walkthroughJump,
+body[data-theme="dark"] .walkthroughPreview,
+body[data-theme="dark"] .sidebarCard,
+body[data-theme="dark"] .cardGrounding,
+body[data-theme="dark"] .cardGroundingSource,
+body[data-theme="dark"] .cardGroundingMore,
+body[data-theme="dark"] .glossaryTerm,
+body[data-theme="dark"] .glossaryQuote,
+body[data-theme="dark"] .pdfMessage,
+body[data-theme="dark"] .selectionPopover,
+body[data-theme="dark"] .selectionPopoverButton,
+body[data-theme="dark"] .pdfIntentOverlay,
+body[data-theme="dark"] .pdfIntentBubble,
+body[data-theme="dark"] .cardIntentBubble,
+body[data-theme="dark"] .orientationMapIntentBubble {
+  background: #2f2f2f;
+  border-color: #444;
+  color: var(--text);
+  box-shadow: none;
+}
+
+body[data-theme="dark"] .selectionPopoverButton:hover,
+body[data-theme="dark"] .walkthroughAction:hover,
+body[data-theme="dark"] .orientationAction:hover,
+body[data-theme="dark"] .orientationChip:hover,
+body[data-theme="dark"] .orientationToggleMap:hover,
+body[data-theme="dark"] .orientationIconButton:hover,
+body[data-theme="dark"] .orientationMapActionButton:hover,
+body[data-theme="dark"] .cardActionButton:hover {
+  background: #3b3b3b;
+}
+
+body[data-theme="dark"] .orientationAction,
+body[data-theme="dark"] .orientationChip,
+body[data-theme="dark"] .orientationToggleMap,
+body[data-theme="dark"] .orientationIconButton,
+body[data-theme="dark"] .orientationMapActionButton,
+body[data-theme="dark"] .walkthroughAction,
+body[data-theme="dark"] .cardActionButton {
+  background: #313131;
+  border-color: #484848;
+  color: var(--text);
+}
+
+body[data-theme="dark"] .pdfIntentOverlayDigest {
+  background: #36443c;
+  border-color: #5a6f63;
+  color: #d3ead6;
+}
+
+body[data-theme="dark"] .pdfIntentDigestLabel {
+  color: #b2b8b2;
+}
+
+body[data-theme="dark"] .pdfIntentDigestKeyword {
+  background: #3a443c;
+  border-color: #56675a;
+  color: #d7e4d9;
+}
+
+body[data-theme="dark"] .orientationMiniAction,
+body[data-theme="dark"] .orientationMapSubtleAction {
+  color: #c4c4c4;
+}
+
+body[data-theme="dark"] .orientationMiniAction:hover,
+body[data-theme="dark"] .orientationMapSubtleAction:hover {
+  color: #f2f2f2;
+}
+
+body[data-theme="dark"] .orientationSectionTitle,
+body[data-theme="dark"] .orientationLeadLabel,
+body[data-theme="dark"] .cardGroundingSourceLabel,
+body[data-theme="dark"] .walkthroughSectionNumber,
+body[data-theme="dark"] .glossaryMeta,
+body[data-theme="dark"] .orientationMutedText,
+body[data-theme="dark"] .orientationMapExpand,
+body[data-theme="dark"] .orientationMapPageButton {
+  color: #b6b6b6;
+}
+
+body[data-theme="dark"] .orientationParagraph,
+body[data-theme="dark"] .orientationLeadText,
+body[data-theme="dark"] .orientationBullets,
+body[data-theme="dark"] .orientationMapTitleButton,
+body[data-theme="dark"] .walkthroughSectionTitle,
+body[data-theme="dark"] .walkthroughPreview,
+body[data-theme="dark"] .cardGroundingSourceText {
+  color: #e7e7e7;
+}
+
+body[data-theme="dark"] .orientationParagraph strong,
+body[data-theme="dark"] .orientationLeadText strong,
+body[data-theme="dark"] .orientationBullets strong,
+body[data-theme="dark"] .walkthroughPreview strong {
+  color: #f6f6f6;
+}
+
+body[data-theme="dark"] .orientationParagraph em,
+body[data-theme="dark"] .orientationLeadText em,
+body[data-theme="dark"] .orientationBullets em {
+  color: #e0e0e0;
+}
+
+body[data-theme="dark"] .orientationParagraph u,
+body[data-theme="dark"] .orientationLeadText u,
+body[data-theme="dark"] .orientationBullets u {
+  text-decoration-color: #789582;
+}
+
+body[data-theme="dark"] .orientationBullets li::before {
+  border-color: #5a6b5f;
+  background: #37443c;
+  color: #d4e9da;
+}
+
+body[data-theme="dark"] .orientationTermChip {
+  border-color: #4a5d50;
+  background: linear-gradient(180deg, #333f37 0%, #2f3a33 100%);
+  color: #d3e8da;
+}
+
+body[data-theme="dark"] .orientationMapItem.isSubsection {
+  border-left-color: #515151;
+}
+
+body[data-theme="dark"] .orientationError {
+  border-color: #714646;
+  background: #412b2b;
+  color: #ffd9d9;
+}
+
+body[data-theme="dark"] .walkthroughList::before {
+  background: linear-gradient(180deg, #4f6a57 0%, #45604f 100%);
+}
+
+body[data-theme="dark"] .walkthroughItem::before {
+  background: #6d9277;
+  border-color: #354c3d;
+}
+
+body[data-theme="dark"] .orientationSkeletonLine {
+  background: linear-gradient(90deg, #3a3a3a 0%, #474747 50%, #3a3a3a 100%);
+}
+
+body[data-theme="dark"] .cardActionButton.danger {
+  color: #ffadad;
+}
+
+body[data-theme="dark"] .sidebarResizeHandle:hover::before,
+body[data-theme="dark"].resizingSidebar .sidebarResizeHandle::before,
+body[data-theme="dark"] .sidebarResizeHandle:focus-visible::before {
+  background: #5d5d5d;
 }
 
 @media (max-width: 960px) {

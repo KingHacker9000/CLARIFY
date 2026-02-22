@@ -8,14 +8,26 @@ const CAPTURE_DEBOUNCE_MS = 50;
 const POPOVER_OFFSET = 8;
 const POPOVER_MARGIN = 8;
 
-const HIGHLIGHT_ICON_URL = new URL("../../assets/icons/highlighter.png", import.meta.url).toString();
+const HIGHLIGHT_ICON_LIGHT_THEME_URL = new URL("../../assets/icons/highlighter.png", import.meta.url).toString();
+const HIGHLIGHT_ICON_DARK_THEME_URL = new URL(
+  "../../assets/icons/highlighter-dark.png",
+  import.meta.url
+).toString();
 
 const ACTIONS = [
-  { type: "highlight", label: "Highlight", iconUrl: HIGHLIGHT_ICON_URL },
+  { type: "highlight", label: "Highlight", iconName: "highlight" },
   { type: "define", label: "Define", icon: "\uD83D\uDCD6" },
   { type: "explain", label: "Explain", icon: "\uD83D\uDCA1" },
   { type: "translate", label: "Translate (Figures)", icon: "\uD83D\uDCCA" }
 ];
+
+function resolveActionIconUrl(action) {
+  if (action?.iconName !== "highlight") {
+    return null;
+  }
+  const isDarkMode = document.body?.dataset?.theme === "dark";
+  return isDarkMode ? HIGHLIGHT_ICON_DARK_THEME_URL : HIGHLIGHT_ICON_LIGHT_THEME_URL;
+}
 
 function normalizeSelectionText(value) {
   return value.replace(/\s+/g, " ").trim();
@@ -361,10 +373,11 @@ export function initSelectionSystem({ pdfRoot, onAction, isEnabled }) {
       button.type = "button";
       button.className = "selectionPopoverButton";
       button.dataset.action = action.type;
-      if (action.iconUrl) {
+      const iconUrl = resolveActionIconUrl(action);
+      if (iconUrl) {
         const icon = document.createElement("img");
         icon.className = "selectionPopoverIconImage";
-        icon.src = action.iconUrl;
+        icon.src = iconUrl;
         icon.alt = "";
         button.append(icon);
       } else {

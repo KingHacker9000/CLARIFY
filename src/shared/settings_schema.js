@@ -1,6 +1,7 @@
 export const DEFAULT_SETTINGS = Object.freeze({
   llmMode: "auto",
   openaiApiKey: null,
+  theme: "light",
   contextScope: "selection",
   wholePdfUpload: "session",
   promptCacheRetention: "default",
@@ -11,6 +12,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
 });
 
 const VALID_LLM_MODES = new Set(["auto", "mock", "openai"]);
+const VALID_THEMES = new Set(["light", "dark"]);
 const VALID_CONTEXT_SCOPES = new Set(["selection", "page", "whole_pdf"]);
 const VALID_WHOLE_PDF_UPLOAD = new Set(["off", "session", "remember"]);
 const VALID_PROMPT_CACHE_RETENTION = new Set(["default", "24h"]);
@@ -42,6 +44,7 @@ export function normalizeSettings(obj) {
   const source = obj && typeof obj === "object" ? obj : {};
 
   const llmMode = VALID_LLM_MODES.has(source.llmMode) ? source.llmMode : DEFAULT_SETTINGS.llmMode;
+  const theme = VALID_THEMES.has(source.theme) ? source.theme : DEFAULT_SETTINGS.theme;
   const contextScope = VALID_CONTEXT_SCOPES.has(source.contextScope)
     ? source.contextScope
     : DEFAULT_SETTINGS.contextScope;
@@ -70,6 +73,7 @@ export function normalizeSettings(obj) {
   return {
     llmMode,
     openaiApiKey: normalizeApiKey(source.openaiApiKey),
+    theme,
     contextScope,
     wholePdfUpload,
     promptCacheRetention,
