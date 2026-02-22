@@ -1,0 +1,12 @@
+﻿# Normalize text files to LF across platforms.
+* text=auto eol=lf
+
+# Common binary assets.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.crx binary

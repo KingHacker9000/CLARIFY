@@ -1,279 +1,151 @@
-# CLARIFY — In-Context Research Reading Assistant (Chrome Extension Prototype)
+﻿# CLARIFY
 
-CLARIFY is a Manifest V3 Chrome extension that opens PDF research papers in a custom viewer and provides an in-context reading assistant in a right-side panel.
+In-context PDF reading assistant for Chrome (Manifest V3).
 
-This prototype is based on formative research findings from undergraduate students reading academic papers. The core goal is to reduce reading friction without disrupting flow.
+CLARIFY opens PDFs in a custom viewer and lets you define terms, explain passages, translate figure captions, and build reading structure without leaving the document.
 
----
+## Why CLARIFY
 
-# 1. Core Problem This Project Solves
-
-From formative probes and course documentation, the key pain points when students read research papers are:
+Reading research papers often breaks flow because you need to jump across tabs for definitions and explanations. CLARIFY keeps those actions in the same PDF view and stores helpful context (cards, glossary, walkthrough) per document.
 
-1. Unfamiliar terms and acronyms introduced early without explanation.
-2. Context-switching to ChatGPT/Google breaks reading flow.
-3. AI explanations are often too long or not grounded in the paper.
-4. Figures and tables are hard to interpret (numbers → meaning → claim mapping).
-5. Students want orientation before reading (what is this paper about? what matters?).
-6. Trust is fragile — readers want grounding (quotes + section references).
-
-CLARIFY directly addresses these issues inside the PDF reading environment.
-
----
-
-# 2. Design Principles (Non-Negotiable)
+## What It Does Today
 
-These principles must guide all implementation decisions:
+- Opens local and remote PDFs in a custom PDF.js viewer.
+- Shows selection popover actions: Highlight, Define, Explain, Translate (Figures).
+- Generates orientation summaries and section-level reading guidance.
+- Maintains per-document:
+  - Explanation/definition cards
+  - Glossary entries
+  - Walkthrough notes
+  - Orientation cache and section intents
+- Supports light/dark theme, flow/structure reading modes, and diagnostics.
+- Supports `mock` and `OpenAI` LLM providers (with fallback handling).
 
-## 2.1 Reading Flow First
-- Never block the PDF with large modals.
-- Default explanations must be short (<= ~35 words).
-- Progressive disclosure for deeper explanations.
+## Quick Start
 
-## 2.2 In-Context Assistance
-- Explanations are triggered from text selection.
-- Always include grounding (page number + snippet quote).
-- Provide “Jump to source” functionality.
+### 1. Load the extension
 
-## 2.3 Minimal UI
-- No heavy app header.
-- No branding bar at the top.
-- Viewer should feel like a native PDF reader with a right utility panel.
-- Sidebar uses compact icon tabs.
-
-## 2.4 Trust Through Grounding
-Every explanation card must include:
-- Page number
-- Section header (best effort)
-- Direct quote snippet from PDF
-- Jump-to-source action
-
-## 2.5 Operate on Selection + Small Context
-- Never upload entire PDFs by default.
-- Only operate on selected text and small surrounding windows.
-- Store minimal persistent data.
-
----
-
-# 3. Feature Set (Current + Roadmap)
-
-## 3.1 Viewer
-- Opens local PDFs
-- Opens remote PDF URLs
-- Supports PDFs from current tab when possible
-- Text layer enabled for selection
-- Basic controls: zoom, page navigation, fit width
-
-## 3.2 Sidebar Tabs
-Icons only (minimal):
-
-- 📘 Orientation
-- 💡 Explain
-- 🔖 Glossary
-- 📊 Figures/Tables
-- 🧩 Walkthrough
-
-## 3.3 Core Flows
-
-### Flow 1 — Orientation
-Before reading:
-- 2–3 sentence purpose summary
-- Main contribution
-- “What to focus on”
-- Key terms preview
-- Reading map (sections + 1-line intent)
-
-Collapsible into a small chip.
-
-### Flow 2 — Define / Explain
-Triggered via:
-- Text selection + popover
-- Keyboard shortcuts
-
-Default structure:
-1. One-line explanation
-2. Grounding block
-3. Expandable:
-   - ELI5
-   - Step-by-step
-   - “How this paper uses it”
-
-### Flow 3 — Figure/Table Translation
-Triggered via caption selection.
-
-Structure:
-- What it shows
-- Key takeaway
-- How it supports the claim
-- What to look at
-- Grounding (caption + nearby paragraph)
-
-### Flow 4 — Glossary
-- Save terms
-- One-line definitions
-- Jump to source
-- Persistent in chrome.storage.local
-
-### Flow 5 — Walkthrough
-- Section-by-section 1-line summaries
-- Editable
-- Persistent
-
----
-
-# 4. Architecture Overview
-
-This is a Manifest V3 extension with no build step.
-
-## 4.1 Structure
-
-clarify-extension/
-- manifest.json
-- README.md
-- src/
-  - background/
-    - service_worker.js
-  - popup/
-    - popup.html
-    - popup.js
-    - popup.css
-  - viewer/
-    - viewer.html
-    - viewer.js
-    - viewer.css
-  - shared/
-    - storage.js
-    - diagnostics.js
-    - llm/ (later)
-- assets/icons/
-
-## 4.2 Components
-
-### Service Worker
-- Opens viewer tab
-- Handles open-from-current-tab logic
-- Logs via diagnostics layer
-
-### Popup
-- Minimal launcher
-- No heavy UI
-
-### Viewer
-- PDF.js integration
-- Sidebar UI
-- Card system
-- Selection detection
-- Keyboard shortcuts
-
-### Shared Modules
-- storage.js — wrapper around chrome.storage.local
-- diagnostics.js — scoped logger
-- llm/ — mock first, OpenAI-ready later
-
----
-
-# 5. Data Storage Rules
-
-Use chrome.storage.local only.
-
-Persist:
-- Glossary entries
-- Walkthrough notes
-- Card history (optional)
-- Diagnostics.verbose flag
-- API key (if added later)
-
-Never persist:
-- Full PDF text
-- Full document contents
-- Large context blobs
-
----
-
-# 6. LLM Policy
-
-Default: Mock LLM (deterministic placeholder)
-
-When API key is set:
-- Use OpenAI module
-- Only send:
-  - Selected text
-  - Small surrounding context window
-  - Metadata (page, section)
-
-All LLM responses must follow structured format:
-
-1. One-line explanation
-2. Optional expansions:
-   - ELI5
-   - Step-by-step
-   - Paper usage
-3. Grounding block populated from PDF snippet
-
----
-
-# 7. Debugging & Diagnostics
-
-## 7.1 Loading Extension
-1. Go to chrome://extensions
-2. Enable Developer Mode
-3. Click Load Unpacked
-4. Select project root folder
-
-## 7.2 Reload After Changes
-- Click refresh icon in chrome://extensions
-- Refresh viewer tab
-
-## 7.3 Service Worker Logs
-chrome://extensions → Inspect Service Worker
-
-## 7.4 Viewer Logs
-Open DevTools in viewer tab (F12)
-
-## 7.5 Diagnostics Toggle
-Viewer toolbar includes:
-- Verbose logging toggle
-- Copy debug info (JSON)
-
-No PDF content should be logged.
-
----
-
-# 8. Constraints for Codex
-
-Codex must not:
-- Add heavy UI frameworks
-- Add authentication
-- Upload entire PDFs
-- Convert this into a chat application
-
-Codex must:
-- Keep UI minimal
-- Keep logic modular
-- Avoid breaking MV3 compatibility
-- Stop when prompt scope is complete
-
----
-
-# 9. Target User
-
-Undergraduate student reading research papers who:
-- Gets stuck on unfamiliar terminology
-- Wants quick clarification without leaving the PDF
-- Values trust and grounding
-- Sometimes wants deeper explanation
-- Wants structure before diving in
-
----
-
-# 10. Long-Term Vision
-
-CLARIFY is not a chatbot.
-
-It is a structured reading companion that:
-- Preserves cognitive flow
-- Provides progressive explanation
-- Grounds all assistance in the source document
-- Helps build durable mental models of research papers
-
-All implementation decisions should support this direction.
+1. Open `chrome://extensions`.
+2. Enable **Developer mode**.
+3. Click **Load unpacked**.
+4. Select this repository root (the folder containing `manifest.json`).
+
+### 2. Open CLARIFY viewer
+
+Use any of these paths:
+
+- Extension popup -> **Open CLARIFY Viewer**
+- Extension popup -> **Open current tab (if PDF)**
+- Right-click a PDF link -> **Open PDF in CLARIFY**
+- Enable **Auto-open PDF links in CLARIFY** in viewer settings
+
+### 3. Load a PDF
+
+- Click the folder/open icon in the viewer toolbar to open a local PDF, or
+- Open from a PDF URL via popup/context menu.
+
+## How To Use
+
+### Selection actions
+
+1. Select text inside the PDF.
+2. Use the popover action:
+   - `Highlight`
+   - `Define`
+   - `Explain`
+   - `Translate (Figures)`
+
+### Keyboard shortcuts
+
+| Action | Windows/Linux | macOS |
+| --- | --- | --- |
+| Highlight selection | `Ctrl+Shift+H` | `Cmd+Shift+H` |
+| Define selection | `Ctrl+Shift+D` | `Cmd+Shift+D` |
+| Explain selection | `Ctrl+Shift+E` | `Cmd+Shift+E` |
+| Translate figure/caption selection | `Ctrl+Shift+T` | `Cmd+Shift+T` |
+| Dismiss selection UI | `Esc` | `Esc` |
+
+### Sidebar tabs
+
+- `Orientation`: Purpose, contribution, focus bullets, key terms, reading map.
+- `Explain`: Definition/explanation cards grounded to page/section snippets.
+- `Glossary`: Saved terms with one-line definitions and source context.
+- `Figures`: Figure/table translation cards.
+- `Walkthrough`: Section-by-section one-liners for guided reading.
+
+## Settings, LLM Modes, and Privacy
+
+Open the 3-dot menu in the viewer toolbar to access settings.
+
+### LLM modes
+
+- `auto` (default): Uses OpenAI only when an API key is present; otherwise uses mock.
+- `mock`: Deterministic local mock responses.
+- `openai`: Uses OpenAI directly; requires API key.
+
+### Context scope
+
+- `selection`: Use selected text + nearby context.
+- `page`: Use page context.
+- `whole_pdf`: Uses uploaded PDF context (requires OpenAI key + upload enabled).
+
+### Privacy notes
+
+- By default, CLARIFY does not upload full documents.
+- Whole-PDF behavior is explicit and opt-in.
+- OpenAI key is saved in extension local storage (`chrome.storage.local`).
+
+## Development
+
+No build step is required.
+
+1. Edit files directly.
+2. Reload the extension in `chrome://extensions`.
+3. Refresh any open CLARIFY viewer tab.
+
+Helpful debug entry points:
+
+- Service worker logs: `chrome://extensions` -> **Inspect service worker**
+- Viewer logs: DevTools in the viewer tab
+- Debug bundle: Viewer menu -> **Copy debug info**
+
+## Repository Layout
+
+```text
+.
+|-- manifest.json
+|-- README.md
+|-- assets/
+|   `-- icons/
+`-- src/
+    |-- background/
+    |   `-- service_worker.js
+    |-- popup/
+    |-- shared/
+    |   |-- diagnostics.js
+    |   |-- storage.js
+    |   |-- settings_schema.js
+    |   `-- llm/
+    |       |-- index.js
+    |       `-- providers/
+    |-- vendor/
+    |   `-- pdfjs/
+    `-- viewer/
+        |-- viewer.html
+        |-- viewer.js
+        |-- selection.js
+        `-- mode_manager.js
+```
+
+## Known Limitations
+
+- Some remote PDFs cannot be fetched due to CORS/auth restrictions. Download locally and open the file when this happens.
+- `file://` auto-redirect behavior can vary by browser settings.
+- This is a prototype and does not yet include automated tests.
+
+## Roadmap Direction
+
+- Better citation grounding controls
+- Stronger document-level retrieval for long PDFs
+- UX polish for orientation and walkthrough workflows
+
