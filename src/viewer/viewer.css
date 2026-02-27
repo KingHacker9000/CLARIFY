@@ -65,6 +65,22 @@ html {
   grid-template-columns: minmax(0, 1fr) var(--sidebar-collapsed-width);
 }
 
+.layout.viewerOnly {
+  grid-template-columns: minmax(0, 1fr) !important;
+}
+
+.layout.viewerOnly .pdfPane {
+  border-right: none;
+}
+
+.layout.viewerOnly .sidebar {
+  display: none;
+}
+
+.layout.viewerOnly .sectionRail {
+  display: none !important;
+}
+
 .pdfPane {
   position: relative;
   display: grid;
@@ -491,6 +507,10 @@ html {
   isolation: isolate;
 }
 
+.pdfPageShell[data-rendered="false"] .pdfPageSurface {
+  background: #f7f7f2;
+}
+
 .pdfPageCanvas {
   display: block;
 }
@@ -528,7 +548,8 @@ html {
   display: block;
 }
 
-.pdfIntentOverlay {
+.pdfIntentOverlay,
+.pdfWorksheetOverlay {
   position: absolute;
   z-index: 6;
   width: 16px;
@@ -546,13 +567,44 @@ html {
   opacity: 0.7;
 }
 
-.pdfIntentOverlay:hover {
+.pdfIntentOverlay:hover,
+.pdfWorksheetOverlay:hover {
   opacity: 1;
 }
 
-.pdfIntentOverlay:focus-visible {
+.pdfIntentOverlay:focus-visible,
+.pdfWorksheetOverlay:focus-visible {
   outline: 2px solid #7b9ef5;
   outline-offset: 1px;
+}
+
+.pdfWorksheetOverlay {
+  border-color: #4b8a4a;
+  background: rgba(228, 248, 224, 0.94);
+  color: #1f5a22;
+  box-shadow: 0 1px 3px rgba(32, 86, 29, 0.16);
+}
+
+.pdfWorksheetOverlay.isLoading {
+  color: transparent;
+  cursor: default;
+  opacity: 0.95;
+}
+
+.pdfWorksheetOverlay.isLoading::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 999px;
+  border: 2px solid rgba(31, 90, 34, 0.2);
+  border-top-color: #1f5a22;
+  animation: worksheetOverlaySpin 0.72s linear infinite;
+}
+
+@keyframes worksheetOverlaySpin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .pdfIntentOverlayDigest {
@@ -577,6 +629,127 @@ html {
   line-height: 1.35;
   color: #33332e;
   box-shadow: 0 4px 12px rgba(22, 20, 16, 0.12);
+}
+
+.pdfWorksheetBubble {
+  position: absolute;
+  z-index: 6;
+  max-width: 280px;
+  border: 1px solid #c8ddbf;
+  background: #f4fbef;
+  border-radius: 8px;
+  padding: 7px 9px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #2b3e29;
+  box-shadow: 0 4px 12px rgba(18, 52, 17, 0.12);
+}
+
+.pdfWorksheetAnswerCard {
+  position: absolute;
+  z-index: 6;
+  border: 1px solid #c8ddbf;
+  background: #f4fbef;
+  border-radius: 8px;
+  padding: 7px 9px;
+  box-shadow: 0 4px 12px rgba(18, 52, 17, 0.12);
+  overflow: auto;
+}
+
+.pdfWorksheetAnswerCard.isInline {
+  box-shadow: 0 2px 8px rgba(18, 52, 17, 0.1);
+}
+
+.pdfWorksheetAnswerCard.isAnnotation {
+  border-color: #b8d2ae;
+}
+
+.pdfWorksheetAnswerCard.isCompact {
+  padding: 6px 7px;
+}
+
+.pdfWorksheetAnswerCard .worksheetAnswerRich {
+  font-size: 12px;
+}
+
+.pdfWorksheetAnswerCard .worksheetAnswerVerdict {
+  font-size: 14px;
+  padding: 2px 9px;
+}
+
+.pdfWorksheetAnswerCard.isCompact .worksheetAnswerRich {
+  font-size: 11px;
+}
+
+.pdfWorksheetAnswerCard.isCompact .worksheetOptionItem {
+  padding: 3px 5px;
+}
+
+.pdfWorksheetInlineAnswer,
+.pdfWorksheetInlineFillAnswer,
+.pdfWorksheetTableValue,
+.pdfWorksheetTableNote {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  color: #2a3528;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.pdfWorksheetInlineAnswer {
+  max-width: 420px;
+  font-size: 14px;
+  line-height: 1.36;
+  overflow: hidden;
+}
+
+.pdfWorksheetInlineAnswer .worksheetAnswerRich {
+  font-size: 13px;
+}
+
+.pdfWorksheetInlineAnswer .worksheetAnswerLine {
+  margin: 0;
+  font-size: 12px;
+}
+
+.pdfWorksheetInlineAnswer .worksheetAnswerVerdict {
+  font-size: 20px;
+  padding: 1px 8px;
+}
+
+.pdfWorksheetInlineAnswer.isTerm {
+  max-width: 460px;
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.pdfWorksheetInlineAnswer.isTerm .worksheetAnswerLine {
+  margin: 0;
+}
+
+.pdfWorksheetInlineFillAnswer {
+  font-size: 13px;
+  line-height: 1.2;
+  font-weight: 700;
+  padding: 0 3px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.86);
+}
+
+.pdfWorksheetTableValue,
+.pdfWorksheetTableNote {
+  font-size: 12px;
+  line-height: 1.24;
+  max-width: 180px;
+}
+
+.pdfWorksheetTableValue {
+  color: #1f3f1d;
+  font-weight: 700;
+}
+
+.pdfWorksheetTableNote {
+  color: #2f3a2d;
 }
 
 .pdfIntentDigestBubble {
@@ -785,7 +958,8 @@ body[data-mode="flow"] .panel {
 body[data-mode="flow"] .orientationPanel,
 body[data-mode="flow"] .walkthroughPanel,
 body[data-mode="flow"] .cardList,
-body[data-mode="flow"] .glossaryList {
+body[data-mode="flow"] .glossaryList,
+body[data-mode="flow"] .worksheetAnswerList {
   gap: 8px;
 }
 
@@ -796,8 +970,18 @@ body[data-mode="structure"] .panel {
 body[data-mode="structure"] .orientationPanel,
 body[data-mode="structure"] .walkthroughPanel,
 body[data-mode="structure"] .cardList,
-body[data-mode="structure"] .glossaryList {
+body[data-mode="structure"] .glossaryList,
+body[data-mode="structure"] .worksheetAnswerList {
   gap: 12px;
+}
+
+body[data-mode="worksheet"] .panel {
+  padding: 12px;
+}
+
+body[data-mode="worksheet"] .worksheetAnswerList,
+body[data-mode="worksheet"] .worksheetAnswerCards {
+  gap: 9px;
 }
 
 .panelTitle {
@@ -1489,6 +1673,232 @@ body[data-mode="structure"] .glossaryList {
   gap: 12px;
 }
 
+.worksheetAnswerList {
+  display: grid;
+  gap: 10px;
+}
+
+.worksheetAnswerHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.worksheetAnswerHeader .panelTitle {
+  margin: 0;
+}
+
+.worksheetAnswerHeaderActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.worksheetAnswerCards {
+  display: grid;
+  gap: 10px;
+}
+
+.worksheetParserDebug {
+  border: 1px solid #d2dfcd;
+  border-radius: 9px;
+  background: #f8fcf5;
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.worksheetParserDebugTitle {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #586551;
+}
+
+.worksheetParserDebugPre {
+  margin: 0;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid #d6e2d2;
+  background: #fff;
+  color: #1f2b20;
+  font-size: 11px;
+  line-height: 1.4;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  overflow: auto;
+  max-height: 260px;
+  white-space: pre;
+}
+
+.worksheetAnswerCard {
+  border: 1px solid #d3dfca;
+  border-radius: 10px;
+  background: #fcfff9;
+  padding: 10px 11px;
+  display: grid;
+  gap: 8px;
+}
+
+.worksheetAnswerCard[data-depth="1"] {
+  margin-left: 10px;
+  border-left-width: 3px;
+}
+
+.worksheetAnswerCard[data-depth="2"],
+.worksheetAnswerCard[data-depth="3"] {
+  margin-left: 18px;
+  border-left-width: 3px;
+}
+
+.worksheetAnswerCard.isGroup {
+  background: #f8fdf3;
+  border-color: #c8d9bf;
+}
+
+.worksheetAnswerMetaRow {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.worksheetAnswerMeta {
+  margin: 0;
+  font-size: 12px;
+  color: #586551;
+  font-weight: 600;
+}
+
+.worksheetAnswerActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.worksheetQuestionText,
+.worksheetAnswerText {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.48;
+}
+
+.worksheetQuestionText {
+  color: #1f2b20;
+  font-weight: 600;
+}
+
+.worksheetAnswerText {
+  color: #202d21;
+  background: #f2f7ed;
+  border: 1px solid #d7e5ce;
+  border-radius: 8px;
+  padding: 7px 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.worksheetAnswerRich {
+  display: grid;
+  gap: 6px;
+}
+
+.worksheetAnswerRich.isCompact {
+  gap: 4px;
+}
+
+.worksheetAnswerVerdict {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  min-width: 54px;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.worksheetAnswerVerdict.isTrue {
+  color: #154918;
+  background: #d8f3d0;
+  border: 1px solid #90c983;
+}
+
+.worksheetAnswerVerdict.isFalse {
+  color: #6a1f1f;
+  background: #f7dcdc;
+  border: 1px solid #d5a0a0;
+}
+
+.worksheetAnswerLine {
+  margin: 0;
+  line-height: 1.42;
+}
+
+.worksheetAnswerLine.isTerm {
+  font-weight: 600;
+}
+
+.worksheetAnswerBullets {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 3px;
+}
+
+.worksheetAnswerBullet {
+  margin: 0;
+}
+
+.worksheetOptionList {
+  display: grid;
+  gap: 4px;
+}
+
+.worksheetOptionItem {
+  margin: 0;
+  border: 1px solid #d2dec9;
+  background: #f8fcf4;
+  border-radius: 7px;
+  padding: 4px 6px;
+  line-height: 1.35;
+}
+
+.worksheetOptionItem.isCorrect {
+  border-color: #89c07f;
+  background: #daf2d3;
+  color: #1e4a1e;
+  font-weight: 700;
+}
+
+.worksheetSubAnswerList {
+  margin-top: 4px;
+  display: grid;
+  gap: 5px;
+}
+
+.worksheetSubAnswerRow {
+  border-top: 1px solid #dce8d3;
+  padding-top: 5px;
+  display: grid;
+  gap: 3px;
+}
+
+.worksheetSubAnswerLabel {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: #1f2b20;
+}
+
+.worksheetAnswerText.isPlaceholder,
+.worksheetMutedText {
+  color: var(--muted);
+}
+
 .sidebarCard {
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -1836,6 +2246,14 @@ body[data-mode="structure"] .walkthroughHeader {
   animation: clarifyHighlightPulse 1s ease-out;
 }
 
+.textLayer .clarify-worksheet-option-correct {
+  background: rgba(154, 230, 136, 0.46);
+  border-radius: 3px;
+  box-shadow: inset 0 -1px 0 rgba(56, 126, 45, 0.36);
+  outline: 1px solid rgba(56, 126, 45, 0.58);
+  font-weight: 700;
+}
+
 .textLayer .clarify-highlight-overlay {
   position: absolute;
   z-index: 2;
@@ -2012,6 +2430,7 @@ body[data-theme="dark"] .walkthroughItem,
 body[data-theme="dark"] .walkthroughJump,
 body[data-theme="dark"] .walkthroughPreview,
 body[data-theme="dark"] .sidebarCard,
+body[data-theme="dark"] .worksheetAnswerCard,
 body[data-theme="dark"] .cardGrounding,
 body[data-theme="dark"] .cardGroundingSource,
 body[data-theme="dark"] .cardGroundingMore,
@@ -2021,13 +2440,21 @@ body[data-theme="dark"] .pdfMessage,
 body[data-theme="dark"] .selectionPopover,
 body[data-theme="dark"] .selectionPopoverButton,
 body[data-theme="dark"] .pdfIntentOverlay,
+body[data-theme="dark"] .pdfWorksheetOverlay,
 body[data-theme="dark"] .pdfIntentBubble,
+body[data-theme="dark"] .pdfWorksheetBubble,
+body[data-theme="dark"] .pdfWorksheetAnswerCard,
 body[data-theme="dark"] .cardIntentBubble,
 body[data-theme="dark"] .orientationMapIntentBubble {
   background: #2f2f2f;
   border-color: #444;
   color: var(--text);
   box-shadow: none;
+}
+
+body[data-theme="dark"] .pdfPageShell[data-rendered="false"] .pdfPageSurface {
+  background: #272727;
+  border-color: #3a3a3a;
 }
 
 body[data-theme="dark"] .selectionPopoverButton:hover,
@@ -2057,6 +2484,109 @@ body[data-theme="dark"] .pdfIntentOverlayDigest {
   background: #36443c;
   border-color: #5a6f63;
   color: #d3ead6;
+}
+
+body[data-theme="dark"] .pdfWorksheetOverlay {
+  background: #314336;
+  border-color: #4f6a56;
+  color: #d0ead7;
+}
+
+body[data-theme="dark"] .pdfWorksheetOverlay.isLoading::after {
+  border-color: rgba(208, 234, 215, 0.24);
+  border-top-color: #d0ead7;
+}
+
+body[data-theme="dark"] .textLayer .clarify-worksheet-option-correct {
+  background: rgba(104, 164, 95, 0.42);
+  box-shadow: inset 0 -1px 0 rgba(74, 145, 67, 0.42);
+  outline-color: rgba(118, 196, 103, 0.68);
+}
+
+body[data-theme="dark"] .pdfWorksheetInlineAnswer,
+body[data-theme="dark"] .pdfWorksheetInlineFillAnswer,
+body[data-theme="dark"] .pdfWorksheetTableValue,
+body[data-theme="dark"] .pdfWorksheetTableNote {
+  color: #d6e7d5;
+  text-shadow: none;
+}
+
+body[data-theme="dark"] .pdfWorksheetInlineFillAnswer {
+  background: rgba(39, 49, 42, 0.9);
+  color: #d7ead8;
+}
+
+body[data-theme="dark"] .pdfWorksheetTableValue {
+  color: #c9e8ca;
+}
+
+body[data-theme="dark"] .pdfWorksheetTableNote {
+  color: #d0dccc;
+}
+
+body[data-theme="dark"] .worksheetQuestionText,
+body[data-theme="dark"] .worksheetAnswerText {
+  color: var(--text);
+}
+
+body[data-theme="dark"] .worksheetAnswerMeta {
+  color: #b7c0b4;
+}
+
+body[data-theme="dark"] .worksheetAnswerText {
+  background: #2f3a2f;
+  border-color: #445244;
+}
+
+body[data-theme="dark"] .worksheetAnswerVerdict.isTrue {
+  background: #2f4a31;
+  border-color: #4f7b52;
+  color: #d5f0d7;
+}
+
+body[data-theme="dark"] .worksheetAnswerVerdict.isFalse {
+  background: #4a3030;
+  border-color: #7b4f4f;
+  color: #f2d9d9;
+}
+
+body[data-theme="dark"] .worksheetOptionItem {
+  background: #303a30;
+  border-color: #495848;
+}
+
+body[data-theme="dark"] .worksheetOptionItem.isCorrect {
+  background: #304832;
+  border-color: #5b8a5e;
+  color: #daf0db;
+}
+
+body[data-theme="dark"] .worksheetSubAnswerRow {
+  border-top-color: #455444;
+}
+
+body[data-theme="dark"] .worksheetSubAnswerLabel {
+  color: #d5ded2;
+}
+
+body[data-theme="dark"] .worksheetAnswerCard.isGroup {
+  background: #2c352c;
+  border-color: #465846;
+}
+
+body[data-theme="dark"] .worksheetParserDebug {
+  background: #2a3329;
+  border-color: #435642;
+}
+
+body[data-theme="dark"] .worksheetParserDebugTitle {
+  color: #b7c0b4;
+}
+
+body[data-theme="dark"] .worksheetParserDebugPre {
+  background: #222a22;
+  border-color: #3e4e3d;
+  color: #d8e4d7;
 }
 
 body[data-theme="dark"] .pdfIntentDigestLabel {

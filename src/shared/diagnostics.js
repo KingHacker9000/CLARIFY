@@ -92,6 +92,7 @@ export async function getDebugInfo(context = {}) {
     diagnosticsVerbose,
     llmMode: settings.llmMode,
     hasOpenAIKey: Boolean(settings.openaiApiKey),
+    debugMode: Boolean(settings.debugMode),
     contextScope: settings.contextScope,
     wholePdfUpload: settings.wholePdfUpload,
     promptCacheRetention: settings.promptCacheRetention,

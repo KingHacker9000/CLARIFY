@@ -34,6 +34,11 @@ import { buildPageTextCache, getPageText } from "./page_text.js";
 import { buildSectionTree } from "./reading_map_tree.js";
 import { createIntentManager } from "./intent_manager.js";
 import { applyMode } from "./mode_manager.js";
+import {
+  flattenWorksheetModelToQuestions,
+  parseWorksheetPagesToModel,
+  serializeWorksheetModelAsXml
+} from "./worksheet_parser.js"
 
 const logger = createLogger("VIEWER");
 const DEFAULT_VIEWER_TITLE = "CLARIFY";
@@ -57,6 +62,9 @@ const ORIENTATION_MAX_STRUCTURE_FOCUS_BULLETS = 5;
 const ORIENTATION_TEXT_SCAN_PAGES = 8;
 const PANEL_TOAST_DURATION_MS = 1600;
 const PAGE_VISIBILITY_THRESHOLD = 0.6;
+const LAZY_RENDER_PAGE_THRESHOLD = 80;
+const LAZY_RENDER_PRIORITY_RADIUS = 2;
+const LAZY_RENDER_IDLE_TIMEOUT_MS = 120;
 const SECTION_RAIL_MIN_LEFT_GUTTER = 34;
 const SECTION_RAIL_LABEL_STEP = 28;
 const SECTION_RAIL_LABEL_RADIUS = 4;
@@ -70,6 +78,11 @@ const FLOW_DIGEST_MAX_KEYWORDS = 6;
 const FLOW_DIGEST_MAX_OVERVIEW_PHRASES = 4;
 const FLOW_DIGEST_MAX_TECHNICAL_TERMS = 2;
 const FLOW_DIGEST_MAX_HIGHLIGHTS = 10;
+const WORKSHEET_DETECTION_MAX_PAGES = 24;
+const WORKSHEET_PAGE_SNIPPET_MAX_CHARS = 1400;
+const WORKSHEET_DETECTION_MAX_TOTAL_CHARS = 22000;
+const WORKSHEET_QUESTION_MAX_ITEMS = 180;
+const WORKSHEET_OVERLAY_MAX_CHARS = 180;
 const REMOTE_LOAD_ERROR_MESSAGE =
   "This PDF could not be loaded due to site restrictions (CORS/login). Try downloading and opening it locally.";
 const FILE_URL_LOAD_HINT_MESSAGE =
@@ -110,11 +123,14 @@ const statusEl = document.getElementById("status");
 const contextScopeStatusEl = document.getElementById("contextScopeStatus");
 const toolbarModeFlowBtn = document.getElementById("toolbarModeFlow");
 const toolbarModeStructureBtn = document.getElementById("toolbarModeStructure");
+const toolbarModeWorksheetBtn = document.getElementById("toolbarModeWorksheet");
+const toolbarModeViewerBtn = document.getElementById("toolbarModeViewer");
 const pdfRoot = document.getElementById("pdfRoot");
 const sectionRailEl = document.getElementById("sectionRail");
 const pdfToolbarEl = document.querySelector(".pdfToolbar");
 const fileInput = document.getElementById("fileInput");
 const openFileBtn = document.getElementById("openFile");
+const downloadPdfBtn = document.getElementById("downloadPdf");
 const prevPageBtn = document.getElementById("prevPage");
 const nextPageBtn = document.getElementById("nextPage");
 const pageIndicatorEl = document.getElementById("pageIndicator");
@@ -127,10 +143,13 @@ const reopenSidebarBtn = document.getElementById("reopenSidebar");
 const diagnosticsToggleBtn = document.getElementById("diagnosticsToggle");
 const diagnosticsMenu = document.getElementById("diagnosticsMenu");
 const verboseToggle = document.getElementById("verboseToggle");
+const debugModeToggle = document.getElementById("debugModeToggle");
 const copyDebugInfoBtn = document.getElementById("copyDebugInfo");
 const copyStatusEl = document.getElementById("copyStatus");
+const readingModeViewerRadio = document.getElementById("readingModeViewer");
 const readingModeFlowRadio = document.getElementById("readingModeFlow");
 const readingModeStructureRadio = document.getElementById("readingModeStructure");
+const readingModeWorksheetRadio = document.getElementById("readingModeWorksheet");
 const llmModeSelect = document.getElementById("llmModeSelect");
 const llmModeOpenAIOption = document.getElementById("llmModeOpenAIOption");
 const llmModeHelpEl = document.getElementById("llmModeHelp");
@@ -164,7 +183,13 @@ const renderState = {
   loadToken: 0,
   renderToken: 0,
   fitWidthEnabled: false,
-  baseViewportWidth: null
+  baseViewportWidth: null,
+  lazyRenderEnabled: false,
+  lazyRenderQueue: [],
+  lazyRenderQueueSet: new Set(),
+  lazyRenderRunning: false,
+  lazyRenderTimer: null,
+  initialRenderInProgress: false
 };
 
 let openedPdfSource = null;
@@ -238,22 +263,39 @@ function createWalkthroughUiState() {
   }
 }
 
+function createWorksheetUiState() {
+  return {
+    status: "idle",
+    errorMessage: "",
+    docId: "unknown",
+    questions: [],
+    detectionPromise: null,
+    detectionWarnings: [],
+    parserModel: null,
+    parserXml: "",
+    parserDebugVisible: false
+  }
+}
+
 const sidebarUiState = {
   docId: "unknown",
   cards: [],
   glossaryTerms: [],
   glossarySuggestions: [],
   walkthrough: createWalkthroughUiState(),
+  worksheet: createWorksheetUiState(),
   toastMessage: "",
   activeTab: "orientation",
   lastTabByMode: {
     flow: "explain",
-    structure: "orientation"
+    structure: "orientation",
+    worksheet: "explain"
   },
   orientation: createOrientationUiState("flow")
 };
 let recentJumpState = null;
 let orientationRunToken = 0;
+let worksheetRunToken = 0;
 let panelToastTimer = null;
 let sectionIntentManager = null
 let sectionIntentManagerDocId = ""
@@ -265,7 +307,7 @@ const sectionRailState = {
   closeTimer: 0
 }
 const modeUiState = {
-  mode: "flow",
+  mode: "viewer",
   previousMode: "",
   hasAppliedMode: false,
   cardDetailsOpenByDefault: false,
@@ -273,7 +315,9 @@ const modeUiState = {
   autoGenerateOnLoad: false,
   autoBuildWalkthroughOnLoad: false,
   autoPrewarmOnLoad: false,
-  walkthroughVisible: false
+  walkthroughVisible: false,
+  sidebarVisible: true,
+  aiEnabled: false
 }
 const structurePrewarmedDocIds = new Set()
 let pendingCardAutoScrollId = ""
@@ -391,6 +435,31 @@ const FLOW_DIGEST_GENERIC_TERMS = new Set([
   "table"
 ]);
 
+function normalizeReadingMode(mode) {
+  if (mode === "viewer") {
+    return "viewer"
+  }
+  if (mode === "structure") {
+    return "structure"
+  }
+  if (mode === "worksheet") {
+    return "worksheet"
+  }
+  return "flow"
+}
+
+function getActiveReadingMode() {
+  return normalizeReadingMode(modeUiState.mode)
+}
+
+function isViewerMode() {
+  return getActiveReadingMode() === "viewer"
+}
+
+function isWorksheetMode() {
+  return getActiveReadingMode() === "worksheet"
+}
+
 function sanitizeText(value) {
   return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : ""
 }
@@ -488,11 +557,22 @@ function getStructurePreferredTab() {
   return "orientation"
 }
 
+function getWorksheetPreferredTab() {
+  const lastUsed = normalizeTabName(sidebarUiState.lastTabByMode?.worksheet || "")
+  if (lastUsed && isTabVisible(lastUsed) && lastUsed !== "walkthrough" && lastUsed !== "orientation") {
+    return lastUsed
+  }
+  return "explain"
+}
+
 function getEmptyMessage(tab) {
   if (tab === "orientation") {
     return "Open a PDF to generate purpose, focus points, and key terms."
   }
   if (tab === "explain") {
+    if (isWorksheetMode()) {
+      return "Detect worksheet questions, then click the green A button to generate answers."
+    }
     return "No explanations yet. Select text in the PDF, then use Define or Explain."
   }
   if (tab === "glossary") {
@@ -804,6 +884,220 @@ function renderCardsTab(tab) {
   }
 }
 
+function renderWorksheetAnswersTab() {
+  if (!currentPdf || !renderState.pdfDoc) {
+    renderEmpty("explain")
+    return
+  }
+
+  const worksheetState = getWorksheetState()
+  panel.innerHTML = ""
+
+  const wrapper = document.createElement("div")
+  wrapper.className = "worksheetAnswerList"
+
+  const header = document.createElement("header")
+  header.className = "worksheetAnswerHeader"
+  const title = document.createElement("h3")
+  title.className = "panelTitle"
+  title.textContent = "Worksheet Answers"
+  const headerActions = document.createElement("div")
+  headerActions.className = "worksheetAnswerHeaderActions"
+  const detectButton = document.createElement("button")
+  detectButton.type = "button"
+  detectButton.className = "orientationMapActionButton"
+  detectButton.dataset.worksheetAction = "detect"
+  detectButton.textContent = worksheetState.status === "loading" ? "Detecting..." : "Refresh questions"
+  detectButton.disabled = worksheetState.status === "loading"
+  if (Boolean(currentSettings?.debugMode)) {
+    const parserButton = document.createElement("button")
+    parserButton.type = "button"
+    parserButton.className = "orientationMapSubtleAction"
+    parserButton.dataset.worksheetAction = "toggle-parser-view"
+    parserButton.textContent = worksheetState.parserDebugVisible ? "Hide parsed XML" : "View parsed XML"
+    parserButton.disabled = !(typeof worksheetState.parserXml === "string" && worksheetState.parserXml.trim())
+    headerActions.append(parserButton)
+  }
+  headerActions.append(detectButton)
+  header.append(title, headerActions)
+  wrapper.append(header)
+
+  if (Boolean(currentSettings?.debugMode) && worksheetState.parserDebugVisible) {
+    const debugSection = document.createElement("section")
+    debugSection.className = "worksheetParserDebug"
+    const debugTitle = document.createElement("p")
+    debugTitle.className = "worksheetParserDebugTitle"
+    debugTitle.textContent = "Parsed worksheet XML"
+    debugSection.append(debugTitle)
+    const debugPre = document.createElement("pre")
+    debugPre.className = "worksheetParserDebugPre"
+    debugPre.textContent =
+      typeof worksheetState.parserXml === "string" && worksheetState.parserXml.trim()
+        ? worksheetState.parserXml
+        : "<worksheet />"
+    debugSection.append(debugPre)
+    wrapper.append(debugSection)
+  }
+
+  if (worksheetState.status === "idle") {
+    const hint = document.createElement("p")
+    hint.className = "worksheetMutedText"
+    hint.textContent = "Detecting worksheet questions..."
+    wrapper.append(hint)
+    panel.append(wrapper)
+    void ensureWorksheetQuestionsForCurrentDocument()
+    return
+  }
+
+  if (worksheetState.status === "loading") {
+    const hint = document.createElement("p")
+    hint.className = "worksheetMutedText"
+    hint.textContent = "Detecting worksheet questions..."
+    wrapper.append(hint)
+    panel.append(wrapper)
+    return
+  }
+
+  if (worksheetState.status === "error") {
+    const error = document.createElement("p")
+    error.className = "orientationError"
+    error.textContent = worksheetState.errorMessage || "Failed to detect worksheet questions."
+    wrapper.append(error)
+    panel.append(wrapper)
+    return
+  }
+
+  const questions = Array.isArray(worksheetState.questions) ? worksheetState.questions : []
+  if (questions.length === 0) {
+    const empty = document.createElement("p")
+    empty.className = "worksheetMutedText"
+    empty.textContent = "No worksheet questions detected."
+    wrapper.append(empty)
+    panel.append(wrapper)
+    return
+  }
+
+  const list = document.createElement("div")
+  list.className = "worksheetAnswerCards"
+  const byIdMap = getWorksheetQuestionsByIdMap()
+  const orderedQuestions = [...questions].sort((a, b) => {
+    const pageDiff = (parseOptionalPageIndex(a?.pageIndex) ?? 0) - (parseOptionalPageIndex(b?.pageIndex) ?? 0)
+    if (pageDiff !== 0) {
+      return pageDiff
+    }
+    const sortDiff = (Number(a?.sortIndex) || 0) - (Number(b?.sortIndex) || 0)
+    if (sortDiff !== 0) {
+      return sortDiff
+    }
+    return sanitizeText(a?.questionText).localeCompare(sanitizeText(b?.questionText))
+  })
+  orderedQuestions.forEach((question, index) => {
+    const card = document.createElement("article")
+    card.className = "worksheetAnswerCard"
+    card.dataset.questionId = question.id
+    const depth = Math.min(3, Math.max(0, getWorksheetQuestionDepth(question, byIdMap)))
+    card.dataset.depth = String(depth)
+    if (question.hasChildren) {
+      card.classList.add("isGroup")
+    }
+
+    const row = document.createElement("div")
+    row.className = "worksheetAnswerMetaRow"
+    const label = document.createElement("p")
+    label.className = "worksheetAnswerMeta"
+    const pageLabel = `Page ${Math.max(0, Number(question.pageIndex || 0)) + 1}`
+    const gradeLabel = clampText(question.gradeLevel, 80)
+    const marksValue = normalizeWorksheetMarksValue(question.marksValue)
+    const marksLabel =
+      clampText(question.marksRaw, 80) ||
+      (Number.isFinite(marksValue) ? `${Number(marksValue)} ${Boolean(question.marksEach) ? "marks each" : "marks"}` : "")
+    const typeLabel = normalizeWorksheetQuestionType(question.questionType).replace(/_/g, " ")
+    const itemLabel =
+      normalizeWorksheetLabel(question.label) ||
+      deriveWorksheetLabelForCandidate(question.questionText, question.kind) ||
+      `Q${index + 1}`
+    const metaBits = [itemLabel, pageLabel]
+    if (gradeLabel) {
+      metaBits.push(gradeLabel)
+    }
+    if (marksLabel) {
+      metaBits.push(marksLabel)
+    }
+    if (typeLabel && typeLabel !== "unknown") {
+      metaBits.push(typeLabel)
+    }
+    if (question.hasChildren) {
+      const progress = countWorksheetAnsweredLeafQuestions(question, byIdMap)
+      if (progress.total > 0) {
+        metaBits.push(`${progress.answered}/${progress.total} answered`)
+      }
+    }
+    label.textContent = metaBits.join(" - ")
+    row.append(label)
+
+    const actions = document.createElement("div")
+    actions.className = "worksheetAnswerActions"
+    const jumpButton = document.createElement("button")
+    jumpButton.type = "button"
+    jumpButton.className = "orientationMapSubtleAction"
+    jumpButton.dataset.worksheetAction = "jump"
+    jumpButton.dataset.questionId = question.id
+    jumpButton.textContent = "Jump"
+    actions.append(jumpButton)
+    row.append(actions)
+    card.append(row)
+
+    const questionText = document.createElement("p")
+    questionText.className = "worksheetQuestionText"
+    questionText.textContent = clampText(question.anchorText || question.questionText, 420)
+    card.append(questionText)
+
+    const answerText = document.createElement("div")
+    answerText.className = "worksheetAnswerText"
+    if (question.answerLoading) {
+      answerText.textContent = question.hasChildren ? "Generating sub-answers..." : "Generating answer..."
+    } else if (question.hasChildren) {
+      const progress = countWorksheetAnsweredLeafQuestions(question, byIdMap)
+      if (progress.total > 0) {
+        if (progress.answered === 0) {
+          answerText.textContent = "Click the green A next to this item to generate all sub-answers."
+          answerText.classList.add("isPlaceholder")
+        } else if (progress.answered < progress.total) {
+          answerText.textContent = `${progress.answered} of ${progress.total} sub-answers generated.`
+        } else {
+          answerText.textContent = `All ${progress.total} sub-answers are generated.`
+        }
+      } else {
+        answerText.textContent = "Click the green A next to this item to generate answers."
+        answerText.classList.add("isPlaceholder")
+      }
+      const summary = createWorksheetGroupAnswerSummaryNode(question, byIdMap)
+      if (summary instanceof HTMLElement) {
+        answerText.classList.remove("isPlaceholder")
+        answerText.append(summary)
+      }
+    } else if (normalizeWorksheetAnswerText(question.answerText, 1200)) {
+      answerText.append(createWorksheetAnswerRichNode(question, { surface: "sidebar", compact: false }))
+    } else {
+      answerText.textContent = "Click the green A next to the question to generate an answer."
+      answerText.classList.add("isPlaceholder")
+    }
+    card.append(answerText)
+
+    list.append(card)
+  })
+  wrapper.append(list)
+
+  if (Array.isArray(worksheetState.detectionWarnings) && worksheetState.detectionWarnings.length > 0) {
+    const warning = document.createElement("p")
+    warning.className = "worksheetMutedText"
+    warning.textContent = clampText(worksheetState.detectionWarnings[0], 180)
+    wrapper.append(warning)
+  }
+
+  panel.append(wrapper)
+}
+
 function getSortedGlossaryTerms(terms) {
   return [...terms].sort((a, b) => {
     const createdA = Number(a.createdAt) || 0
@@ -969,7 +1263,10 @@ function mapIntentsToCurrentSections(sections, intentsObj) {
 }
 
 function getReadingModeOrDefault() {
-  return currentSettings?.defaultReadingMode === "structure" ? "structure" : "flow"
+  if (modeUiState.hasAppliedMode) {
+    return getActiveReadingMode()
+  }
+  return "viewer"
 }
 
 function getOrientationState() {
@@ -1141,7 +1438,7 @@ function isNodeExpanded(sectionKey) {
 
 function applyOrientationModeDefaults(mode, { force = false } = {}) {
   const orientationState = getOrientationState()
-  const normalizedMode = mode === "structure" ? "structure" : "flow"
+  const normalizedMode = normalizeReadingMode(mode)
   if (force || !orientationState.userMapPreference) {
     orientationState.mapExpanded = normalizedMode === "structure"
   }
@@ -1884,6 +2181,10 @@ function renderPanel() {
     renderOrientationTab()
     return
   }
+  if (tab === "explain" && isWorksheetMode()) {
+    renderWorksheetAnswersTab()
+    return
+  }
   if (tab === "explain" || tab === "figures") {
     renderCardsTab(tab)
     return
@@ -1906,7 +2207,7 @@ function setActiveTab(tab, options = {}) {
   if (normalizedTab !== "walkthrough") {
     sidebarUiState.walkthrough.confirmRebuild = false
   }
-  const activeMode = modeUiState.mode === "structure" ? "structure" : "flow"
+  const activeMode = normalizeReadingMode(modeUiState.mode)
   if (!fromModeApply && normalizedTab !== "walkthrough") {
     sidebarUiState.lastTabByMode[activeMode] = normalizedTab
   }
@@ -2295,6 +2596,12 @@ function clampSidebarWidth(width) {
 }
 
 function applySidebarLayout() {
+  if (!modeUiState.sidebarVisible) {
+    layoutEl.classList.add("viewerOnly")
+    layoutEl.style.gridTemplateColumns = "minmax(0, 1fr)"
+    return
+  }
+  layoutEl.classList.remove("viewerOnly")
   const sidebarWidth = sidebarState.collapsed
     ? SIDEBAR_COLLAPSED_WIDTH
     : clampSidebarWidth(sidebarState.width);
@@ -2328,6 +2635,30 @@ function setSidebarCollapsed(collapsed, options = {}) {
   if (!options.skipFitWidthResize) {
     handleWindowResize();
   }
+}
+
+function setSidebarVisibility(visible) {
+  modeUiState.sidebarVisible = Boolean(visible)
+  if (!modeUiState.sidebarVisible) {
+    hideSectionRail()
+  }
+  applySidebarLayout()
+  if (currentPdf && renderState.pdfDoc) {
+    handleWindowResize()
+  }
+}
+
+function setAiEnabled(enabled) {
+  modeUiState.aiEnabled = Boolean(enabled)
+  if (selectionSystem) {
+    selectionSystem.destroy()
+    selectionSystem = null
+  }
+  if (currentPdf && renderState.pdfDoc) {
+    ensureSelectionSystemInitialized()
+  }
+  renderPdfIntentOverlays()
+  renderPdfWorksheetOverlays()
 }
 
 function initializeSidebarState() {
@@ -2529,9 +2860,11 @@ function getViewerBaseUrl() {
 }
 
 function setToolbarModeToggle(mode) {
-  const normalizedMode = mode === "structure" ? "structure" : "flow"
+  const normalizedMode = normalizeReadingMode(mode)
+  toolbarModeViewerBtn?.setAttribute("aria-pressed", String(normalizedMode === "viewer"))
   toolbarModeFlowBtn?.setAttribute("aria-pressed", String(normalizedMode === "flow"))
   toolbarModeStructureBtn?.setAttribute("aria-pressed", String(normalizedMode === "structure"))
+  toolbarModeWorksheetBtn?.setAttribute("aria-pressed", String(normalizedMode === "worksheet"))
 }
 
 function setModeMicroActionsVisible(visible) {
@@ -2575,7 +2908,8 @@ function setWalkthroughTabVisibility(visible) {
     walkthroughTabButton.classList.toggle("isModeHidden", !visible)
   }
   if (!visible && sidebarUiState.activeTab === "walkthrough") {
-    setActiveTab(getFlowPreferredTab(), { fromModeApply: true })
+    const mode = getActiveReadingMode()
+    setActiveTab(mode === "worksheet" ? getWorksheetPreferredTab() : getFlowPreferredTab(), { fromModeApply: true })
   }
 }
 
@@ -2597,12 +2931,14 @@ function setOrientationCollapsedByMode(collapsed) {
 function setModeConfig(config) {
   modeUiState.previousMode = modeUiState.hasAppliedMode ? modeUiState.mode : ""
   modeUiState.hasAppliedMode = true
-  modeUiState.mode = config.mode === "structure" ? "structure" : "flow"
+  modeUiState.mode = normalizeReadingMode(config.mode)
   modeUiState.cardDetailsOpenByDefault = Boolean(config.cardDetailsOpenByDefault)
   modeUiState.maxGroundingQuotes = Math.max(1, Number(config.maxGroundingQuotes) || 1)
   modeUiState.autoGenerateOnLoad = Boolean(config.autoGenerateOnLoad)
   modeUiState.autoBuildWalkthroughOnLoad = Boolean(config.autoBuildWalkthroughOnLoad)
   modeUiState.autoPrewarmOnLoad = Boolean(config.autoPrewarmOnLoad)
+  modeUiState.sidebarVisible = config.sidebarVisible !== false
+  modeUiState.aiEnabled = config.aiEnabled !== false
 }
 
 function resolvePreferredTabForMode(config) {
@@ -2610,8 +2946,12 @@ function resolvePreferredTabForMode(config) {
   if (!modeChanged && isTabVisible(sidebarUiState.activeTab)) {
     return null
   }
-  if (config?.mode === "structure") {
+  const normalizedMode = normalizeReadingMode(config?.mode)
+  if (normalizedMode === "structure") {
     return getStructurePreferredTab()
+  }
+  if (normalizedMode === "worksheet") {
+    return getWorksheetPreferredTab()
   }
   if (sidebarUiState.activeTab === "walkthrough" || sidebarUiState.activeTab === "orientation") {
     return getFlowPreferredTab()
@@ -2624,7 +2964,8 @@ function refreshPanelAfterModeApply() {
     renderPanel()
     return
   }
-  setActiveTab(modeUiState.mode === "structure" ? getStructurePreferredTab() : getFlowPreferredTab(), {
+  const mode = getActiveReadingMode()
+  setActiveTab(mode === "structure" ? getStructurePreferredTab() : mode === "worksheet" ? getWorksheetPreferredTab() : getFlowPreferredTab(), {
     fromModeApply: true
   })
 }
@@ -2643,6 +2984,7 @@ function applyReadingMode(mode, settings = currentSettings || {}) {
       setWalkthroughVisibility: setWalkthroughTabVisibility,
       setWalkthroughProminent: setWalkthroughTabProminent,
       setOrientationCollapsed: setOrientationCollapsedByMode,
+      setSidebarVisible: setSidebarVisibility,
       resolvePreferredTab: resolvePreferredTabForMode,
       setActiveTab
     },
@@ -2662,6 +3004,9 @@ function applyReadingMode(mode, settings = currentSettings || {}) {
       setMaxGroundingQuotes: (count) => {
         modeUiState.maxGroundingQuotes = Math.max(1, Number(count) || 1)
       }
+    },
+    behavior: {
+      setAiEnabled
     },
     render: {
       refreshPanel: refreshPanelAfterModeApply
@@ -3177,6 +3522,2649 @@ function clearPdfIntentOverlays() {
   }
 }
 
+function getWorksheetState() {
+  if (!sidebarUiState.worksheet || typeof sidebarUiState.worksheet !== "object") {
+    sidebarUiState.worksheet = createWorksheetUiState()
+  }
+  return sidebarUiState.worksheet
+}
+
+function resetWorksheetStateForDocument(docId = "unknown") {
+  const nextState = createWorksheetUiState()
+  nextState.docId = sanitizeText(docId) || "unknown"
+  sidebarUiState.worksheet = nextState
+}
+
+function normalizeWorksheetSearchText(value) {
+  return sanitizeText(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()
+}
+
+function normalizeWorksheetLabel(value) {
+  return clampText(sanitizeText(value), 120)
+}
+
+function normalizeWorksheetQuestionType(value) {
+  const type = sanitizeText(value).toLowerCase().replace(/[^a-z0-9_]+/g, "_")
+  if (!type) {
+    return "unknown"
+  }
+  const allowed = new Set([
+    "mcq",
+    "short_answer",
+    "long_answer",
+    "multi_select",
+    "fill_blank",
+    "true_false",
+    "table_definition",
+    "unknown"
+  ])
+  if (allowed.has(type)) {
+    return type
+  }
+  return "unknown"
+}
+
+function normalizeWorksheetResponseTypes(value) {
+  const source = Array.isArray(value)
+    ? value
+    : typeof value === "string" && value
+      ? value.split(",")
+      : []
+  const dedupe = new Set()
+  const normalized = []
+  for (const entry of source) {
+    const type = normalizeWorksheetQuestionType(entry)
+    if (!type || type === "unknown" || dedupe.has(type)) {
+      continue
+    }
+    dedupe.add(type)
+    normalized.push(type)
+  }
+  if (normalized.length === 0) {
+    return ["unknown"]
+  }
+  return normalized.slice(0, 6)
+}
+
+function normalizeWorksheetOptions(value) {
+  const source = Array.isArray(value) ? value : []
+  return source
+    .map((entry) => clampText(entry, 120))
+    .filter(Boolean)
+    .slice(0, 12)
+}
+
+function normalizeWorksheetMarksValue(value) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return null
+  }
+  return numeric
+}
+
+function normalizeWorksheetAnswerText(value, maxLength = 1200) {
+  if (typeof value !== "string") {
+    return ""
+  }
+  const normalized = value
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t\f\v]+/g, " ").trim())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+  if (!normalized) {
+    return ""
+  }
+  if (!Number.isFinite(maxLength) || maxLength < 1 || normalized.length <= maxLength) {
+    return normalized
+  }
+  return `${normalized.slice(0, Math.max(maxLength - 3, 1)).trim()}...`
+}
+
+function stripWorksheetAnswerFormatting(value) {
+  return normalizeWorksheetAnswerText(value, 1200).replace(/\*\*/g, "").replace(/`/g, "").trim()
+}
+
+function appendWorksheetInlineMarkdown(target, value) {
+  const text = typeof value === "string" ? value : ""
+  if (!text || !(target instanceof HTMLElement)) {
+    return
+  }
+  const pattern = /\*\*([^*]+)\*\*/g
+  let cursor = 0
+  let match
+  while ((match = pattern.exec(text))) {
+    const start = match.index
+    if (start > cursor) {
+      target.append(document.createTextNode(text.slice(cursor, start)))
+    }
+    const bold = document.createElement("strong")
+    bold.textContent = match[1]
+    target.append(bold)
+    cursor = pattern.lastIndex
+  }
+  if (cursor < text.length) {
+    target.append(document.createTextNode(text.slice(cursor)))
+  }
+}
+
+function appendWorksheetMarkdownBlock(container, text, className = "worksheetAnswerLine") {
+  if (!(container instanceof HTMLElement)) {
+    return
+  }
+  const source = normalizeWorksheetAnswerText(text, 1200)
+  if (!source) {
+    return
+  }
+  const lines = source.split(/\n+/).map((line) => line.trim()).filter(Boolean)
+  let listNode = null
+  for (const line of lines) {
+    const bullet = line.match(/^[-*]\s+(.+)$/)
+    if (bullet?.[1]) {
+      if (!(listNode instanceof HTMLUListElement)) {
+        listNode = document.createElement("ul")
+        listNode.className = "worksheetAnswerBullets"
+        container.append(listNode)
+      }
+      const item = document.createElement("li")
+      item.className = "worksheetAnswerBullet"
+      appendWorksheetInlineMarkdown(item, bullet[1])
+      listNode.append(item)
+      continue
+    }
+    listNode = null
+    const paragraph = document.createElement("p")
+    paragraph.className = className
+    appendWorksheetInlineMarkdown(paragraph, line)
+    container.append(paragraph)
+  }
+}
+
+function parseWorksheetOptionEntry(optionText) {
+  const text = normalizeWorksheetAnswerText(optionText, 120)
+  if (!text) {
+    return null
+  }
+  const match = text.match(/^([a-z]|[ivxlcdm]+|\d+)[\)\.]\s*(.+)$/i)
+  if (match?.[1] && match?.[2]) {
+    return {
+      key: sanitizeText(match[1]).toLowerCase(),
+      text: sanitizeText(match[2]),
+      raw: text
+    }
+  }
+  return {
+    key: "",
+    text,
+    raw: text
+  }
+}
+
+function getWorksheetOptionEntries(question) {
+  const rawOptions = normalizeWorksheetOptions(question?.options)
+  return rawOptions.map((option) => parseWorksheetOptionEntry(option)).filter(Boolean)
+}
+
+function detectWorksheetSelectedOptions(question, answerText) {
+  const options = getWorksheetOptionEntries(question)
+  if (options.length === 0) {
+    return []
+  }
+  const responseTypes = normalizeWorksheetResponseTypes(question?.responseTypes)
+  const allowsMultiple = responseTypes.includes("multi_select")
+  const plainAnswer = stripWorksheetAnswerFormatting(answerText).toLowerCase()
+  const searchAnswer = normalizeWorksheetSearchText(plainAnswer)
+  if (!searchAnswer) {
+    return []
+  }
+  const scored = []
+  for (const option of options) {
+    const optionSearch = normalizeWorksheetSearchText(option.text)
+    let score = 0
+    if (option.key) {
+      const keyPattern = new RegExp(`(?:^|\\b)(?:option\\s*)?${escapeRegExp(option.key)}(?:\\)|\\.|\\b)`, "i")
+      if (keyPattern.test(plainAnswer)) {
+        score += 4
+      }
+    }
+    if (optionSearch && searchAnswer.includes(optionSearch)) {
+      score += 6
+    } else if (optionSearch) {
+      const tokens = optionSearch.split(" ").filter((token) => token.length >= 4)
+      let tokenMatches = 0
+      for (const token of tokens) {
+        if (searchAnswer.includes(token)) {
+          tokenMatches += 1
+        }
+      }
+      if (tokenMatches > 0) {
+        score += tokenMatches
+      }
+    }
+    if (score > 0) {
+      scored.push({ option, score })
+    }
+  }
+  if (scored.length === 0) {
+    return []
+  }
+  scored.sort((a, b) => b.score - a.score)
+  if (!allowsMultiple) {
+    return [scored[0].option]
+  }
+  const topScore = scored[0].score
+  return scored
+    .filter((entry) => entry.score >= Math.max(4, topScore - 2))
+    .map((entry) => entry.option)
+    .slice(0, 4)
+}
+
+function parseWorksheetTrueFalseAnswer(answerText) {
+  const plain = stripWorksheetAnswerFormatting(answerText)
+  if (!plain) {
+    return { verdict: "", explanation: "" }
+  }
+  const leading = plain.match(/^(?:answer\s*[:\-]\s*)?(true|false)\b[\s\.:;\-]*/i)
+  if (leading?.[1]) {
+    return {
+      verdict: leading[1].toUpperCase(),
+      explanation: plain.slice(leading[0].length).trim()
+    }
+  }
+  const embedded = plain.match(/\b(true|false)\b/i)
+  if (embedded?.[1] && plain.length <= 28) {
+    return {
+      verdict: embedded[1].toUpperCase(),
+      explanation: ""
+    }
+  }
+  return {
+    verdict: "",
+    explanation: plain
+  }
+}
+
+function createWorksheetAnswerRichNode(question, options = {}) {
+  const surface = options?.surface === "pdf" ? "pdf" : "sidebar"
+  const compact = Boolean(options?.compact)
+  const answerText = normalizeWorksheetAnswerText(question?.answerText, 1200)
+  const responseTypes = normalizeWorksheetResponseTypes(question?.responseTypes)
+  const optionEntries = getWorksheetOptionEntries(question)
+  const hasTrueFalse = responseTypes.includes("true_false")
+  const hasMcq = responseTypes.includes("mcq") || responseTypes.includes("multi_select") || optionEntries.length >= 2
+  const isTermLike =
+    normalizeWorksheetKind(question?.kind) === "term" ||
+    normalizeWorksheetQuestionType(question?.questionType) === "table_definition"
+
+  const rich = document.createElement("div")
+  rich.className = "worksheetAnswerRich"
+  rich.dataset.surface = surface
+  if (compact) {
+    rich.classList.add("isCompact")
+  }
+  if (!answerText) {
+    const line = document.createElement("p")
+    line.className = "worksheetAnswerLine"
+    line.textContent = "No answer generated."
+    rich.append(line)
+    return rich
+  }
+
+  const trueFalse = hasTrueFalse ? parseWorksheetTrueFalseAnswer(answerText) : { verdict: "", explanation: answerText }
+  if (trueFalse.verdict) {
+    const verdict = document.createElement("span")
+    verdict.className = `worksheetAnswerVerdict ${trueFalse.verdict === "TRUE" ? "isTrue" : "isFalse"}`
+    verdict.textContent = trueFalse.verdict
+    rich.append(verdict)
+  }
+
+  const selectedOptions = hasMcq ? detectWorksheetSelectedOptions(question, answerText) : []
+  const selectedSet = new Set(selectedOptions.map((entry) => `${entry.key}|${entry.text}`))
+  if (hasMcq && optionEntries.length > 0) {
+    const optionsList = document.createElement("div")
+    optionsList.className = "worksheetOptionList"
+    for (const entry of optionEntries) {
+      const optionNode = document.createElement("p")
+      optionNode.className = "worksheetOptionItem"
+      const identity = `${entry.key}|${entry.text}`
+      if (selectedSet.has(identity)) {
+        optionNode.classList.add("isCorrect")
+      }
+      optionNode.textContent = entry.key ? `${entry.key}) ${entry.text}` : entry.text
+      optionsList.append(optionNode)
+    }
+    rich.append(optionsList)
+  }
+
+  if (!hasMcq && isTermLike && !trueFalse.verdict) {
+    const termLine = document.createElement("p")
+    termLine.className = "worksheetAnswerLine isTerm"
+    appendWorksheetInlineMarkdown(termLine, answerText)
+    rich.append(termLine)
+    return rich
+  }
+
+  let explanation = hasTrueFalse ? trueFalse.explanation : answerText
+  if (hasMcq) {
+    explanation = explanation.replace(/^\*{0,2}\s*answer\s*[:\-]\s*/i, "").trim()
+    const normalizedExplanation = normalizeWorksheetSearchText(explanation)
+    const selectedSearches = selectedOptions.map((entry) => normalizeWorksheetSearchText(entry.text)).filter(Boolean)
+    if (
+      normalizedExplanation &&
+      selectedSearches.some((entry) => entry === normalizedExplanation || normalizedExplanation === `${entry} only`)
+    ) {
+      explanation = ""
+    }
+  }
+  if (explanation) {
+    appendWorksheetMarkdownBlock(rich, explanation, "worksheetAnswerLine")
+  }
+
+  return rich
+}
+
+function hashCompactString(input) {
+  let hash = 2166136261
+  const value = typeof input === "string" ? input : ""
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return hash >>> 0
+}
+
+function buildWorksheetQuestionId(questionText, pageIndex, kind = "prompt", sourceKey = "") {
+  const normalizedSourceKey = sanitizeText(sourceKey)
+  const key =
+    normalizedSourceKey ||
+    `${parseOptionalPageIndex(pageIndex) ?? 0}:${normalizeWorksheetKind(kind)}:${normalizeWorksheetSearchText(questionText)}`
+  return `wsq_${hashCompactString(key).toString(36)}`
+}
+
+function normalizeWorksheetKind(value) {
+  const kind = sanitizeText(value).toLowerCase()
+  if (kind === "question" || kind === "part" || kind === "item" || kind === "term") {
+    return kind
+  }
+  return "prompt"
+}
+
+function normalizeWorksheetParentSourceKey(value) {
+  return clampText(sanitizeText(value), 220)
+}
+
+function makeWorksheetStableSourceKey(item) {
+  const explicit = sanitizeText(item?.sourceKey)
+  if (explicit) {
+    return clampText(explicit, 220)
+  }
+  const pageIndex = parseOptionalPageIndex(item?.pageIndex) ?? 0
+  const kind = normalizeWorksheetKind(item?.kind)
+  const parentSourceKey = normalizeWorksheetParentSourceKey(
+    item?.parentSourceKey || item?.parentKey || item?.parentId
+  )
+  const questionText = clampText(item?.questionText || item?.question || item?.text || item?.prompt, 360)
+  return `${pageIndex}:${kind}:${normalizeWorksheetSearchText(parentSourceKey)}:${normalizeWorksheetSearchText(questionText)}`
+}
+
+function estimateWorksheetAnswerLength(answerText) {
+  const text = normalizeWorksheetAnswerText(answerText, 1200)
+  if (!text) {
+    return "long"
+  }
+  return text.length <= WORKSHEET_OVERLAY_MAX_CHARS ? "short" : "long"
+}
+
+function isWorksheetAnswerShort(question) {
+  if (!question || typeof question !== "object") {
+    return false
+  }
+  if (question.answerLength === "short") {
+    return true
+  }
+  if (question.answerLength === "long") {
+    return false
+  }
+  return estimateWorksheetAnswerLength(question.answerText) === "short"
+}
+
+function getWorksheetQuestionById(questionId) {
+  const normalizedId = sanitizeText(questionId)
+  if (!normalizedId) {
+    return null
+  }
+  const worksheetState = getWorksheetState()
+  return worksheetState.questions.find((item) => item.id === normalizedId) || null
+}
+
+function getWorksheetQuestionsByIdMap() {
+  const worksheetState = getWorksheetState()
+  const questions = Array.isArray(worksheetState.questions) ? worksheetState.questions : []
+  const byId = new Map()
+  for (const question of questions) {
+    if (question?.id) {
+      byId.set(question.id, question)
+    }
+  }
+  return byId
+}
+
+function getWorksheetQuestionChildren(question, byIdMap = null) {
+  if (!question) {
+    return []
+  }
+  const childIds = Array.isArray(question.childIds) ? question.childIds : []
+  if (childIds.length === 0) {
+    return []
+  }
+  const byId = byIdMap instanceof Map ? byIdMap : getWorksheetQuestionsByIdMap()
+  const children = []
+  for (const childId of childIds) {
+    const child = byId.get(childId)
+    if (child) {
+      children.push(child)
+    }
+  }
+  return children
+}
+
+function collectWorksheetLeafQuestions(question, byIdMap = null) {
+  if (!question) {
+    return []
+  }
+  const leaves = []
+  const stack = [question]
+  const visited = new Set()
+  const byId = byIdMap instanceof Map ? byIdMap : getWorksheetQuestionsByIdMap()
+  while (stack.length > 0) {
+    const current = stack.shift()
+    if (!current?.id || visited.has(current.id)) {
+      continue
+    }
+    visited.add(current.id)
+    const children = getWorksheetQuestionChildren(current, byId)
+    if (children.length === 0) {
+      leaves.push(current)
+      continue
+    }
+    for (const child of children) {
+      stack.push(child)
+    }
+  }
+  return leaves
+}
+
+function countWorksheetAnsweredLeafQuestions(question, byIdMap = null) {
+  const leaves = collectWorksheetLeafQuestions(question, byIdMap).filter((item) => item?.id !== question?.id)
+  if (leaves.length === 0) {
+    return { total: 0, answered: 0 }
+  }
+  const answered = leaves.filter((leaf) => Boolean(normalizeWorksheetAnswerText(leaf.answerText, 1200))).length
+  return { total: leaves.length, answered }
+}
+
+function createWorksheetGroupAnswerSummaryNode(question, byIdMap = null) {
+  const leaves = collectWorksheetLeafQuestions(question, byIdMap).filter((item) => item?.id !== question?.id)
+  const answeredLeaves = leaves
+    .filter((item) => Boolean(normalizeWorksheetAnswerText(item.answerText, 1200)))
+    .sort((a, b) => {
+      const pageDiff = (parseOptionalPageIndex(a?.pageIndex) ?? 0) - (parseOptionalPageIndex(b?.pageIndex) ?? 0)
+      if (pageDiff !== 0) {
+        return pageDiff
+      }
+      return (Number(a?.sortIndex) || 0) - (Number(b?.sortIndex) || 0)
+    })
+  if (answeredLeaves.length === 0) {
+    return null
+  }
+  const summary = document.createElement("div")
+  summary.className = "worksheetSubAnswerList"
+  for (const leaf of answeredLeaves) {
+    const row = document.createElement("div")
+    row.className = "worksheetSubAnswerRow"
+    const label = document.createElement("p")
+    label.className = "worksheetSubAnswerLabel"
+    label.textContent =
+      normalizeWorksheetLabel(leaf.label) ||
+      deriveWorksheetLabelForCandidate(leaf.anchorText || leaf.questionText, leaf.kind) ||
+      "Answer"
+    row.append(label)
+    row.append(createWorksheetAnswerRichNode(leaf, { surface: "sidebar", compact: true }))
+    summary.append(row)
+  }
+  return summary
+}
+
+function getWorksheetQuestionDepth(question, byIdMap = null) {
+  if (!question?.id) {
+    return 0
+  }
+  const byId = byIdMap instanceof Map ? byIdMap : getWorksheetQuestionsByIdMap()
+  let depth = 0
+  let parentId = sanitizeText(question.parentId)
+  let guard = 0
+  while (parentId && guard < 12) {
+    guard += 1
+    const parent = byId.get(parentId)
+    if (!parent) {
+      break
+    }
+    depth += 1
+    parentId = sanitizeText(parent.parentId)
+  }
+  return depth
+}
+
+function structureWorksheetDetectionText(value) {
+  const source = typeof value === "string" ? value : ""
+  if (!source) {
+    return ""
+  }
+  return source
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t\f\v]+/g, " ")
+    .replace(/\b(Question\s+\d+\.?)/gi, "\n$1")
+    .replace(/\b(Part\s*\([a-z]\))/gi, "\n$1")
+    .replace(/(^|[^A-Za-z0-9])(\d+\.)\s+(?=[A-Z])/g, (match, prefix, marker, offset, fullText) => {
+      const markerStart = Number(offset) + String(prefix).length
+      const start = Math.max(0, markerStart - 24)
+      const windowText = fullText.slice(start, markerStart)
+      if (/Question\s*$/i.test(windowText) || /Part\s*\([a-z]\)\s*$/i.test(windowText)) {
+        return match
+      }
+      return `${prefix}\n${marker} `
+    })
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+}
+
+function truncateWorksheetText(value, maxLength) {
+  const text = structureWorksheetDetectionText(value)
+  if (!text) {
+    return ""
+  }
+  if (!Number.isFinite(maxLength) || maxLength < 1 || text.length <= maxLength) {
+    return text
+  }
+  return text.slice(0, maxLength).trim()
+}
+
+function inferWorksheetGradeLevel(questionText) {
+  const text = sanitizeText(questionText)
+  if (!text) {
+    return ""
+  }
+  const grade = text.match(/\b(?:grade|class)\s*\d+\b/i)
+  if (grade?.[0]) {
+    return clampText(grade[0], 80)
+  }
+  const points = text.match(/\b\d+\s*(?:marks?|points?|pts?)\b/i)
+  if (points?.[0]) {
+    return clampText(points[0], 80)
+  }
+  return ""
+}
+
+function isLikelyWorksheetPromptLine(text) {
+  const line = sanitizeText(text)
+  if (!line || line.length < 12) {
+    return false
+  }
+  if (isLikelyWorksheetOptionLine(line)) {
+    return false
+  }
+  if (/^(term|definition|virtual address|physical address|notes)$/i.test(line)) {
+    return false
+  }
+  if (isWorksheetFooterLine(line)) {
+    return false
+  }
+  if (
+    /\?|(?:\bwhich\b|\bwhat\b|\bwhy\b|\bhow\b|\bexplain\b|\bdescribe\b|\bdefine\b|\bcalculate\b|\bselect\b|\bindicate\b|\btranslate\b|\bdetermine\b|\bidentify\b|\bcomplete\b|\bjustify\b)/i.test(
+      line
+    )
+  ) {
+    return true
+  }
+  if (line.length >= 42 && /\b(?:true|false|statement|address|memory|register|process)\b/i.test(line)) {
+    return true
+  }
+  return false
+}
+
+function isLikelyWorksheetOptionLine(text) {
+  const line = sanitizeText(text)
+  if (!line) {
+    return false
+  }
+  return /^([a-z]|[ivxlcdm]+)\)\s+/i.test(line) || /^[A-D]\.\s+/.test(line)
+}
+
+function isWorksheetFooterLine(text) {
+  const line = sanitizeText(text)
+  if (!line) {
+    return false
+  }
+  if (/^page\s+\d+\s*(?:\/|of)\s*\d+/i.test(line)) {
+    return true
+  }
+  if (/cont'?d\.?$/i.test(line)) {
+    return true
+  }
+  return false
+}
+
+function stripWorksheetFooterFragments(text) {
+  const line = sanitizeText(text)
+  if (!line) {
+    return ""
+  }
+  return sanitizeText(
+    line
+      .replace(/\bpage\s+\d+\s*(?:\/|of)\s*\d+\b.*$/i, "")
+      .replace(/\bcont'?d\.?\b.*$/i, "")
+  )
+}
+
+function isLikelyWorksheetTermLine(text) {
+  const line = stripWorksheetFooterFragments(text)
+  if (!line || line.length < 3 || line.length > 84) {
+    return false
+  }
+  if (isWorksheetFooterLine(line) || isLikelyWorksheetOptionLine(line)) {
+    return false
+  }
+  if (/^Question\s+\d+|^Part\s*\([a-z]\)|^\d+\.\s+/i.test(line)) {
+    return false
+  }
+  if (/^(term|definition|virtual address|physical address|notes)$/i.test(line)) {
+    return false
+  }
+  if (/[?.:;!]/.test(line)) {
+    return false
+  }
+  if (
+    /\b(explain|describe|justify|indicate|select|calculate|determine|identify|complete|consider|translate|briefly|answer)\b/i.test(
+      line
+    )
+  ) {
+    return false
+  }
+  const words = line.split(/\s+/).filter(Boolean)
+  if (words.length < 1 || words.length > 5) {
+    return false
+  }
+  if (words.every((word) => /^\d+$/.test(word))) {
+    return false
+  }
+  return /[A-Za-z]/.test(line)
+}
+
+function splitPackedWorksheetTermLine(text) {
+  const line = stripWorksheetFooterFragments(text)
+  const cleaned = sanitizeText(
+    line
+      .replace(/^term\s+definition\s+/i, "")
+      .replace(/^virtual\s+address\s+physical\s+address\s+notes\s+/i, "")
+  )
+  if (!cleaned || cleaned.length < 24 || cleaned.length > 720) {
+    return []
+  }
+  if (/[?.:;!]/.test(cleaned.replace(/\./g, ""))) {
+    return []
+  }
+  const segments = cleaned
+    .split(/\s+(?=[A-Z][a-z])/)
+    .map((entry) => sanitizeText(entry))
+    .filter(Boolean)
+  if (segments.length < 3) {
+    return []
+  }
+  return segments.filter((entry) => isLikelyWorksheetTermLine(entry))
+}
+
+function deriveWorksheetLabelForCandidate(questionText, kind) {
+  const text = sanitizeText(questionText)
+  if (!text) {
+    return ""
+  }
+  const normalizedKind = normalizeWorksheetKind(kind)
+  if (normalizedKind === "question") {
+    return normalizeWorksheetLabel(text.match(/Question\s+\d+/i)?.[0] || "Question")
+  }
+  if (normalizedKind === "part") {
+    return normalizeWorksheetLabel(text.match(/Part\s*\([a-z]\)/i)?.[0] || "Part")
+  }
+  if (normalizedKind === "item") {
+    return normalizeWorksheetLabel(text.match(/(?:^|\s)(\d+\.)/)?.[1] || "Item")
+  }
+  if (normalizedKind === "term") {
+    return normalizeWorksheetLabel(text)
+  }
+  return normalizeWorksheetLabel(clampText(text, 42))
+}
+
+function extractWorksheetQuestionCandidatesFromStructuredPage(pageText, pageIndex) {
+  const source = structureWorksheetDetectionText(pageText)
+  if (!source) {
+    return []
+  }
+  const page = Math.max(0, Number(pageIndex) || 0)
+  const lines = source
+    .split(/\n+/)
+    .map((line) => sanitizeText(line))
+    .filter(Boolean)
+  const candidates = []
+  const dedupe = new Set()
+  let currentQuestionLabel = ""
+  let currentQuestionSourceKey = ""
+  let currentPartSourceKey = ""
+  let pendingPartPrefix = ""
+  let pendingPartParentSourceKey = ""
+  let pendingPartLabel = ""
+  let expectTermRows = false
+  let termParentSourceKey = ""
+  let seenTermRows = 0
+
+  const pushCandidate = (item) => {
+    const questionText = clampText(item?.questionText || item?.text || item?.question || item?.prompt, 360)
+    if (!questionText) {
+      return null
+    }
+    const kind = normalizeWorksheetKind(item?.kind)
+    const parentSourceKey = normalizeWorksheetParentSourceKey(item?.parentSourceKey)
+    const sourceKey = makeWorksheetStableSourceKey({
+      sourceKey: item?.sourceKey,
+      pageIndex: page,
+      questionText,
+      kind,
+      parentSourceKey
+    })
+    if (!sourceKey || dedupe.has(sourceKey)) {
+      return null
+    }
+    dedupe.add(sourceKey)
+    const candidate = {
+      questionText,
+      pageIndex: page,
+      gradeLevel: clampText(item?.gradeLevel || item?.grade || inferWorksheetGradeLevel(questionText), 80),
+      kind,
+      sourceKey,
+      parentSourceKey,
+      label: normalizeWorksheetLabel(item?.label || deriveWorksheetLabelForCandidate(questionText, kind)),
+      anchorText: clampText(item?.anchorText || questionText, 240)
+    }
+    candidates.push(candidate)
+    return candidate
+  }
+
+  for (const line of lines) {
+    const isQuestionLine = /^Question\s+\d+\.?/i.test(line)
+    const isPartLine = /^Part\s*\([a-z]\)/i.test(line)
+    const isNumberedLine = /^\d+\.\s+/.test(line)
+
+    if (pendingPartPrefix) {
+      if (!isQuestionLine && !isPartLine && !isNumberedLine && !isWorksheetFooterLine(line)) {
+        const partCandidate = pushCandidate({
+          questionText: `${pendingPartPrefix} ${line}`,
+          kind: "part",
+          parentSourceKey: pendingPartParentSourceKey,
+          label: pendingPartLabel,
+          anchorText: `${pendingPartLabel} ${line}`
+        })
+        currentPartSourceKey = partCandidate?.sourceKey || currentPartSourceKey
+        expectTermRows = /\btable\b|\bdefinitions?\b/i.test(`${pendingPartPrefix} ${line}`)
+        termParentSourceKey = currentPartSourceKey || currentQuestionSourceKey
+        seenTermRows = 0
+        pendingPartPrefix = ""
+        pendingPartParentSourceKey = ""
+        pendingPartLabel = ""
+        continue
+      }
+      const partCandidate = pushCandidate({
+        questionText: pendingPartPrefix,
+        kind: "part",
+        parentSourceKey: pendingPartParentSourceKey,
+        label: pendingPartLabel,
+        anchorText: pendingPartLabel || pendingPartPrefix
+      })
+      currentPartSourceKey = partCandidate?.sourceKey || currentPartSourceKey
+      pendingPartPrefix = ""
+      pendingPartParentSourceKey = ""
+      pendingPartLabel = ""
+    }
+
+    const questionMatch = line.match(/^Question\s+(\d+)\.?\s*(.*)$/i)
+    if (questionMatch) {
+      currentQuestionLabel = `Question ${questionMatch[1]}`
+      currentPartSourceKey = ""
+      expectTermRows = false
+      termParentSourceKey = ""
+      seenTermRows = 0
+      const trailing = sanitizeText(questionMatch[2])
+      const questionText = trailing ? `${currentQuestionLabel}. ${trailing}` : `${currentQuestionLabel}.`
+      const questionCandidate = pushCandidate({
+        questionText,
+        kind: "question",
+        parentSourceKey: "",
+        label: currentQuestionLabel,
+        anchorText: `${currentQuestionLabel}.`
+      })
+      currentQuestionSourceKey = questionCandidate?.sourceKey || currentQuestionSourceKey
+      if (/\btable\b|\bdefinitions?\b/i.test(questionText)) {
+        expectTermRows = true
+        termParentSourceKey = currentQuestionSourceKey
+      }
+      continue
+    }
+
+    if (/^Part\s*\([a-z]\)/i.test(line)) {
+      const partMatch = line.match(/^Part\s*\(([a-z])\)\s*(.*)$/i)
+      const partLabel = partMatch?.[1] ? `Part (${partMatch[1].toLowerCase()})` : "Part"
+      const trailing = sanitizeText(partMatch?.[2] || "")
+      const prefix = currentQuestionLabel ? `${currentQuestionLabel} ${partLabel}` : partLabel
+      const parentSourceKey = currentQuestionSourceKey || ""
+      if (trailing) {
+        const partCandidate = pushCandidate({
+          questionText: `${prefix} ${trailing}`,
+          kind: "part",
+          parentSourceKey,
+          label: partLabel,
+          anchorText: `${partLabel} ${trailing}`
+        })
+        currentPartSourceKey = partCandidate?.sourceKey || currentPartSourceKey
+        expectTermRows = /\btable\b|\bdefinitions?\b/i.test(`${prefix} ${trailing}`)
+        termParentSourceKey = currentPartSourceKey || parentSourceKey
+        seenTermRows = 0
+      } else {
+        pendingPartPrefix = prefix
+        pendingPartParentSourceKey = parentSourceKey
+        pendingPartLabel = partLabel
+      }
+      continue
+    }
+
+    if (/^(term)\b/i.test(line) && /\bdefinition\b/i.test(line)) {
+      expectTermRows = true
+      termParentSourceKey = currentPartSourceKey || currentQuestionSourceKey || termParentSourceKey
+      seenTermRows = 0
+      continue
+    }
+
+    if (expectTermRows) {
+      if (isWorksheetFooterLine(line)) {
+        expectTermRows = false
+      } else if (isLikelyWorksheetTermLine(line)) {
+        const termCandidate = pushCandidate({
+          questionText: line,
+          kind: "term",
+          parentSourceKey: termParentSourceKey || currentPartSourceKey || currentQuestionSourceKey,
+          label: line,
+          anchorText: line
+        })
+        if (termCandidate) {
+          seenTermRows += 1
+          continue
+        }
+      } else {
+        const packedTerms = splitPackedWorksheetTermLine(line)
+        if (packedTerms.length > 0) {
+          for (const term of packedTerms) {
+            const termCandidate = pushCandidate({
+              questionText: term,
+              kind: "term",
+              parentSourceKey: termParentSourceKey || currentPartSourceKey || currentQuestionSourceKey,
+              label: term,
+              anchorText: term
+            })
+            if (termCandidate) {
+              seenTermRows += 1
+            }
+          }
+          continue
+        }
+        if (seenTermRows > 0) {
+          expectTermRows = false
+        }
+      }
+    }
+
+    if (/^\d+\.\s+/.test(line)) {
+      const numberedMatch = line.match(/^(\d+)\.\s+(.*)$/)
+      const itemLabel = numberedMatch?.[1] ? `${numberedMatch[1]}.` : "Item"
+      const bodyRaw = sanitizeText(numberedMatch?.[2] || "")
+      const body = sanitizeText(bodyRaw.replace(/\s+[a-d]\)\s+.+$/i, ""))
+      if (!body || isLikelyWorksheetOptionLine(body)) {
+        continue
+      }
+      if (!isLikelyWorksheetPromptLine(body) && body.length < 26) {
+        continue
+      }
+      pushCandidate({
+        questionText: currentQuestionLabel ? `${currentQuestionLabel} ${itemLabel} ${body}` : `${itemLabel} ${body}`,
+        kind: "item",
+        parentSourceKey: currentQuestionSourceKey || currentPartSourceKey,
+        label: itemLabel,
+        anchorText: `${itemLabel} ${body}`
+      })
+      continue
+    }
+
+    if (currentPartSourceKey && isLikelyWorksheetPromptLine(line)) {
+      const promptCandidate = pushCandidate({
+        questionText: `${currentQuestionLabel ? `${currentQuestionLabel} ` : ""}${line}`,
+        kind: "prompt",
+        parentSourceKey: currentPartSourceKey,
+        anchorText: line
+      })
+      if (promptCandidate && /\btable\b|\bdefinitions?\b/i.test(line)) {
+        expectTermRows = true
+        termParentSourceKey = currentPartSourceKey
+        seenTermRows = 0
+      }
+    }
+  }
+
+  if (pendingPartPrefix) {
+    pushCandidate({
+      questionText: pendingPartPrefix,
+      kind: "part",
+      parentSourceKey: pendingPartParentSourceKey,
+      label: pendingPartLabel,
+      anchorText: pendingPartLabel || pendingPartPrefix
+    })
+  }
+
+  if (candidates.length === 0) {
+    for (const line of lines) {
+      if (isLikelyWorksheetPromptLine(line)) {
+        pushCandidate({
+          questionText: line,
+          pageIndex: page,
+          kind: "prompt",
+          parentSourceKey: "",
+          anchorText: line
+        })
+      }
+    }
+  }
+
+  return candidates.slice(0, 72)
+}
+
+function extractWorksheetQuestionsFromPages(worksheetPages) {
+  const pages = Array.isArray(worksheetPages) ? worksheetPages : []
+  const extracted = []
+  for (const page of pages) {
+    const pageIndex = parseOptionalPageIndex(page?.pageIndex) ?? 0
+    const fromPage = extractWorksheetQuestionCandidatesFromStructuredPage(page?.text, pageIndex)
+    for (const question of fromPage) {
+      extracted.push(question)
+      if (extracted.length >= WORKSHEET_QUESTION_MAX_ITEMS) {
+        return extracted
+      }
+    }
+  }
+  return extracted
+}
+
+function isQuestionCandidateUsable(candidate) {
+  const questionText = sanitizeText(candidate?.questionText || candidate?.text || candidate?.question || candidate?.prompt)
+  if (!questionText) {
+    return false
+  }
+  const kind = normalizeWorksheetKind(candidate?.kind)
+  if (kind === "term") {
+    return isLikelyWorksheetTermLine(questionText)
+  }
+  if (isWorksheetFooterLine(questionText)) {
+    return false
+  }
+  const questionMarkerCount = (questionText.match(/\bQuestion\s+\d+/gi) || []).length
+  const partMarkerCount = (questionText.match(/\bPart\s*\([a-z]\)/gi) || []).length
+  if (questionMarkerCount > 1 && questionText.length > 180) {
+    return false
+  }
+  if (partMarkerCount > 1 && questionText.length > 240) {
+    return false
+  }
+  return true
+}
+
+function mergeWorksheetQuestionCandidates(primaryQuestions, secondaryQuestions) {
+  const merged = []
+  const seenIndex = new Map()
+  const looseSeenIndex = new Map()
+  const textSeenIndex = new Map()
+  const append = (item) => {
+    if (!item || !isQuestionCandidateUsable(item)) {
+      return
+    }
+    const questionText = clampText(item.questionText || item.question || item.text || item.prompt, 360)
+    const pageIndex = parseOptionalPageIndex(item.pageIndex) ?? 0
+    const kind = normalizeWorksheetKind(item.kind)
+    const parentSourceKey = normalizeWorksheetParentSourceKey(item.parentSourceKey || item.parentKey || item.parentId)
+    const sourceKey = makeWorksheetStableSourceKey({
+      sourceKey: item.sourceKey,
+      pageIndex,
+      questionText,
+      kind,
+      parentSourceKey
+    })
+    const looseKey = `${pageIndex}:${kind}:${normalizeWorksheetSearchText(questionText)}`
+    const textKey = `${pageIndex}:${normalizeWorksheetSearchText(questionText)}`
+    const gradeLevel = clampText(item.gradeLevel || item.grade || item.points || inferWorksheetGradeLevel(questionText), 80)
+    const label = normalizeWorksheetLabel(item.label || deriveWorksheetLabelForCandidate(questionText, kind))
+    const anchorText = clampText(item.anchorText || questionText, 240)
+    const questionType = normalizeWorksheetQuestionType(item.questionType || item.responseType || item.primaryResponseType)
+    const responseTypes = normalizeWorksheetResponseTypes(
+      item.responseTypes || item.responseTypeList || item.questionTypes || item.responseModel?.responseTypes
+    )
+    const marksRaw = clampText(item.marksRaw || item.marks || item.pointsLabel || "", 80)
+    const marksValue = normalizeWorksheetMarksValue(item.marksValue) ?? normalizeWorksheetMarksValue(item.marks?.value)
+    const marksEach = Boolean(item.marksEach || item.marks?.each)
+    const options = normalizeWorksheetOptions(item.options)
+    const contextWindow = clampText(item.contextWindow || item.context || "", 900)
+    if (!questionText) {
+      return
+    }
+    if (!sourceKey) {
+      return
+    }
+    const existingIndex =
+      seenIndex.get(sourceKey) ??
+      (looseKey ? looseSeenIndex.get(looseKey) : undefined) ??
+      (textKey ? textSeenIndex.get(textKey) : undefined)
+    if (Number.isFinite(existingIndex)) {
+      const existing = merged[existingIndex]
+      if (!existing.gradeLevel && gradeLevel) {
+        existing.gradeLevel = gradeLevel
+      }
+      if (existing.kind === "prompt" && kind !== "prompt") {
+        existing.kind = kind
+      }
+      if (!existing.parentSourceKey && parentSourceKey) {
+        existing.parentSourceKey = parentSourceKey
+      }
+      if (!existing.label && label) {
+        existing.label = label
+      }
+      if (!existing.anchorText && anchorText) {
+        existing.anchorText = anchorText
+      }
+      if (existing.questionType === "unknown" && questionType !== "unknown") {
+        existing.questionType = questionType
+      }
+      if (
+        responseTypes.length > 0 &&
+        responseTypes[0] !== "unknown" &&
+        (!Array.isArray(existing.responseTypes) ||
+          existing.responseTypes.length === 0 ||
+          existing.responseTypes[0] === "unknown")
+      ) {
+        existing.responseTypes = responseTypes
+      }
+      if (!existing.marksRaw && marksRaw) {
+        existing.marksRaw = marksRaw
+      }
+      if (!Number.isFinite(normalizeWorksheetMarksValue(existing.marksValue)) && Number.isFinite(marksValue)) {
+        existing.marksValue = marksValue
+      }
+      if (!existing.marksEach && marksEach) {
+        existing.marksEach = marksEach
+      }
+      if ((!Array.isArray(existing.options) || existing.options.length === 0) && options.length > 0) {
+        existing.options = options
+      }
+      if (!existing.contextWindow && contextWindow) {
+        existing.contextWindow = contextWindow
+      }
+      return
+    }
+    seenIndex.set(sourceKey, merged.length)
+    if (looseKey) {
+      looseSeenIndex.set(looseKey, merged.length)
+    }
+    if (textKey) {
+      textSeenIndex.set(textKey, merged.length)
+    }
+    merged.push({
+      questionText,
+      pageIndex,
+      gradeLevel,
+      kind,
+      sourceKey,
+      parentSourceKey,
+      label,
+      anchorText,
+      questionType,
+      responseTypes,
+      marksRaw,
+      marksValue,
+      marksEach,
+      options,
+      contextWindow
+    })
+  }
+  for (const question of Array.isArray(primaryQuestions) ? primaryQuestions : []) {
+    append(question)
+  }
+  for (const question of Array.isArray(secondaryQuestions) ? secondaryQuestions : []) {
+    append(question)
+  }
+  return merged.slice(0, WORKSHEET_QUESTION_MAX_ITEMS)
+}
+
+function normalizeWorksheetQuestionList(questions, existingQuestions = []) {
+  const source = Array.isArray(questions) ? questions : []
+  const existing = Array.isArray(existingQuestions) ? existingQuestions : []
+  const preserveById = new Map()
+  const preserveBySourceKey = new Map()
+  for (const item of existing) {
+    if (item?.id) {
+      preserveById.set(item.id, item)
+    }
+    if (item?.sourceKey) {
+      preserveBySourceKey.set(item.sourceKey, item)
+    }
+  }
+  const dedupe = new Set()
+  const looseDedupe = new Set()
+  const textDedupe = new Set()
+  const normalized = []
+  for (let index = 0; index < source.length; index += 1) {
+    const item = source[index]
+    const questionText = clampText(item?.questionText || item?.question || item?.text || item?.prompt, 360)
+    if (!questionText) {
+      continue
+    }
+    const pageIndex = parseOptionalPageIndex(item?.pageIndex) ?? 0
+    const gradeLevel = clampText(item?.gradeLevel || item?.grade || item?.points || "", 80)
+    const kind = normalizeWorksheetKind(item?.kind)
+    const parentSourceKey = normalizeWorksheetParentSourceKey(item?.parentSourceKey || item?.parentKey || item?.parentId)
+    const sourceKey = makeWorksheetStableSourceKey({
+      sourceKey: item?.sourceKey,
+      pageIndex,
+      questionText,
+      kind,
+      parentSourceKey
+    })
+    const looseKey = `${pageIndex}:${kind}:${normalizeWorksheetSearchText(questionText)}`
+    const textKey = `${pageIndex}:${normalizeWorksheetSearchText(questionText)}`
+    if (
+      !sourceKey ||
+      dedupe.has(sourceKey) ||
+      (looseKey && looseDedupe.has(looseKey)) ||
+      (textKey && textDedupe.has(textKey))
+    ) {
+      continue
+    }
+    dedupe.add(sourceKey)
+    if (looseKey) {
+      looseDedupe.add(looseKey)
+    }
+    if (textKey) {
+      textDedupe.add(textKey)
+    }
+    const id = sanitizeText(item?.id) || buildWorksheetQuestionId(questionText, pageIndex, kind, sourceKey)
+    const preserved = preserveById.get(id) || preserveBySourceKey.get(sourceKey)
+    const preservedResponseTypes = normalizeWorksheetResponseTypes(preserved?.responseTypes)
+    const incomingResponseTypes = normalizeWorksheetResponseTypes(item?.responseTypes)
+    const responseTypes =
+      incomingResponseTypes.length > 0 && incomingResponseTypes[0] !== "unknown"
+        ? incomingResponseTypes
+        : preservedResponseTypes
+    const questionTypeIncoming = normalizeWorksheetQuestionType(
+      item?.questionType || item?.responseType || item?.primaryResponseType
+    )
+    const questionTypePreserved = normalizeWorksheetQuestionType(preserved?.questionType)
+    const questionType =
+      questionTypeIncoming !== "unknown"
+        ? questionTypeIncoming
+        : responseTypes[0] && responseTypes[0] !== "unknown"
+          ? responseTypes[0]
+          : questionTypePreserved
+    const marksValueIncoming =
+      normalizeWorksheetMarksValue(item?.marksValue) ?? normalizeWorksheetMarksValue(item?.marks?.value)
+    const marksValuePreserved = normalizeWorksheetMarksValue(preserved?.marksValue)
+    normalized.push({
+      id,
+      questionText,
+      pageIndex,
+      gradeLevel,
+      kind,
+      sourceKey,
+      parentSourceKey,
+      parentId: "",
+      childIds: [],
+      hasChildren: false,
+      batchChildrenOnClick: false,
+      label: normalizeWorksheetLabel(item?.label || deriveWorksheetLabelForCandidate(questionText, kind)),
+      anchorText: clampText(item?.anchorText || questionText, 240),
+      questionType: questionType || "unknown",
+      responseTypes: responseTypes || ["unknown"],
+      marksRaw: clampText(item?.marksRaw || item?.marks || preserved?.marksRaw, 80),
+      marksValue: Number.isFinite(marksValueIncoming) ? marksValueIncoming : marksValuePreserved,
+      marksEach: Boolean(item?.marksEach || item?.marks?.each || preserved?.marksEach),
+      options: normalizeWorksheetOptions(item?.options || preserved?.options),
+      contextWindow: clampText(item?.contextWindow || item?.context || preserved?.contextWindow, 900),
+      sortIndex: Number.isFinite(Number(item?.sortIndex)) ? Math.max(0, Math.floor(Number(item.sortIndex))) : index,
+      answerText: normalizeWorksheetAnswerText(preserved?.answerText, 1200),
+      answerLength:
+        preserved?.answerLength === "short" || preserved?.answerLength === "long"
+          ? preserved.answerLength
+          : "",
+      answerLoading: false,
+      overlayVisible: Boolean(preserved?.overlayVisible),
+      provider: sanitizeText(preserved?.provider),
+      warnings: Array.isArray(preserved?.warnings) ? preserved.warnings.map((warning) => clampText(warning, 180)) : [],
+      answeredAt: Number.isFinite(preserved?.answeredAt) ? Number(preserved.answeredAt) : 0
+    })
+    if (normalized.length >= WORKSHEET_QUESTION_MAX_ITEMS) {
+      break
+    }
+  }
+  const bySourceKey = new Map()
+  const byId = new Map()
+  for (const item of normalized) {
+    if (item.sourceKey) {
+      bySourceKey.set(item.sourceKey, item)
+    }
+    if (item.id) {
+      byId.set(item.id, item)
+    }
+  }
+  for (const item of normalized) {
+    const parentSourceKey = sanitizeText(item.parentSourceKey)
+    if (!parentSourceKey) {
+      continue
+    }
+    const parent =
+      bySourceKey.get(parentSourceKey) ||
+      byId.get(parentSourceKey) ||
+      normalized.find(
+        (candidate) =>
+          candidate !== item &&
+          candidate.pageIndex === item.pageIndex &&
+          normalizeWorksheetSearchText(candidate.label) === normalizeWorksheetSearchText(parentSourceKey)
+      )
+    if (!parent?.id || parent.id === item.id) {
+      continue
+    }
+    item.parentId = parent.id
+    if (!Array.isArray(parent.childIds)) {
+      parent.childIds = []
+    }
+    if (!parent.childIds.includes(item.id)) {
+      parent.childIds.push(item.id)
+    }
+  }
+  for (const item of normalized) {
+    item.hasChildren = Array.isArray(item.childIds) && item.childIds.length > 0
+    item.batchChildrenOnClick = item.hasChildren
+  }
+  return normalized
+}
+
+async function collectWorksheetDetectionPages(pdfDoc) {
+  if (!pdfDoc || typeof pdfDoc.numPages !== "number") {
+    return []
+  }
+  const pages = []
+  const maxPages = Math.min(Math.max(1, WORKSHEET_DETECTION_MAX_PAGES), Math.max(1, pdfDoc.numPages))
+  let totalChars = 0
+  for (let pageIndex = 0; pageIndex < maxPages; pageIndex += 1) {
+    const rawText = await getPageText(pdfDoc, pageIndex)
+    const structuredText = structureWorksheetDetectionText(rawText)
+    if (!structuredText) {
+      continue
+    }
+    const remainingChars = WORKSHEET_DETECTION_MAX_TOTAL_CHARS - totalChars
+    if (remainingChars <= 0) {
+      break
+    }
+    const maxChars = Math.min(WORKSHEET_PAGE_SNIPPET_MAX_CHARS, remainingChars)
+    const text = truncateWorksheetText(structuredText, maxChars)
+    if (!text || text.length < 12) {
+      continue
+    }
+    pages.push({
+      pageIndex,
+      text
+    })
+    totalChars += text.length
+    if (totalChars >= WORKSHEET_DETECTION_MAX_TOTAL_CHARS) {
+      break
+    }
+  }
+  return pages
+}
+
+function isWorksheetDetectionCurrent(loadToken, runToken, docId) {
+  const activeDocId = deriveDocId(currentPdf)
+  return (
+    loadToken === renderState.loadToken &&
+    runToken === worksheetRunToken &&
+    activeDocId === docId &&
+    Boolean(currentPdf) &&
+    Boolean(renderState.pdfDoc)
+  )
+}
+
+async function ensureWorksheetQuestionsForCurrentDocument(options = {}) {
+  if (!currentPdf || !renderState.pdfDoc) {
+    return []
+  }
+  const force = Boolean(options?.force)
+  const worksheetState = getWorksheetState()
+  const docId = deriveDocId(currentPdf)
+  if (!force && worksheetState.docId === docId && worksheetState.status === "ready") {
+    return worksheetState.questions
+  }
+  if (!force && worksheetState.docId === docId && worksheetState.detectionPromise) {
+    return worksheetState.detectionPromise
+  }
+
+  const preservedQuestions =
+    worksheetState.docId === docId && Array.isArray(worksheetState.questions) ? worksheetState.questions : []
+  const loadToken = renderState.loadToken
+  const runToken = ++worksheetRunToken
+  worksheetState.docId = docId
+  worksheetState.status = "loading"
+  worksheetState.errorMessage = ""
+  worksheetState.detectionWarnings = []
+  worksheetState.parserModel = null
+  worksheetState.parserXml = ""
+  if (force) {
+    worksheetState.questions = []
+  }
+  if (sidebarUiState.activeTab === "explain" && isWorksheetMode()) {
+    renderPanel()
+  }
+  renderPdfWorksheetOverlays()
+
+  const detectionPromise = (async () => {
+    try {
+      const worksheetPages = await collectWorksheetDetectionPages(renderState.pdfDoc)
+      if (!isWorksheetDetectionCurrent(loadToken, runToken, docId)) {
+        return worksheetState.questions
+      }
+      if (worksheetPages.length === 0) {
+        worksheetState.status = "ready"
+        worksheetState.questions = []
+        worksheetState.errorMessage = ""
+        worksheetState.detectionWarnings = []
+        worksheetState.parserModel = null
+        worksheetState.parserXml = ""
+        return []
+      }
+
+      let parserQuestions = []
+      let parserWarnings = []
+      try {
+        const parsedModel = parseWorksheetPagesToModel(worksheetPages, {
+          title: getCurrentPdfTitleLabel(),
+          maxItems: WORKSHEET_QUESTION_MAX_ITEMS
+        })
+        parserQuestions = flattenWorksheetModelToQuestions(parsedModel, {
+          maxItems: WORKSHEET_QUESTION_MAX_ITEMS
+        })
+        worksheetState.parserModel = parsedModel
+        worksheetState.parserXml = serializeWorksheetModelAsXml(parsedModel)
+      } catch (error) {
+        const reason = clampText(error?.message || "Unknown parser error", 120)
+        parserWarnings.push(`Worksheet parser failed; fallback heuristics/LLM used. (${reason})`)
+        worksheetState.parserModel = null
+        worksheetState.parserXml = ""
+        logger.warn("Worksheet parser fallback used", {
+          docId,
+          message: reason
+        })
+      }
+      if (parserQuestions.length === 0 && parserWarnings.length === 0) {
+        parserWarnings.push("Worksheet parser did not find tagged questions; fallback heuristics/LLM used.")
+      }
+      const heuristicQuestions =
+        parserQuestions.length > 0 ? parserQuestions : extractWorksheetQuestionsFromPages(worksheetPages)
+      let llmQuestions = []
+      let llmWarnings = [...parserWarnings]
+
+      try {
+        const { response, warnings } = await generateLLM("worksheet_questions", {
+          title: getCurrentPdfTitleLabel(),
+          worksheetPages,
+          readingMode: getReadingModeOrDefault()
+        })
+        llmQuestions = Array.isArray(response?.questions) ? response.questions : []
+        const normalizedWarnings = Array.isArray(warnings)
+          ? warnings.map((warning) => clampText(warning, 180)).filter(Boolean)
+          : []
+        llmWarnings = [...llmWarnings, ...normalizedWarnings]
+      } catch (error) {
+        const reason = clampText(error?.message || "Unknown LLM error", 120)
+        llmWarnings = [...llmWarnings, `Worksheet question LLM failed; used deterministic detection. (${reason})`]
+        logger.warn("Worksheet question extraction fallback used", {
+          docId,
+          message: reason
+        })
+      }
+
+      if (!isWorksheetDetectionCurrent(loadToken, runToken, docId)) {
+        return worksheetState.questions
+      }
+
+      const mergedQuestions = mergeWorksheetQuestionCandidates(heuristicQuestions, llmQuestions)
+      worksheetState.questions = normalizeWorksheetQuestionList(mergedQuestions, preservedQuestions)
+      worksheetState.status = "ready"
+      worksheetState.errorMessage = ""
+      worksheetState.detectionWarnings = llmWarnings
+      return worksheetState.questions
+    } catch (error) {
+      if (!isWorksheetDetectionCurrent(loadToken, runToken, docId)) {
+        return worksheetState.questions
+      }
+      worksheetState.status = "error"
+      worksheetState.errorMessage = clampText(error?.message || "Failed to detect worksheet questions.", 220)
+      worksheetState.detectionWarnings = []
+      return worksheetState.questions
+    } finally {
+      if (worksheetState.detectionPromise === detectionPromise) {
+        worksheetState.detectionPromise = null
+      }
+      if (isWorksheetDetectionCurrent(loadToken, runToken, docId)) {
+        if (sidebarUiState.activeTab === "explain" && isWorksheetMode()) {
+          renderPanel()
+        }
+        renderPdfWorksheetOverlays()
+      }
+    }
+  })()
+
+  worksheetState.detectionPromise = detectionPromise
+  return detectionPromise
+}
+
+function clearPdfWorksheetOverlays() {
+  for (const pageNode of renderState.pageNodes) {
+    if (!(pageNode instanceof HTMLElement)) {
+      continue
+    }
+    const overlays = pageNode.querySelectorAll(".pdfWorksheetOverlay")
+    for (const overlay of overlays) {
+      overlay.remove()
+    }
+    const bubbles = pageNode.querySelectorAll(".pdfWorksheetBubble")
+    for (const bubble of bubbles) {
+      bubble.remove()
+    }
+    const answerCards = pageNode.querySelectorAll(".pdfWorksheetAnswerCard")
+    for (const answerCard of answerCards) {
+      answerCard.remove()
+    }
+    const inlineAnswers = pageNode.querySelectorAll(
+      ".pdfWorksheetInlineAnswer, .pdfWorksheetInlineFillAnswer, .pdfWorksheetTableValue, .pdfWorksheetTableNote"
+    )
+    for (const inlineAnswer of inlineAnswers) {
+      inlineAnswer.remove()
+    }
+    const highlightedOptions = pageNode.querySelectorAll(".clarify-worksheet-option-correct")
+    for (const highlightedOption of highlightedOptions) {
+      highlightedOption.classList.remove("clarify-worksheet-option-correct")
+    }
+  }
+}
+
+function findWorksheetQuestionAnchorInPage(pageNode, questionText) {
+  if (!(pageNode instanceof HTMLElement)) {
+    return null
+  }
+  const pageSurface = pageNode.querySelector(".pdfPageSurface")
+  const textLayer = pageNode.querySelector(".textLayer")
+  if (!(pageSurface instanceof HTMLElement) || !(textLayer instanceof HTMLElement)) {
+    return null
+  }
+  const spans = Array.from(textLayer.querySelectorAll("span")).filter((span) => span instanceof HTMLElement)
+  if (spans.length === 0) {
+    return null
+  }
+
+  const normalizedQuestion = normalizeWorksheetSearchText(questionText)
+  if (!normalizedQuestion) {
+    return null
+  }
+  const tokens = normalizedQuestion
+    .split(" ")
+    .filter((token) => token.length >= 3 && !RETRIEVAL_STOP_WORDS.has(token))
+    .slice(0, 10)
+  if (tokens.length === 0) {
+    return null
+  }
+  const surfaceRect = pageSurface.getBoundingClientRect()
+  let bestSpan = null
+  let bestScore = Number.NEGATIVE_INFINITY
+
+  for (const span of spans) {
+    const spanText = normalizeWorksheetSearchText(span.textContent || "")
+    if (!spanText) {
+      continue
+    }
+
+    let tokenMatches = 0
+    for (const token of tokens) {
+      if (spanText.includes(token)) {
+        tokenMatches += 1
+      }
+    }
+    if (tokenMatches === 0) {
+      continue
+    }
+
+    const spanRect = span.getBoundingClientRect()
+    const topRatio = surfaceRect.height > 0 ? (spanRect.top - surfaceRect.top) / surfaceRect.height : 0
+    const overlapBonus =
+      normalizedQuestion.includes(spanText) || spanText.includes(tokens[0]) ? 2 : 0
+    const score = tokenMatches * 6 + overlapBonus - Math.abs(Math.max(0, topRatio)) * 0.6
+    if (score > bestScore) {
+      bestScore = score
+      bestSpan = span
+    }
+  }
+
+  if (!(bestSpan instanceof HTMLElement)) {
+    const fallback = findSectionAnchorInPage(pageNode, questionText)
+    if (!fallback) {
+      return null
+    }
+    return {
+      ...fallback,
+      textLayer,
+      anchorSpan: fallback.anchorSpan instanceof HTMLElement ? fallback.anchorSpan : null,
+      surfaceRect: fallback.surfaceRect instanceof DOMRect ? fallback.surfaceRect : pageSurface.getBoundingClientRect()
+    }
+  }
+
+  const spanRect = bestSpan.getBoundingClientRect()
+  return {
+    pageSurface,
+    textLayer,
+    left: Math.round(Math.max(4, spanRect.left - surfaceRect.left - 20)),
+    top: Math.round(Math.max(4, spanRect.top - surfaceRect.top)),
+    anchorSpan: bestSpan,
+    surfaceRect
+  }
+}
+
+function shouldShowWorksheetAnswerCardOnPage(question) {
+  if (!question || question.hasChildren) {
+    return false
+  }
+  if (question.answerLoading) {
+    return false
+  }
+  if (!question.overlayVisible) {
+    return false
+  }
+  return Boolean(normalizeWorksheetAnswerText(question.answerText, 1200))
+}
+
+function createWorksheetPdfAnswerCardNode(question, options = {}) {
+  const compact = Boolean(options?.compact)
+  const card = document.createElement("div")
+  card.className = "pdfWorksheetAnswerCard"
+  if (compact) {
+    card.classList.add("isCompact")
+  }
+  if (question.answerLoading) {
+    const loadingText = document.createElement("p")
+    loadingText.className = "worksheetAnswerLine"
+    loadingText.textContent = "Generating answer..."
+    card.append(loadingText)
+    return card
+  }
+  card.append(createWorksheetAnswerRichNode(question, { surface: "pdf", compact }))
+  return card
+}
+
+function measureWorksheetPdfAnswerCardHeight(pageSurface, question, width, compact = false) {
+  if (!(pageSurface instanceof HTMLElement)) {
+    return 0
+  }
+  const measureNode = createWorksheetPdfAnswerCardNode(question, { compact })
+  measureNode.style.left = "-10000px"
+  measureNode.style.top = "0"
+  measureNode.style.width = `${Math.max(160, Math.floor(Number(width) || 160))}px`
+  measureNode.style.visibility = "hidden"
+  pageSurface.append(measureNode)
+  const measured = Math.ceil(measureNode.getBoundingClientRect().height || 0)
+  measureNode.remove()
+  return Math.max(0, measured)
+}
+
+function highlightWorksheetCorrectOptionOnPage(pageNode, question) {
+  if (!(pageNode instanceof HTMLElement) || !question) {
+    return 0
+  }
+  const selectedOptions = detectWorksheetSelectedOptions(question, question.answerText)
+  if (selectedOptions.length === 0) {
+    return 0
+  }
+  const textLayer = pageNode.querySelector(".textLayer")
+  if (!(textLayer instanceof HTMLElement)) {
+    return 0
+  }
+  const spans = Array.from(textLayer.querySelectorAll("span")).filter((span) => span instanceof HTMLElement)
+  if (spans.length === 0) {
+    return 0
+  }
+
+  const usedSpans = new Set()
+  let highlightedCount = 0
+  for (const target of selectedOptions) {
+    const targetSearch = normalizeWorksheetSearchText(target.text)
+    const targetTokens = targetSearch.split(" ").filter((token) => token.length >= 3).slice(0, 8)
+    let bestSpan = null
+    let bestScore = Number.NEGATIVE_INFINITY
+    for (const span of spans) {
+      if (usedSpans.has(span)) {
+        continue
+      }
+      const spanText = normalizeWorksheetSearchText(span.textContent || "")
+      if (!spanText) {
+        continue
+      }
+      let score = 0
+      if (target.key) {
+        const keyPattern = new RegExp(`(?:^|\\b)${escapeRegExp(target.key)}(?:\\)|\\.|\\b)`, "i")
+        if (keyPattern.test(span.textContent || "")) {
+          score += 4
+        }
+      }
+      if (targetSearch && spanText.includes(targetSearch)) {
+        score += 6
+      }
+      for (const token of targetTokens) {
+        if (spanText.includes(token)) {
+          score += 1
+        }
+      }
+      if (score > bestScore) {
+        bestScore = score
+        bestSpan = span
+      }
+    }
+    if (bestSpan instanceof HTMLElement && bestScore > 0) {
+      bestSpan.classList.add("clarify-worksheet-option-correct")
+      usedSpans.add(bestSpan)
+      highlightedCount += 1
+    }
+  }
+  return highlightedCount
+}
+
+function getWorksheetPageTextContext(pageNode) {
+  if (!(pageNode instanceof HTMLElement)) {
+    return null
+  }
+  const pageSurface = pageNode.querySelector(".pdfPageSurface")
+  const textLayer = pageNode.querySelector(".textLayer")
+  if (!(pageSurface instanceof HTMLElement) || !(textLayer instanceof HTMLElement)) {
+    return null
+  }
+  const spans = Array.from(textLayer.querySelectorAll("span")).filter((span) => span instanceof HTMLElement)
+  if (spans.length === 0) {
+    return null
+  }
+  return {
+    pageSurface,
+    textLayer,
+    spans,
+    surfaceRect: pageSurface.getBoundingClientRect()
+  }
+}
+
+function getWorksheetRelativeRect(target, surfaceRect) {
+  if (!(target instanceof HTMLElement) || !(surfaceRect instanceof DOMRect)) {
+    return null
+  }
+  const rect = target.getBoundingClientRect()
+  return {
+    left: rect.left - surfaceRect.left,
+    right: rect.right - surfaceRect.left,
+    top: rect.top - surfaceRect.top,
+    bottom: rect.bottom - surfaceRect.top,
+    width: rect.width,
+    height: rect.height
+  }
+}
+
+function getWorksheetInlineAnswerDisplayText(question, options = {}) {
+  const maxLength = Number.isFinite(Number(options?.maxLength)) ? Math.max(24, Math.floor(Number(options.maxLength))) : 220
+  const firstLineOnly = Boolean(options?.firstLineOnly)
+  const verdictOnly = Boolean(options?.verdictOnly)
+  const rawAnswer = options?.answerText != null ? options.answerText : question?.answerText
+  const plain = stripWorksheetAnswerFormatting(rawAnswer)
+  if (!plain) {
+    return ""
+  }
+  const responseTypes = normalizeWorksheetResponseTypes(question?.responseTypes)
+  if (responseTypes.includes("mcq") || responseTypes.includes("multi_select")) {
+    const selectedOptions = detectWorksheetSelectedOptions(question, plain)
+    if (selectedOptions.length > 0) {
+      return clampText(
+        selectedOptions.map((entry) => (entry.key ? `${entry.key}) ${entry.text}` : entry.text)).join(", "),
+        maxLength
+      )
+    }
+  }
+  if (responseTypes.includes("true_false")) {
+    const trueFalse = parseWorksheetTrueFalseAnswer(plain)
+    if (verdictOnly && trueFalse.verdict) {
+      return trueFalse.verdict
+    }
+    if (trueFalse.verdict && trueFalse.explanation) {
+      return clampText(`${trueFalse.verdict}. ${trueFalse.explanation}`, maxLength)
+    }
+    if (trueFalse.verdict) {
+      return trueFalse.verdict
+    }
+  }
+  let text = plain.replace(/^\*{0,2}\s*answer\s*[:\-]\s*/i, "").trim()
+  if (firstLineOnly) {
+    const firstLine = text.split(/\n+/).map((line) => line.trim()).find(Boolean)
+    if (firstLine) {
+      text = firstLine
+    }
+  }
+  return clampText(text, maxLength)
+}
+
+function createWorksheetInlineAnswerNode(question, options = {}) {
+  const node = document.createElement("div")
+  node.className = "pdfWorksheetInlineAnswer"
+  if (options?.termLike) {
+    node.classList.add("isTerm")
+  }
+  if (options?.compact) {
+    node.classList.add("isCompact")
+  }
+  const answerOverride = normalizeWorksheetAnswerText(options?.answerText, 900)
+  if (answerOverride) {
+    const line = document.createElement("p")
+    line.className = "worksheetAnswerLine"
+    if (options?.termLike) {
+      line.classList.add("isTerm")
+    }
+    appendWorksheetInlineMarkdown(line, answerOverride)
+    node.append(line)
+    return node
+  }
+  node.append(createWorksheetAnswerRichNode(question, { surface: "pdf", compact: true }))
+  return node
+}
+
+function measureWorksheetInlineAnswerHeight(pageSurface, question, width, options = {}) {
+  if (!(pageSurface instanceof HTMLElement)) {
+    return 0
+  }
+  const measureNode = createWorksheetInlineAnswerNode(question, options)
+  measureNode.style.left = "-10000px"
+  measureNode.style.top = "0"
+  measureNode.style.width = `${Math.max(160, Math.floor(Number(width) || 160))}px`
+  measureNode.style.visibility = "hidden"
+  pageSurface.append(measureNode)
+  const measured = Math.ceil(measureNode.getBoundingClientRect().height || 0)
+  measureNode.remove()
+  return Math.max(0, measured)
+}
+
+function tryPlaceWorksheetTermAnswerOnPage(entry, pageContext) {
+  const question = entry?.question
+  const anchor = entry?.anchor
+  if (!question || !anchor || !pageContext) {
+    return false
+  }
+  const anchorSpan = anchor.anchorSpan instanceof HTMLElement ? anchor.anchorSpan : null
+  if (!anchorSpan) {
+    return false
+  }
+  const relative = getWorksheetRelativeRect(anchorSpan, pageContext.surfaceRect)
+  if (!relative) {
+    return false
+  }
+  let termAnswer = getWorksheetInlineAnswerDisplayText(question, { maxLength: 320 })
+  if (!termAnswer) {
+    return false
+  }
+  const termLabel = sanitizeText(question.anchorText || question.label)
+  if (termLabel) {
+    const labelPattern = new RegExp(`^${escapeRegExp(termLabel)}\\s*[:\\-]\\s*`, "i")
+    termAnswer = termAnswer.replace(labelPattern, "").trim() || termAnswer
+  }
+  const pageWidth = Math.max(1, pageContext.pageSurface.clientWidth)
+  let left = Math.round(relative.right + 14)
+  if (left > pageWidth - 120) {
+    left = Math.round(Math.min(pageWidth - 120, relative.left + Math.max(120, relative.width + 24)))
+  }
+  left = Math.max(6, left)
+  const width = Math.max(92, Math.min(460, pageWidth - left - 8))
+  if (width < 92) {
+    return false
+  }
+  const top = Math.max(4, Math.round(relative.top - 2))
+  const node = createWorksheetInlineAnswerNode(question, {
+    answerText: termAnswer,
+    termLike: true,
+    compact: true
+  })
+  node.style.left = `${left}px`
+  node.style.top = `${top}px`
+  node.style.width = `${Math.floor(width)}px`
+  pageContext.pageSurface.append(node)
+  return true
+}
+
+function tryPlaceWorksheetFillBlankAnswerOnPage(entry, pageContext) {
+  const question = entry?.question
+  const anchor = entry?.anchor
+  if (!question || !anchor || !pageContext) {
+    return false
+  }
+  const fillAnswer = getWorksheetInlineAnswerDisplayText(question, {
+    maxLength: 140,
+    firstLineOnly: true
+  })
+  if (!fillAnswer) {
+    return false
+  }
+  const anchorTop = Number(anchor.top) || 0
+  let bestRect = null
+  let bestScore = Number.NEGATIVE_INFINITY
+  for (const span of pageContext.spans) {
+    const rawText = span.textContent || ""
+    if (!/_{2,}|\.{3,}|-{3,}/.test(rawText)) {
+      continue
+    }
+    const rect = getWorksheetRelativeRect(span, pageContext.surfaceRect)
+    if (!rect) {
+      continue
+    }
+    const distance = Math.abs(rect.top - anchorTop)
+    if (distance > 240) {
+      continue
+    }
+    let score = 30 - Math.min(distance, 200) * 0.12
+    score += Math.min(120, Math.max(0, rect.width)) * 0.05
+    if (rect.top >= anchorTop - 10) {
+      score += 4
+    }
+    if (score > bestScore) {
+      bestScore = score
+      bestRect = rect
+    }
+  }
+  if (!bestRect || bestScore <= 0) {
+    return false
+  }
+  const node = document.createElement("div")
+  node.className = "pdfWorksheetInlineFillAnswer"
+  node.textContent = fillAnswer
+  node.style.left = `${Math.round(bestRect.left + 2)}px`
+  node.style.top = `${Math.max(2, Math.round(bestRect.top - 2))}px`
+  node.style.maxWidth = `${Math.max(96, Math.round(bestRect.width - 4))}px`
+  pageContext.pageSurface.append(node)
+  return true
+}
+
+function parseWorksheetAddressToken(value) {
+  const source = sanitizeText(value).toLowerCase().replace(/,/g, "")
+  if (!source) {
+    return { text: "", bytes: null }
+  }
+  const tokenMatch = source.match(/-?\d+(?:\.\d+)?\s*(?:kb|mb|gb|b|bytes?)?/)
+  const token = sanitizeText(tokenMatch?.[0] || source)
+  const numberMatch = token.match(/-?\d+(?:\.\d+)?/)
+  const numeric = Number(numberMatch?.[0])
+  const unit = token.match(/\b(kb|mb|gb|b|bytes?)\b/)?.[1] || ""
+  let bytes = null
+  if (Number.isFinite(numeric)) {
+    let multiplier = 1
+    if (unit === "kb") {
+      multiplier = 1024
+    } else if (unit === "mb") {
+      multiplier = 1024 * 1024
+    } else if (unit === "gb") {
+      multiplier = 1024 * 1024 * 1024
+    }
+    bytes = Math.round(numeric * multiplier)
+  }
+  return {
+    text: normalizeWorksheetSearchText(token || source),
+    bytes
+  }
+}
+
+function normalizeWorksheetPhysicalAddressAnswer(value) {
+  const source = sanitizeText(value)
+  if (!source) {
+    return ""
+  }
+  const trimmed = source.replace(/^physical(?:\s+address)?\s*(?:=|:|-)?\s*/i, "").trim()
+  if (!trimmed) {
+    return ""
+  }
+  if (/\bfault\b/i.test(trimmed)) {
+    return "Fault"
+  }
+  const addressMatches = trimmed.match(/-?\d+(?:\.\d+)?\s*(?:kb|mb|gb|b|bytes?)/gi)
+  if (Array.isArray(addressMatches) && addressMatches.length > 0) {
+    return sanitizeText(addressMatches[addressMatches.length - 1])
+  }
+  return clampText(trimmed, 120)
+}
+
+function parseWorksheetTableEntriesFromAnswer(answerText) {
+  const source = normalizeWorksheetAnswerText(answerText, 1200)
+  if (!source) {
+    return []
+  }
+  const prepared = source
+    .replace(/\bvirtual\s+address\b/gi, "\nVirtual address")
+    .replace(/;\s*/g, "\n")
+  const lines = prepared
+    .split(/\n+/)
+    .map((line) => sanitizeText(line.replace(/^[-*]\s*/, "").replace(/^\d+\)\s*/, "")))
+    .filter(Boolean)
+  const entries = []
+  const dedupe = new Set()
+  for (const line of lines) {
+    let virtualText = ""
+    const explicitVirtual = line.match(/virtual\s+address\s*(?:=|:|-)?\s*([0-9]+(?:\.\d+)?\s*(?:kb|mb|gb|b|bytes?)?)/i)
+    if (explicitVirtual?.[1]) {
+      virtualText = sanitizeText(explicitVirtual[1])
+    } else {
+      const leadingToken = line.match(/^([0-9]+(?:\.\d+)?\s*(?:kb|mb|gb|b|bytes?)?)/i)
+      if (leadingToken?.[1]) {
+        virtualText = sanitizeText(leadingToken[1])
+      }
+    }
+    if (!virtualText) {
+      continue
+    }
+    const virtualToken = parseWorksheetAddressToken(virtualText)
+    const rowKey = virtualToken.bytes != null ? `b:${virtualToken.bytes}` : `t:${virtualToken.text}`
+    if (!rowKey || dedupe.has(rowKey)) {
+      continue
+    }
+    dedupe.add(rowKey)
+
+    let physicalText = ""
+    let noteText = ""
+    const faultTail = line.match(/\bfault\b([^.;]*)/i)
+    if (faultTail) {
+      physicalText = "Fault"
+      const reason = sanitizeText(faultTail[1] || "")
+      if (reason) {
+        noteText = clampText(`Fault: ${reason}`, 140)
+      } else {
+        noteText = "Fault"
+      }
+    } else {
+      const physicalMatch =
+        line.match(/physical(?:\s+address)?\s*(?:=|:|-)?\s*([^,;]+)/i) ||
+        line.match(/(?:=|->)\s*([^,;]+)/)
+      if (physicalMatch?.[1]) {
+        physicalText = normalizeWorksheetPhysicalAddressAnswer(physicalMatch[1])
+      }
+      const noteMatch = line.match(/\(([^)]+)\)/)
+      if (noteMatch?.[1]) {
+        noteText = clampText(sanitizeText(noteMatch[1]), 120)
+      }
+      if (!physicalText && !noteText) {
+        const residue = sanitizeText(line.replace(/virtual\s+address[^:]*:?/i, ""))
+        if (residue) {
+          physicalText = normalizeWorksheetPhysicalAddressAnswer(residue)
+        }
+      }
+    }
+    if (!physicalText && !noteText) {
+      continue
+    }
+    entries.push({
+      virtualText,
+      virtualBytes: virtualToken.bytes,
+      physicalText: clampText(physicalText, 120),
+      noteText: clampText(noteText, 140)
+    })
+  }
+  return entries
+}
+
+function findWorksheetTableColumnStarts(pageContext, anchorTop) {
+  if (!pageContext) {
+    return {
+      definitionStart: null,
+      physicalStart: null,
+      notesStart: null
+    }
+  }
+  const best = {
+    definitionStart: null,
+    definitionScore: Number.NEGATIVE_INFINITY,
+    physicalStart: null,
+    physicalScore: Number.NEGATIVE_INFINITY,
+    notesStart: null,
+    notesScore: Number.NEGATIVE_INFINITY
+  }
+  for (const span of pageContext.spans) {
+    const text = normalizeWorksheetSearchText(span.textContent || "")
+    if (!text) {
+      continue
+    }
+    const rect = getWorksheetRelativeRect(span, pageContext.surfaceRect)
+    if (!rect) {
+      continue
+    }
+    if (rect.top < anchorTop - 100 || rect.top > anchorTop + 360) {
+      continue
+    }
+    const topDistance = Math.abs(rect.top - anchorTop)
+    if (text.includes("definition")) {
+      const score = 34 - Math.min(topDistance, 200) * 0.15
+      if (score > best.definitionScore) {
+        best.definitionScore = score
+        best.definitionStart = Math.round(rect.left)
+      }
+    }
+    if (text.includes("physical address")) {
+      const score = 40 - Math.min(topDistance, 200) * 0.15
+      if (score > best.physicalScore) {
+        best.physicalScore = score
+        best.physicalStart = Math.round(rect.left)
+      }
+    }
+    if (text === "notes" || text.includes("notes ")) {
+      const score = 38 - Math.min(topDistance, 200) * 0.15
+      if (score > best.notesScore) {
+        best.notesScore = score
+        best.notesStart = Math.round(rect.left)
+      }
+    }
+  }
+  return {
+    definitionStart: best.definitionStart,
+    physicalStart: best.physicalStart,
+    notesStart: best.notesStart
+  }
+}
+
+function findWorksheetBestTableRowSpan(pageContext, rowEntry, anchorTop, usedSpans) {
+  if (!pageContext || !rowEntry) {
+    return null
+  }
+  const targetSearch = normalizeWorksheetSearchText(rowEntry.virtualText)
+  let bestSpan = null
+  let bestScore = Number.NEGATIVE_INFINITY
+  for (const span of pageContext.spans) {
+    if (usedSpans.has(span)) {
+      continue
+    }
+    const spanTextRaw = sanitizeText(span.textContent || "")
+    if (!spanTextRaw || spanTextRaw.length > 24) {
+      continue
+    }
+    const rect = getWorksheetRelativeRect(span, pageContext.surfaceRect)
+    if (!rect) {
+      continue
+    }
+    if (rect.top < anchorTop + 16 || rect.top > anchorTop + 920) {
+      continue
+    }
+    const spanSearch = normalizeWorksheetSearchText(spanTextRaw)
+    const spanToken = parseWorksheetAddressToken(spanTextRaw)
+    let score = 0
+    if (rowEntry.virtualBytes != null && spanToken.bytes != null && rowEntry.virtualBytes === spanToken.bytes) {
+      score += 14
+    }
+    if (targetSearch && spanSearch === targetSearch) {
+      score += 10
+    } else if (targetSearch && spanSearch && targetSearch.includes(spanSearch)) {
+      score += 6
+    }
+    if (rect.left <= pageContext.pageSurface.clientWidth * 0.58) {
+      score += 4
+    }
+    if (score > bestScore) {
+      bestScore = score
+      bestSpan = span
+    }
+  }
+  if (!(bestSpan instanceof HTMLElement) || bestScore <= 0) {
+    return null
+  }
+  return bestSpan
+}
+
+function isWorksheetTablePlacementCandidate(question) {
+  const source = normalizeWorksheetSearchText(
+    `${question?.questionText || ""} ${question?.anchorText || ""} ${question?.contextWindow || ""}`
+  )
+  if (!source) {
+    return false
+  }
+  if (source.includes("virtual address") && (source.includes("physical address") || source.includes("translate"))) {
+    return true
+  }
+  return source.includes("table") && source.includes("notes")
+}
+
+function tryPlaceWorksheetTableAnswersOnPage(entry, pageContext) {
+  const question = entry?.question
+  if (!question || !pageContext) {
+    return false
+  }
+  const rowEntries = parseWorksheetTableEntriesFromAnswer(question.answerText)
+  if (rowEntries.length === 0) {
+    return false
+  }
+  const anchorTop = Number(entry?.anchor?.top) || 0
+  const columns = findWorksheetTableColumnStarts(pageContext, anchorTop)
+  const pageWidth = Math.max(1, pageContext.pageSurface.clientWidth)
+  const usedSpans = new Set()
+  let placed = 0
+  for (const rowEntry of rowEntries) {
+    const rowSpan = findWorksheetBestTableRowSpan(pageContext, rowEntry, anchorTop, usedSpans)
+    if (!(rowSpan instanceof HTMLElement)) {
+      continue
+    }
+    usedSpans.add(rowSpan)
+    const rowRect = getWorksheetRelativeRect(rowSpan, pageContext.surfaceRect)
+    if (!rowRect) {
+      continue
+    }
+    const physicalLeft = Number.isFinite(columns.physicalStart)
+      ? Number(columns.physicalStart)
+      : Number.isFinite(columns.definitionStart)
+        ? Number(columns.definitionStart)
+        : Math.min(Math.max(rowRect.right + 88, pageWidth * 0.42), pageWidth - 136)
+    const notesLeft = Number.isFinite(columns.notesStart)
+      ? Number(columns.notesStart)
+      : Math.min(Math.max(physicalLeft + Math.max(100, pageWidth * 0.16), physicalLeft + 100), pageWidth - 104)
+    const rowTop = Math.max(4, Math.round(rowRect.top - 1))
+    if (rowEntry.physicalText) {
+      const valueNode = document.createElement("div")
+      valueNode.className = "pdfWorksheetTableValue"
+      valueNode.textContent = rowEntry.physicalText
+      valueNode.style.left = `${Math.round(physicalLeft)}px`
+      valueNode.style.top = `${rowTop}px`
+      valueNode.style.maxWidth = `${Math.max(90, Math.floor(pageWidth - physicalLeft - 10))}px`
+      pageContext.pageSurface.append(valueNode)
+      placed += 1
+    }
+    if (rowEntry.noteText) {
+      const noteNode = document.createElement("div")
+      noteNode.className = "pdfWorksheetTableNote"
+      noteNode.textContent = rowEntry.noteText
+      noteNode.style.left = `${Math.round(notesLeft)}px`
+      noteNode.style.top = `${rowTop}px`
+      noteNode.style.maxWidth = `${Math.max(82, Math.floor(pageWidth - notesLeft - 10))}px`
+      pageContext.pageSurface.append(noteNode)
+      placed += 1
+    }
+  }
+  return placed > 0
+}
+
+function tryPlaceWorksheetInlineAnswerOnPage(entry, availableBelow) {
+  const question = entry?.question
+  const anchor = entry?.anchor
+  if (!question || !anchor) {
+    return false
+  }
+  const pageSurface = anchor.pageSurface
+  if (!(pageSurface instanceof HTMLElement)) {
+    return false
+  }
+  const pageWidth = Math.max(1, pageSurface.clientWidth)
+  const left = Math.min(anchor.left + 24, Math.max(pageWidth - 420, 8))
+  const width = Math.min(420, Math.max(160, pageWidth - left - 10))
+  const top = Math.max(anchor.top + 16, 4)
+  const maxHeight = Number.isFinite(Number(availableBelow))
+    ? Math.max(0, Math.floor(Number(availableBelow)) - 4)
+    : Math.max(0, Math.floor(pageSurface.clientHeight - top - 8))
+  if (maxHeight < 34) {
+    return false
+  }
+  const measured = measureWorksheetInlineAnswerHeight(pageSurface, question, width, {
+    compact: !isWorksheetAnswerShort(question)
+  })
+  if (!Number.isFinite(measured) || measured <= 0 || measured > maxHeight) {
+    return false
+  }
+  const node = createWorksheetInlineAnswerNode(question, {
+    compact: !isWorksheetAnswerShort(question)
+  })
+  node.style.left = `${Math.round(left)}px`
+  node.style.top = `${Math.round(top)}px`
+  node.style.width = `${Math.floor(width)}px`
+  node.style.maxHeight = `${Math.floor(maxHeight)}px`
+  pageSurface.append(node)
+  return true
+}
+
+function tryPlaceWorksheetAnswerOnPage(entry, pageContext, availableBelow) {
+  const question = entry?.question
+  if (!question || question.hasChildren || question.answerLoading) {
+    return false
+  }
+  const answerText = normalizeWorksheetAnswerText(question.answerText, 1200)
+  if (!answerText) {
+    return false
+  }
+  const responseTypes = normalizeWorksheetResponseTypes(question.responseTypes)
+  if (responseTypes.includes("mcq") || responseTypes.includes("multi_select")) {
+    if (highlightWorksheetCorrectOptionOnPage(entry.pageNode, question) > 0) {
+      return true
+    }
+  }
+  const isTermLike =
+    normalizeWorksheetKind(question.kind) === "term" ||
+    normalizeWorksheetQuestionType(question.questionType) === "table_definition"
+  if (isTermLike && tryPlaceWorksheetTermAnswerOnPage(entry, pageContext)) {
+    return true
+  }
+  const fillBlankHint =
+    responseTypes.includes("fill_blank") ||
+    /_{3,}/.test(sanitizeText(question.questionText)) ||
+    /\bfill in the blank\b/i.test(sanitizeText(question.questionText))
+  if (fillBlankHint && tryPlaceWorksheetFillBlankAnswerOnPage(entry, pageContext)) {
+    return true
+  }
+  if (isWorksheetTablePlacementCandidate(question) && tryPlaceWorksheetTableAnswersOnPage(entry, pageContext)) {
+    return true
+  }
+  return tryPlaceWorksheetInlineAnswerOnPage(entry, availableBelow)
+}
+
+function renderPdfWorksheetOverlays() {
+  clearPdfWorksheetOverlays()
+  if (!modeUiState.aiEnabled || !isWorksheetMode()) {
+    return
+  }
+  const worksheetState = getWorksheetState()
+  const questions = Array.isArray(worksheetState.questions) ? worksheetState.questions : []
+  if (questions.length === 0) {
+    return
+  }
+  const byIdMap = getWorksheetQuestionsByIdMap()
+  const orderedQuestions = [...questions].sort((a, b) => {
+    const pageDiff = (parseOptionalPageIndex(a?.pageIndex) ?? 0) - (parseOptionalPageIndex(b?.pageIndex) ?? 0)
+    if (pageDiff !== 0) {
+      return pageDiff
+    }
+    const depthDiff = getWorksheetQuestionDepth(a, byIdMap) - getWorksheetQuestionDepth(b, byIdMap)
+    if (depthDiff !== 0) {
+      return depthDiff
+    }
+    const sortDiff = (Number(a?.sortIndex) || 0) - (Number(b?.sortIndex) || 0)
+    if (sortDiff !== 0) {
+      return sortDiff
+    }
+    return sanitizeText(a?.questionText).localeCompare(sanitizeText(b?.questionText))
+  })
+  const entriesByPage = new Map()
+  for (const question of orderedQuestions) {
+    const pageIndex = parseOptionalPageIndex(question?.pageIndex)
+    if (pageIndex == null) {
+      continue
+    }
+    const pageNode = getPageNodeByIndex(pageIndex)
+    const anchor = findWorksheetQuestionAnchorInPage(pageNode, question.anchorText || question.questionText)
+    if (!anchor) {
+      continue
+    }
+    if (!entriesByPage.has(pageIndex)) {
+      entriesByPage.set(pageIndex, [])
+    }
+    entriesByPage.get(pageIndex).push({
+      question,
+      pageNode,
+      anchor
+    })
+  }
+
+  for (const entries of entriesByPage.values()) {
+    entries.sort((a, b) => a.anchor.top - b.anchor.top)
+    const pageContext = getWorksheetPageTextContext(entries[0]?.pageNode)
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index]
+      const question = entry.question
+      const pageNode = entry.pageNode
+      const anchor = entry.anchor
+
+      const button = document.createElement("button")
+      button.type = "button"
+      button.className = "pdfWorksheetOverlay"
+      button.dataset.pdfWorksheetAction = "answer"
+      button.dataset.questionId = question.id
+      button.style.left = `${anchor.left}px`
+      button.style.top = `${anchor.top}px`
+      button.textContent = "A"
+      if (question.answerLoading) {
+        button.classList.add("isLoading")
+        button.disabled = true
+        button.setAttribute("aria-busy", "true")
+      }
+      if (question.hasChildren) {
+        button.title = question.answerLoading ? "Generating sub-answers..." : "Generate all sub-answers"
+        button.setAttribute("aria-label", question.answerLoading ? "Generating sub-answers" : "Generate all sub-answers")
+      } else {
+        const hasAnswer = Boolean(normalizeWorksheetAnswerText(question.answerText, 1200))
+        button.title = hasAnswer ? "Show/hide answer on page" : "Generate answer"
+        button.setAttribute("aria-label", hasAnswer ? "Show or hide answer on page" : "Generate answer")
+      }
+      anchor.pageSurface.append(button)
+
+      if (!shouldShowWorksheetAnswerCardOnPage(question)) {
+        continue
+      }
+
+      const pageSurface = anchor.pageSurface
+      const pageWidth = Math.max(1, pageSurface.clientWidth)
+      const inlineTop = Math.max(anchor.top + 18, 4)
+      const nextTop = index + 1 < entries.length ? entries[index + 1].anchor.top : Math.max(pageSurface.clientHeight - 6, inlineTop)
+      const availableBelow = Math.max(0, nextTop - inlineTop - 6)
+      const placedNaturally = tryPlaceWorksheetAnswerOnPage(entry, pageContext, availableBelow)
+      if (placedNaturally) {
+        continue
+      }
+
+      const preferredLeft = Math.min(anchor.left + 24, Math.max(pageWidth - 360, 10))
+      const cardWidth = Math.min(360, Math.max(140, pageWidth - preferredLeft - 8))
+      const inlineHeight = measureWorksheetPdfAnswerCardHeight(pageSurface, question, cardWidth, false)
+      const canInline = availableBelow >= 92 && inlineHeight > 0 && inlineHeight <= availableBelow
+      const card = createWorksheetPdfAnswerCardNode(question, { compact: !canInline })
+      card.style.left = `${preferredLeft}px`
+      card.style.width = `${cardWidth}px`
+
+      if (canInline) {
+        card.classList.add("isInline")
+        card.style.top = `${inlineTop}px`
+        card.style.maxHeight = `${Math.max(92, Math.floor(availableBelow))}px`
+      } else {
+        card.classList.add("isAnnotation")
+        const annotationTop = Math.max(4, Math.min(anchor.top - 2, Math.max(pageSurface.clientHeight - 96, 4)))
+        const maxHeight = Math.max(96, Math.min(Math.max(pageSurface.clientHeight - annotationTop - 6, 96), 220))
+        card.style.top = `${annotationTop}px`
+        card.style.maxHeight = `${Math.floor(maxHeight)}px`
+      }
+      pageSurface.append(card)
+    }
+  }
+}
+
+function buildWorksheetAnswerPrompt(question) {
+  if (!question || typeof question !== "object") {
+    return ""
+  }
+  const kind = normalizeWorksheetKind(question.kind)
+  const questionText = sanitizeText(question.questionText)
+  const anchorText = sanitizeText(question.anchorText || question.questionText)
+  const responseTypes = normalizeWorksheetResponseTypes(question.responseTypes)
+  const options = normalizeWorksheetOptions(question.options)
+  const directives = []
+  if (responseTypes.includes("true_false")) {
+    directives.push("Required format: **TRUE** or **FALSE** first.")
+  }
+  if (responseTypes.includes("true_false") && (responseTypes.includes("short_answer") || responseTypes.includes("long_answer"))) {
+    directives.push("Then add one concise justification sentence.")
+  }
+  if (responseTypes.includes("mcq")) {
+    directives.push("Required format: **Answer: <one option>**.")
+  }
+  if (responseTypes.includes("multi_select")) {
+    directives.push("Required format: **Answer: <all correct options>**.")
+  }
+  if (responseTypes.includes("fill_blank")) {
+    directives.push("Answer format: fill the blank directly.")
+  }
+  if (kind === "term" || normalizeWorksheetQuestionType(question.questionType) === "table_definition") {
+    directives.push("Return exactly one direct definition line.")
+  }
+  if (options.length > 0) {
+    directives.push(`Options: ${options.join(" | ")}`)
+  }
+  if (kind === "term") {
+    const parent = getWorksheetQuestionById(question.parentId)
+    const parentText = sanitizeText(parent?.questionText)
+    if (parentText) {
+      return clampText(`${parentText}. Define briefly: ${anchorText}. ${directives.join(" ")}`.trim(), 360)
+    }
+    return clampText(`Define briefly: ${anchorText}. ${directives.join(" ")}`.trim(), 360)
+  }
+  return clampText(`${questionText || anchorText}. ${directives.join(" ")}`.trim(), 360)
+}
+
+async function buildWorksheetQuestionContextSnippet(question) {
+  const pageIndex = parseOptionalPageIndex(question?.pageIndex) ?? 0
+  const pageText = sanitizeText(await getPageText(renderState.pdfDoc, pageIndex))
+  const explicitContext = clampText(question?.contextWindow, 900)
+  if (!pageText) {
+    return explicitContext || ""
+  }
+  const questionText = sanitizeText(question?.anchorText || question?.questionText)
+  if (!questionText) {
+    if (explicitContext) {
+      return truncateText(`${explicitContext} ${pageText}`, 1300)
+    }
+    return truncateText(pageText, 1200)
+  }
+  const questionNeedle = questionText.toLowerCase()
+  const pageLower = pageText.toLowerCase()
+  const hitIndex = pageLower.indexOf(questionNeedle)
+  if (hitIndex < 0) {
+    if (explicitContext) {
+      return truncateText(`${explicitContext} ${pageText}`, 1300)
+    }
+    return truncateText(pageText, 1200)
+  }
+  const start = Math.max(0, hitIndex - 420)
+  const end = Math.min(pageText.length, hitIndex + questionText.length + 760)
+  const snippet = truncateText(pageText.slice(start, end), 1300)
+  if (explicitContext) {
+    return truncateText(`${explicitContext} ${snippet}`, 1300)
+  }
+  return snippet
+}
+
+async function generateWorksheetAnswersForGroup(question, options = {}) {
+  if (!question || question.answerLoading || !currentPdf || !renderState.pdfDoc) {
+    return
+  }
+  const force = Boolean(options?.force)
+  const fromBatch = Boolean(options?.fromBatch)
+  const byIdMap = getWorksheetQuestionsByIdMap()
+  const leaves = collectWorksheetLeafQuestions(question, byIdMap).filter((item) => item?.id && item.id !== question.id)
+  if (leaves.length === 0) {
+    return
+  }
+
+  const pendingLeaves = force ? leaves : leaves.filter((item) => !normalizeWorksheetAnswerText(item.answerText, 1200))
+  if (!force && pendingLeaves.length === 0) {
+    const answeredLeaves = leaves.filter((item) => Boolean(normalizeWorksheetAnswerText(item.answerText, 1200)))
+    if (answeredLeaves.length > 0) {
+      const shouldShow = answeredLeaves.some((item) => !item.overlayVisible)
+      for (const leaf of answeredLeaves) {
+        leaf.overlayVisible = shouldShow
+      }
+      renderPdfWorksheetOverlays()
+      if (sidebarUiState.activeTab === "explain" && isWorksheetMode()) {
+        renderPanel()
+      }
+      return
+    }
+    if (!fromBatch) {
+      if (sidebarState.collapsed) {
+        setSidebarCollapsed(false)
+      }
+      setActiveTab("explain")
+      setStatus("Answers available in sidebar.")
+    }
+    return
+  }
+
+  question.answerLoading = true
+  question.overlayVisible = true
+  renderPdfWorksheetOverlays()
+  if (sidebarUiState.activeTab === "explain" && isWorksheetMode()) {
+    renderPanel()
+  }
+
+  try {
+    for (const leaf of pendingLeaves) {
+      await generateWorksheetAnswerForQuestion(leaf, { force, fromBatch: true })
+    }
+    question.answeredAt = Date.now()
+    question.answerText = ""
+    question.answerLength = ""
+    question.overlayVisible = false
+    if (!fromBatch) {
+      setStatus("Answers generated.")
+      if (sidebarState.collapsed) {
+        setSidebarCollapsed(false)
+      }
+      setActiveTab("explain")
+    }
+  } catch (error) {
+    logger.warn("Worksheet group answer generation failed", {
+      questionId: question.id,
+      message: error?.message || "Unknown error"
+    })
+    if (!fromBatch) {
+      setStatus("Answer generation failed.")
+    }
+  } finally {
+    question.answerLoading = false
+    renderPdfWorksheetOverlays()
+    if (sidebarUiState.activeTab === "explain" && isWorksheetMode()) {
+      renderPanel()
+    }
+  }
+}
+
+async function generateWorksheetAnswerForQuestion(question, options = {}) {
+  if (!question || question.answerLoading || !currentPdf || !renderState.pdfDoc) {
+    return
+  }
+  if (question.hasChildren && question.batchChildrenOnClick) {
+    await generateWorksheetAnswersForGroup(question, options)
+    return
+  }
+  const force = Boolean(options?.force)
+  const fromBatch = Boolean(options?.fromBatch)
+  const existingAnswer = normalizeWorksheetAnswerText(question.answerText, 1200)
+  if (!force && existingAnswer) {
+    question.overlayVisible = !question.overlayVisible
+    renderPdfWorksheetOverlays()
+    if (!fromBatch && sidebarState.collapsed) {
+      setSidebarCollapsed(false)
+    }
+    if (!fromBatch) {
+      setActiveTab("explain")
+      setStatus(question.overlayVisible ? "Answer shown on page." : "Answer hidden on page.")
+    }
+    if (sidebarUiState.activeTab === "explain" && isWorksheetMode()) {
+      renderPanel()
+    }
+    return
+  }
+
+  question.answerLoading = true
+  question.overlayVisible = true
+  renderPdfWorksheetOverlays()
+  if (sidebarUiState.activeTab === "explain" && isWorksheetMode()) {
+    renderPanel()
+  }
+
+  try {
+    const snippet = await buildWorksheetQuestionContextSnippet(question)
+    const contextWindow = truncateText(`${clampText(question?.contextWindow, 900)} ${snippet}`, 1300)
+    const promptQuestionText = buildWorksheetAnswerPrompt(question)
+    const { providerUsed, response, warnings } = await generateLLM("worksheet_answer", {
+      questionText: promptQuestionText,
+      gradeLevel: question.gradeLevel,
+      title: getCurrentPdfTitleLabel(),
+      snippet: contextWindow || snippet,
+      contextWindow: contextWindow || snippet,
+      pageIndex: parseOptionalPageIndex(question.pageIndex) ?? 0,
+      readingMode: getReadingModeOrDefault()
+    })
+    const answer =
+      normalizeWorksheetAnswerText(response?.answer, 1200) || "Unable to generate an answer from the available text."
+    const answerLength =
+      response?.answerLength === "short" || response?.answerLength === "long"
+        ? response.answerLength
+        : estimateWorksheetAnswerLength(answer)
+    question.answerText = answer
+    question.answerLength = answerLength
+    question.provider = sanitizeText(providerUsed)
+    question.warnings = Array.isArray(warnings) ? warnings.map((warning) => clampText(warning, 180)) : []
+    question.answeredAt = Date.now()
+    question.overlayVisible = true
+    if (!fromBatch) {
+      setStatus("Answer generated.")
+      if (sidebarState.collapsed) {
+        setSidebarCollapsed(false)
+      }
+      setActiveTab("explain")
+    }
+  } catch (error) {
+    question.answerText = "Unable to generate an answer right now."
+    question.answerLength = "short"
+    question.overlayVisible = true
+    question.provider = ""
+    question.warnings = []
+    if (!fromBatch) {
+      setStatus("Answer generation failed.")
+    }
+    logger.warn("Worksheet answer generation failed", {
+      questionId: question.id,
+      message: error?.message || "Unknown error"
+    })
+  } finally {
+    question.answerLoading = false
+    renderPdfWorksheetOverlays()
+    if (sidebarUiState.activeTab === "explain" && isWorksheetMode()) {
+      renderPanel()
+    }
+  }
+}
+
+async function jumpToWorksheetQuestion(question) {
+  if (!question) {
+    return
+  }
+  const pageIndex = parseOptionalPageIndex(question.pageIndex)
+  if (pageIndex == null) {
+    return
+  }
+  const pageNode = getPageNodeByIndex(pageIndex)
+  if (!pageNode) {
+    return
+  }
+  scrollToPage(pageIndex + 1, "smooth")
+  await waitForPageInView(pageNode)
+  const needleText = clampText(question.anchorText || question.questionText, 220)
+  if (needleText) {
+    highlightOnPage({
+      pdfRoot,
+      pageIndex,
+      needleText,
+      preferExact: false
+    })
+  }
+}
+
 function normalizeIntentSearchText(value) {
   return sanitizeText(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()
 }
@@ -3266,7 +6254,10 @@ function findSectionAnchorInPage(pageNode, title) {
   return {
     left: Math.max(6, spanRect.right - surfaceRect.left + 4),
     top: Math.max(4, spanRect.top - surfaceRect.top - 2),
-    pageSurface
+    pageSurface,
+    textLayer,
+    anchorSpan: bestSpan,
+    surfaceRect
   }
 }
 
@@ -3700,6 +6691,9 @@ async function ensureDigestForSection(sectionKey) {
 
 function renderPdfIntentOverlays() {
   clearPdfIntentOverlays()
+  if (!modeUiState.aiEnabled || isWorksheetMode()) {
+    return
+  }
   const sections = getReadingMapSections()
   const intentMap = getSectionIntentMapFromOrientationData(getOrientationState().data?.sectionIntents)
   const showFlowDigest = modeUiState.mode === "flow"
@@ -3818,6 +6812,18 @@ async function handlePdfDigestOverlayClick(buttonEl) {
     clearDigestHighlightsForSection(sectionKey)
   }
   renderPdfIntentOverlays()
+}
+
+async function handlePdfWorksheetOverlayClick(buttonEl) {
+  const action = sanitizeText(buttonEl?.dataset?.pdfWorksheetAction)
+  if (action && action !== "answer") {
+    return
+  }
+  const question = getWorksheetQuestionById(buttonEl?.dataset?.questionId)
+  if (!question) {
+    return
+  }
+  await generateWorksheetAnswerForQuestion(question)
 }
 
 async function handlePdfIntentOverlayClick(buttonEl) {
@@ -4908,6 +7914,10 @@ function hideSectionRail() {
 function renderSectionRail() {
   sectionRailState.renderFrame = 0
   if (!(sectionRailEl instanceof HTMLElement)) {
+    return
+  }
+  if (isViewerMode()) {
+    hideSectionRail()
     return
   }
   const sections = getReadingMapSections()
@@ -6516,6 +9526,9 @@ async function restoreRecentJumpHighlightAfterRender() {
 async function loadCardsForCurrentDocument() {
   const docId = deriveDocId(currentPdf)
   sidebarUiState.docId = docId
+  if (getWorksheetState().docId !== docId) {
+    resetWorksheetStateForDocument(docId)
+  }
   const [cards, glossaryTerms, walkthroughItems] = await Promise.all([
     getCards(docId),
     getGlossaryTerms(docId),
@@ -6541,6 +9554,11 @@ async function loadCardsForCurrentDocument() {
 }
 
 async function handleSelectionAction(payload) {
+  if (!modeUiState.aiEnabled && payload?.type !== "highlight") {
+    setStatus("Viewer mode is active. Switch to another mode to use AI actions.")
+    return
+  }
+
   if (payload?.type === "highlight") {
     const didHighlight = addOrMergeHighlightFromPayload(payload) || handleManualHighlightSelection()
     setStatus(didHighlight ? "Highlight added." : "Unable to highlight selection.")
@@ -6692,6 +9710,29 @@ async function handlePanelCardAction(event) {
     }
   }
 
+  const worksheetButton = eventTarget.closest("button[data-worksheet-action]")
+  if (worksheetButton && panel.contains(worksheetButton)) {
+    const action = sanitizeText(worksheetButton.dataset.worksheetAction)
+    if (action === "detect") {
+      void ensureWorksheetQuestionsForCurrentDocument({ force: true })
+      return
+    }
+    if (action === "toggle-parser-view") {
+      const worksheetState = getWorksheetState()
+      worksheetState.parserDebugVisible = !worksheetState.parserDebugVisible
+      renderPanel()
+      return
+    }
+    const question = getWorksheetQuestionById(worksheetButton.dataset.questionId)
+    if (!question) {
+      return
+    }
+    if (action === "jump") {
+      void jumpToWorksheetQuestion(question)
+      return
+    }
+  }
+
   const termButton = eventTarget.closest("button[data-term-action]")
   if (termButton && panel.contains(termButton)) {
     const termAction = termButton.dataset.termAction
@@ -6794,6 +9835,7 @@ function ensureSelectionSystemInitialized() {
 
   selectionSystem = initSelectionSystem({
     pdfRoot,
+    isEnabled: () => Boolean(modeUiState.aiEnabled && currentPdf && renderState.pdfDoc),
     onAction: (payload) => {
       logger.info("Selection action:", payload.type);
       logger.debug("Selection payload", {
@@ -6807,14 +9849,26 @@ function ensureSelectionSystemInitialized() {
   });
 }
 
+function syncReadingModeInputs(mode) {
+  const normalizedMode = normalizeReadingMode(mode)
+  if (readingModeViewerRadio instanceof HTMLInputElement) {
+    readingModeViewerRadio.checked = normalizedMode === "viewer"
+  }
+  readingModeFlowRadio.checked = normalizedMode === "flow"
+  readingModeStructureRadio.checked = normalizedMode === "structure"
+  if (readingModeWorksheetRadio instanceof HTMLInputElement) {
+    readingModeWorksheetRadio.checked = normalizedMode === "worksheet"
+  }
+}
+
 function applySettingsToUi(settings) {
   currentSettings = settings;
   applyThemeToUi(settings.theme)
 
-  readingModeFlowRadio.checked = settings.defaultReadingMode === "flow";
-  readingModeStructureRadio.checked = settings.defaultReadingMode === "structure";
-  setToolbarModeToggle(settings.defaultReadingMode)
-  applyReadingMode(settings.defaultReadingMode, settings)
+  const effectiveReadingMode = modeUiState.hasAppliedMode ? getActiveReadingMode() : "viewer"
+  syncReadingModeInputs(effectiveReadingMode)
+  setToolbarModeToggle(effectiveReadingMode)
+  applyReadingMode(effectiveReadingMode, settings)
 
   const hasOpenAIKey = Boolean(settings.openaiApiKey);
   llmModeOpenAIOption.disabled = !hasOpenAIKey;
@@ -6840,9 +9894,12 @@ function applySettingsToUi(settings) {
   }
 
   autoOpenPdfToggle.checked = settings.autoOpenPdf;
+  if (debugModeToggle instanceof HTMLInputElement) {
+    debugModeToggle.checked = Boolean(settings.debugMode)
+  }
   setApiPresenceStatus(settings);
   updateContextScopeStatus();
-  if (settings.defaultReadingMode === "structure" && currentPdf && renderState.pdfDoc) {
+  if (getActiveReadingMode() === "structure" && currentPdf && renderState.pdfDoc) {
     if (getOrientationState().status === "idle") {
       void generateOrientationForCurrentDocument(renderState.loadToken)
     }
@@ -6850,6 +9907,10 @@ function applySettingsToUi(settings) {
   }
   if (currentPdf && renderState.pageNodes.length > 0) {
     renderPdfIntentOverlays()
+    renderPdfWorksheetOverlays()
+  }
+  if (getActiveReadingMode() === "worksheet" && currentPdf && renderState.pdfDoc) {
+    void ensureWorksheetQuestionsForCurrentDocument()
   }
   void syncWholePdfStatusFromCache(sidebarUiState.docId, settings);
 }
@@ -6873,6 +9934,7 @@ async function loadSettingsState() {
     llmMode: settings.llmMode,
     hasOpenAIKey: Boolean(settings.openaiApiKey),
     theme: settings.theme,
+    debugMode: Boolean(settings.debugMode),
     contextScope: settings.contextScope,
     wholePdfUpload: settings.wholePdfUpload,
     promptCacheRetention: settings.promptCacheRetention,
@@ -6898,7 +9960,7 @@ function ensureScaleFactor() {
 function getRenderedPageCount() {
   let count = 0;
   for (const node of renderState.pageNodes) {
-    if (node instanceof HTMLElement) {
+    if (node instanceof HTMLElement && node.dataset.rendered === "true") {
       count += 1;
     }
   }
@@ -6906,12 +9968,19 @@ function getRenderedPageCount() {
 }
 
 function getFirstRenderedPageNode() {
+  let fallbackNode = null
   for (const node of renderState.pageNodes) {
-    if (node instanceof HTMLElement) {
+    if (!(node instanceof HTMLElement)) {
+      continue
+    }
+    if (!fallbackNode) {
+      fallbackNode = node
+    }
+    if (node.dataset.rendered === "true") {
       return node;
     }
   }
-  return null;
+  return fallbackNode;
 }
 
 function buildReseekRenderOrder(targetPageNumber, totalPages) {
@@ -6947,6 +10016,126 @@ function insertPageShellByPageNumber(pageShell, pageNumber) {
   }
   if (!inserted) {
     pdfRoot.append(pageShell);
+  }
+}
+
+function readPageShellLayout(pageShell) {
+  if (!(pageShell instanceof HTMLElement)) {
+    return null
+  }
+  const pageSurface = pageShell.querySelector(".pdfPageSurface")
+  const baseWidth =
+    Number(pageShell.dataset.baseWidth) ||
+    Number(pageSurface?.clientWidth) ||
+    Number(pageSurface?.getBoundingClientRect?.().width) ||
+    0
+  const baseHeight =
+    Number(pageShell.dataset.baseHeight) ||
+    Number(pageSurface?.clientHeight) ||
+    Number(pageSurface?.getBoundingClientRect?.().height) ||
+    0
+  if (!Number.isFinite(baseWidth) || !Number.isFinite(baseHeight) || baseWidth <= 0 || baseHeight <= 0) {
+    return null
+  }
+  return {
+    width: Math.max(baseWidth, 1),
+    height: Math.max(baseHeight, 1)
+  }
+}
+
+function capturePageLayoutSnapshot(scaleRatio = 1) {
+  const ratio = Number.isFinite(Number(scaleRatio)) && Number(scaleRatio) > 0 ? Number(scaleRatio) : 1
+  const snapshot = new Map()
+  for (const pageNode of renderState.pageNodes) {
+    if (!(pageNode instanceof HTMLElement)) {
+      continue
+    }
+    const pageNumber = Number(pageNode.dataset.pageNumber)
+    if (!Number.isFinite(pageNumber) || pageNumber < 1) {
+      continue
+    }
+    const layout = readPageShellLayout(pageNode)
+    if (!layout) {
+      continue
+    }
+    snapshot.set(pageNumber, {
+      width: Math.max(layout.width * ratio, 1),
+      height: Math.max(layout.height * ratio, 1)
+    })
+  }
+  return snapshot
+}
+
+function createPageShell(pageNumber, options = {}) {
+  const normalizedPageNumber = Number.isFinite(Number(pageNumber))
+    ? Math.max(1, Math.floor(Number(pageNumber)))
+    : 1
+  const width = Number(options?.width)
+  const height = Number(options?.height)
+  const safeWidth = Number.isFinite(width) && width > 0 ? Math.max(width, 1) : 0
+  const safeHeight = Number.isFinite(height) && height > 0 ? Math.max(height, 1) : 0
+
+  const pageShell = document.createElement("section")
+  pageShell.className = "pdfPageShell"
+  pageShell.dataset.pageNumber = String(normalizedPageNumber)
+  pageShell.dataset.pageIndex = String(normalizedPageNumber - 1)
+  pageShell.dataset.rendered = String(Boolean(options?.rendered))
+  pageShell.dataset.renderState = options?.rendered ? "ready" : "placeholder"
+  if (safeWidth > 0) {
+    pageShell.dataset.baseWidth = String(safeWidth)
+  }
+  if (safeHeight > 0) {
+    pageShell.dataset.baseHeight = String(safeHeight)
+  }
+
+  const pageSurface = document.createElement("div")
+  pageSurface.className = "page pdfPageSurface"
+  if (safeWidth > 0) {
+    pageSurface.style.width = `${safeWidth}px`
+  }
+  if (safeHeight > 0) {
+    pageSurface.style.height = `${safeHeight}px`
+  }
+  pageSurface.style.setProperty("--user-unit", "1")
+  pageSurface.dataset.mainRotation = "0"
+
+  const canvas = document.createElement("canvas")
+  canvas.className = "pdfPageCanvas"
+  pageSurface.append(canvas)
+
+  const textLayerDiv = document.createElement("div")
+  textLayerDiv.className = "textLayer"
+  textLayerDiv.dataset.mainRotation = "0"
+  pageSurface.append(textLayerDiv)
+
+  pageShell.append(pageSurface)
+  return pageShell
+}
+
+function seedPageShellPlaceholders(totalPages, layoutSnapshot = new Map(), fallbackLayout = null) {
+  if (!Number.isFinite(totalPages) || totalPages <= 0) {
+    renderState.pageNodes = []
+    return
+  }
+
+  const fallbackWidth = Number(fallbackLayout?.width)
+  const fallbackHeight = Number(fallbackLayout?.height)
+  const hasFallbackLayout =
+    Number.isFinite(fallbackWidth) &&
+    Number.isFinite(fallbackHeight) &&
+    fallbackWidth > 0 &&
+    fallbackHeight > 0
+
+  renderState.pageNodes = new Array(totalPages)
+  for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
+    const layout = layoutSnapshot.get(pageNumber) || (hasFallbackLayout ? fallbackLayout : null)
+    const pageShell = createPageShell(pageNumber, {
+      width: layout?.width,
+      height: layout?.height,
+      rendered: false
+    })
+    insertPageShellByPageNumber(pageShell, pageNumber)
+    renderState.pageNodes[pageNumber - 1] = pageShell
   }
 }
 
@@ -7050,6 +10239,7 @@ function setScalePreservingViewport(nextScale, options = {}) {
     return;
   }
 
+  const previousRenderedScale = Number(currentPdf.renderedScale || currentPdf.scale || clampedScale);
   const anchor = options.preserveCenter === false ? null : captureViewportAnchor();
   currentPdf.scale = clampedScale;
   currentPdf.renderedScale = clampedScale;
@@ -7057,7 +10247,14 @@ function setScalePreservingViewport(nextScale, options = {}) {
   updatePdfControls();
 
   const loadToken = renderState.loadToken;
-  void scheduleRender(anchor?.pageNumber ?? currentPdf.pageNumber, loadToken).then(() => {
+  const scaleRatio =
+    Number.isFinite(previousRenderedScale) && previousRenderedScale > 0
+      ? clampedScale / previousRenderedScale
+      : 1;
+  void scheduleRender(anchor?.pageNumber ?? currentPdf.pageNumber, loadToken, {
+    anchor,
+    scaleRatio
+  }).then(() => {
     if (!anchor || loadToken !== renderState.loadToken) {
       return;
     }
@@ -7089,15 +10286,17 @@ function updatePdfControls() {
   const numPages = currentPdf?.numPages ?? 0;
   const pageNumber = currentPdf?.pageNumber ?? 0;
   const hasDocument = Boolean(renderState.pdfDoc && numPages);
-  const hasAllPagesRendered = hasDocument && getRenderedPageCount() === numPages;
 
   pageIndicatorEl.textContent = numPages ? `Page ${pageNumber} / ${numPages}` : "Page - / -";
-  prevPageBtn.disabled = !hasAllPagesRendered || pageNumber <= 1;
-  nextPageBtn.disabled = !hasAllPagesRendered || pageNumber >= numPages;
+  prevPageBtn.disabled = !hasDocument || pageNumber <= 1;
+  nextPageBtn.disabled = !hasDocument || pageNumber >= numPages;
   zoomOutBtn.disabled = !hasDocument || currentPdf.scale <= MIN_SCALE + 0.001;
   zoomInBtn.disabled = !hasDocument || currentPdf.scale >= MAX_SCALE - 0.001;
   fitWidthBtn.disabled = !hasDocument;
   highlighterToggleBtn.disabled = !hasDocument;
+  if (downloadPdfBtn instanceof HTMLButtonElement) {
+    downloadPdfBtn.disabled = !hasDocument;
+  }
   syncFitWidthUi();
   scheduleSectionRailRender()
 }
@@ -7123,6 +10322,7 @@ function cancelActiveRenderTask() {
 }
 
 function clearRenderedPages() {
+  resetLazyRenderState()
   clearHighlights(pdfRoot)
   cancelActiveRenderTask();
   disconnectPageObserver();
@@ -7170,8 +10370,13 @@ function setCurrentPage(pageNumber) {
   }
 
   const clamped = Math.min(Math.max(pageNumber, 1), currentPdf.numPages);
+  const didChange = currentPdf.pageNumber !== clamped
   if (currentPdf.pageNumber !== clamped) {
     currentPdf.pageNumber = clamped;
+  }
+  if (didChange && renderState.lazyRenderEnabled && !renderState.initialRenderInProgress) {
+    requestLazyRenderAroundPage(clamped)
+    scheduleLazyRenderProcessing(renderState.loadToken, renderState.renderToken)
   }
   syncSectionStatusForCurrentPage({ preferCurrent: true })
   updatePdfControls();
@@ -7256,10 +10461,6 @@ function handlePdfScroll() {
 function connectPageObserver() {
   disconnectPageObserver();
 
-  if (getRenderedPageCount() === 0) {
-    return;
-  }
-
   const thresholds = [0, PAGE_VISIBILITY_THRESHOLD, 1];
   renderState.visibilityObserver = new IntersectionObserver(
     (entries) => {
@@ -7277,18 +10478,25 @@ function connectPageObserver() {
     { root: pdfRoot, threshold: thresholds }
   );
 
+  let hasObservedNode = false
   for (const node of renderState.pageNodes) {
     if (!(node instanceof HTMLElement)) {
       continue;
     }
+    hasObservedNode = true
     renderState.pageVisibility.set(Number(node.dataset.pageNumber), 0);
     renderState.visibilityObserver.observe(node);
+  }
+
+  if (!hasObservedNode) {
+    disconnectPageObserver()
+    return
   }
 
   updateCurrentPageFromScroll();
 }
 
-function scrollToPage(pageNumber, behavior = "smooth") {
+function scrollToPage(pageNumber, behavior = "smooth", options = {}) {
   if (!currentPdf || renderState.pageNodes.length === 0) {
     return;
   }
@@ -7299,7 +10507,11 @@ function scrollToPage(pageNumber, behavior = "smooth") {
     return;
   }
 
-  const targetTop = Math.max(pageNode.offsetTop - 8, 0)
+  const align = options?.align === "center" ? "center" : "top"
+  const centeredTop = pageNode.offsetTop + pageNode.offsetHeight / 2 - pdfRoot.clientHeight / 2
+  const topAlignedTop = pageNode.offsetTop - 8
+  const maxScrollTop = Math.max(pdfRoot.scrollHeight - pdfRoot.clientHeight, 0)
+  const targetTop = Math.min(Math.max(align === "center" ? centeredTop : topAlignedTop, 0), maxScrollTop)
   if (behavior === "instant") {
     pdfRoot.scrollTop = targetTop
   } else {
@@ -7309,6 +10521,47 @@ function scrollToPage(pageNumber, behavior = "smooth") {
     });
   }
   setCurrentPage(clamped);
+}
+
+function isEditableEventTarget(target) {
+  if (!(target instanceof Element)) {
+    return false
+  }
+
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
+    return true
+  }
+
+  if (target.isContentEditable) {
+    return true
+  }
+
+  return Boolean(target.closest("input, textarea, select, [contenteditable='true'], [contenteditable='']"))
+}
+
+function handleViewerKeydown(event) {
+  if (!currentPdf || !renderState.pdfDoc) {
+    return
+  }
+  if (event.defaultPrevented || event.isComposing) {
+    return
+  }
+  if (event.ctrlKey || event.metaKey || event.altKey) {
+    return
+  }
+  if (isEditableEventTarget(event.target)) {
+    return
+  }
+
+  if (event.key === "ArrowLeft") {
+    event.preventDefault()
+    scrollToPage(currentPdf.pageNumber - 1, "instant", { align: "center" })
+    return
+  }
+  if (event.key === "ArrowRight") {
+    event.preventDefault()
+    scrollToPage(currentPdf.pageNumber + 1, "instant", { align: "center" })
+  }
 }
 
 function getLoadedStatusText() {
@@ -7354,105 +10607,225 @@ async function computeFitWidthScale(loadToken) {
   return clampScale(availableWidth / baseWidth);
 }
 
-async function renderAllPages(targetPageNumber, loadToken) {
-  if (!renderState.pdfDoc || !currentPdf || loadToken !== renderState.loadToken) {
-    return;
+function isRenderPassCurrent(loadToken, renderToken) {
+  return (
+    loadToken === renderState.loadToken &&
+    renderToken === renderState.renderToken &&
+    Boolean(currentPdf) &&
+    Boolean(renderState.pdfDoc)
+  )
+}
+
+function resetLazyRenderState() {
+  if (renderState.lazyRenderTimer) {
+    clearTimeout(renderState.lazyRenderTimer)
+    renderState.lazyRenderTimer = null
+  }
+  renderState.lazyRenderEnabled = false
+  renderState.lazyRenderQueue = []
+  renderState.lazyRenderQueueSet.clear()
+  renderState.lazyRenderRunning = false
+  renderState.initialRenderInProgress = false
+}
+
+function waitForIdleRenderSlice() {
+  return new Promise((resolve) => {
+    const requestIdle = globalThis?.requestIdleCallback
+    if (typeof requestIdle === "function") {
+      requestIdle(() => resolve(), { timeout: LAZY_RENDER_IDLE_TIMEOUT_MS })
+      return
+    }
+    setTimeout(resolve, 0)
+  })
+}
+
+function queueLazyPages(pageNumbers, { prioritize = false } = {}) {
+  if (!renderState.lazyRenderEnabled || !currentPdf) {
+    return
   }
 
-  const pdfDoc = renderState.pdfDoc;
-  const pageRenderOrder = buildReseekRenderOrder(targetPageNumber, pdfDoc.numPages);
-  const renderScale = currentPdf.renderedScale || currentPdf.scale;
-  const renderToken = ++renderState.renderToken;
-  clearRenderedPages();
-  renderState.pageNodes = new Array(pdfDoc.numPages);
-  ensureScaleFactor();
-  updatePdfControls();
+  const source = Array.isArray(pageNumbers) ? pageNumbers : [pageNumbers]
+  const prioritized = []
+  const appended = []
 
-  for (const pageNumber of pageRenderOrder) {
-    if (loadToken !== renderState.loadToken || renderToken !== renderState.renderToken) {
-      return;
+  for (const rawPageNumber of source) {
+    const numeric = Number(rawPageNumber)
+    if (!Number.isFinite(numeric)) {
+      continue
+    }
+    const pageNumber = Math.min(Math.max(Math.floor(numeric), 1), currentPdf.numPages || 1)
+    const pageShell = renderState.pageNodes[pageNumber - 1]
+    if (pageShell instanceof HTMLElement && pageShell.dataset.rendered === "true") {
+      continue
     }
 
-    setStatus(`Loading page ${getRenderedPageCount() + 1}/${pdfDoc.numPages}`);
-    logger.info("Render page i", { pageNumber });
-
-    const page = await pdfDoc.getPage(pageNumber);
-    if (loadToken !== renderState.loadToken || renderToken !== renderState.renderToken) {
-      return;
+    if (renderState.lazyRenderQueueSet.has(pageNumber)) {
+      if (!prioritize) {
+        continue
+      }
+      const existingIndex = renderState.lazyRenderQueue.indexOf(pageNumber)
+      if (existingIndex >= 0) {
+        renderState.lazyRenderQueue.splice(existingIndex, 1)
+        prioritized.push(pageNumber)
+      }
+      continue
     }
 
-    const viewport = page.getViewport({ scale: renderScale });
+    renderState.lazyRenderQueueSet.add(pageNumber)
+    if (prioritize) {
+      prioritized.push(pageNumber)
+    } else {
+      appended.push(pageNumber)
+    }
+  }
+
+  if (prioritized.length > 0) {
+    renderState.lazyRenderQueue = [...prioritized, ...renderState.lazyRenderQueue]
+  }
+  if (appended.length > 0) {
+    renderState.lazyRenderQueue.push(...appended)
+  }
+}
+
+function requestLazyRenderAroundPage(pageNumber, radius = LAZY_RENDER_PRIORITY_RADIUS) {
+  if (!renderState.lazyRenderEnabled || !currentPdf || !renderState.pdfDoc) {
+    return
+  }
+  const center = Math.min(Math.max(Math.floor(Number(pageNumber) || 1), 1), currentPdf.numPages || 1)
+  const priorityOrder = buildReseekRenderOrder(center, currentPdf.numPages || 0)
+  const maxPriorityPages = Math.max(radius * 2 + 1, 1)
+  queueLazyPages(priorityOrder.slice(0, maxPriorityPages), { prioritize: true })
+}
+
+async function getFallbackPageLayout(pdfDoc, pageNumber, renderScale, loadToken, renderToken) {
+  if (!pdfDoc || !isRenderPassCurrent(loadToken, renderToken)) {
+    return null
+  }
+  let page = null
+  try {
+    page = await pdfDoc.getPage(pageNumber)
+    if (!isRenderPassCurrent(loadToken, renderToken)) {
+      return null
+    }
+    const viewport = page.getViewport({ scale: renderScale })
+    return {
+      width: Math.max(viewport.width, 1),
+      height: Math.max(viewport.height, 1)
+    }
+  } catch (_error) {
+    return null
+  } finally {
+    try {
+      page?.cleanup?.()
+    } catch (_error) {
+      // Best effort.
+    }
+  }
+}
+
+async function renderPageShellContent({
+  pdfDoc,
+  pageNumber,
+  renderScale,
+  loadToken,
+  renderToken,
+  anchor = null,
+  updateStatus = false
+}) {
+  if (!isRenderPassCurrent(loadToken, renderToken)) {
+    return false
+  }
+  if (!pdfDoc || !Number.isFinite(Number(pageNumber)) || pageNumber < 1) {
+    return false
+  }
+
+  const existingPageShell = renderState.pageNodes[pageNumber - 1]
+  if (existingPageShell instanceof HTMLElement && existingPageShell.dataset.rendered === "true") {
+    return false
+  }
+
+  if (updateStatus) {
+    setStatus(`Loading page ${Math.max(getRenderedPageCount() + 1, 1)}/${pdfDoc.numPages}`)
+  }
+  logger.info("Render page i", { pageNumber })
+
+  let page = null
+  try {
+    page = await pdfDoc.getPage(pageNumber)
+    if (!isRenderPassCurrent(loadToken, renderToken)) {
+      return false
+    }
+
+    const viewport = page.getViewport({ scale: renderScale })
     if (!renderState.baseViewportWidth) {
-      renderState.baseViewportWidth = page.getViewport({ scale: 1 }).width;
+      renderState.baseViewportWidth = page.getViewport({ scale: 1 }).width
     }
-    if (loadToken !== renderState.loadToken || renderToken !== renderState.renderToken) {
-      return;
+    if (!isRenderPassCurrent(loadToken, renderToken)) {
+      return false
     }
-    const pageWidth = Math.max(viewport.width, 1);
-    const pageHeight = Math.max(viewport.height, 1);
 
-    const pageShell = document.createElement("section");
-    pageShell.className = "pdfPageShell";
-    pageShell.dataset.pageNumber = String(pageNumber);
-    pageShell.dataset.pageIndex = String(pageNumber - 1);
-    pageShell.dataset.baseWidth = String(pageWidth);
-    pageShell.dataset.baseHeight = String(pageHeight);
+    const pageWidth = Math.max(viewport.width, 1)
+    const pageHeight = Math.max(viewport.height, 1)
 
-    const pageSurface = document.createElement("div");
-    pageSurface.className = "page pdfPageSurface";
-    pageSurface.style.width = `${pageWidth}px`;
-    pageSurface.style.height = `${pageHeight}px`;
-    pageSurface.style.setProperty("--user-unit", String(viewport.userUnit || 1));
-    pageSurface.dataset.mainRotation = String(viewport.rotation);
+    let pageShell = renderState.pageNodes[pageNumber - 1]
+    if (!(pageShell instanceof HTMLElement)) {
+      pageShell = createPageShell(pageNumber, { width: pageWidth, height: pageHeight, rendered: false })
+      insertPageShellByPageNumber(pageShell, pageNumber)
+      renderState.pageNodes[pageNumber - 1] = pageShell
+    }
 
-    const canvas = document.createElement("canvas");
-    canvas.className = "pdfPageCanvas";
-    pageSurface.append(canvas);
+    const pageSurface = pageShell.querySelector(".pdfPageSurface")
+    const canvas = pageShell.querySelector(".pdfPageCanvas")
+    const textLayerDiv = pageShell.querySelector(".textLayer")
+    if (!(pageSurface instanceof HTMLElement) || !(canvas instanceof HTMLCanvasElement) || !(textLayerDiv instanceof HTMLElement)) {
+      throw new Error("Unable to prepare page rendering surface.")
+    }
 
-    const textLayerDiv = document.createElement("div");
-    textLayerDiv.className = "textLayer";
-    textLayerDiv.dataset.mainRotation = String(viewport.rotation);
-    pageSurface.append(textLayerDiv);
+    pageShell.dataset.baseWidth = String(pageWidth)
+    pageShell.dataset.baseHeight = String(pageHeight)
+    pageShell.dataset.rendered = "false"
+    pageShell.dataset.renderState = "rendering"
+    pageSurface.style.width = `${pageWidth}px`
+    pageSurface.style.height = `${pageHeight}px`
+    pageSurface.style.setProperty("--user-unit", String(viewport.userUnit || 1))
+    pageSurface.dataset.mainRotation = String(viewport.rotation)
+    textLayerDiv.innerHTML = ""
+    textLayerDiv.dataset.mainRotation = String(viewport.rotation)
 
-    pageShell.append(pageSurface);
-    insertPageShellByPageNumber(pageShell, pageNumber);
-    renderState.pageNodes[pageNumber - 1] = pageShell;
+    const outputScale = window.devicePixelRatio || 1
+    canvas.width = Math.max(Math.floor(pageWidth * outputScale), 1)
+    canvas.height = Math.max(Math.floor(pageHeight * outputScale), 1)
+    canvas.style.width = `${pageWidth}px`
+    canvas.style.height = `${pageHeight}px`
 
-    const outputScale = window.devicePixelRatio || 1;
-    canvas.width = Math.max(Math.floor(pageWidth * outputScale), 1);
-    canvas.height = Math.max(Math.floor(pageHeight * outputScale), 1);
-    canvas.style.width = `${pageWidth}px`;
-    canvas.style.height = `${pageHeight}px`;
-
-    const canvasContext = canvas.getContext("2d", { alpha: false });
+    const canvasContext = canvas.getContext("2d", { alpha: false })
     if (!canvasContext) {
-      throw new Error("Unable to get 2D rendering context.");
+      throw new Error("Unable to get 2D rendering context.")
     }
 
-    const transform =
-      outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null;
+    const transform = outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null
     const renderTask = page.render({
       canvasContext,
       viewport,
       transform
-    });
-    renderState.activeRenderTask = renderTask;
+    })
+    renderState.activeRenderTask = renderTask
 
     try {
-      await renderTask.promise;
+      await renderTask.promise
     } catch (error) {
       if (error?.name !== "RenderingCancelledException") {
-        throw error;
+        throw error
       }
-      return;
+      return false
     } finally {
       if (renderState.activeRenderTask === renderTask) {
-        renderState.activeRenderTask = null;
+        renderState.activeRenderTask = null
       }
     }
 
-    if (loadToken !== renderState.loadToken || renderToken !== renderState.renderToken) {
-      return;
+    if (!isRenderPassCurrent(loadToken, renderToken)) {
+      return false
     }
 
     const textLayer = new pdfjsLib.TextLayer({
@@ -7462,59 +10835,237 @@ async function renderAllPages(targetPageNumber, loadToken) {
       }),
       container: textLayerDiv,
       viewport
-    });
-    await textLayer.render();
-    if (loadToken !== renderState.loadToken || renderToken !== renderState.renderToken) {
-      return;
+    })
+    await textLayer.render()
+    if (!isRenderPassCurrent(loadToken, renderToken)) {
+      return false
     }
 
-    const endOfContent = document.createElement("div");
-    endOfContent.className = "endOfContent";
-    textLayerDiv.append(endOfContent);
-    page.cleanup();
-  }
-
-  if (loadToken !== renderState.loadToken || renderToken !== renderState.renderToken) {
-    return;
-  }
-
-  connectPageObserver();
-  applyVisualScale();
-  ensureSelectionSystemInitialized();
-  renderAllUserHighlights()
-
-  if (renderState.fitWidthEnabled) {
-    const correctedFitScale = await computeFitWidthScale(loadToken);
-    if (correctedFitScale && Math.abs(correctedFitScale - currentPdf.scale) > 0.005) {
-      setScalePreservingViewport(correctedFitScale, { preserveCenter: false });
-      pdfRoot.scrollLeft = 0;
+    const endOfContent = document.createElement("div")
+    endOfContent.className = "endOfContent"
+    textLayerDiv.append(endOfContent)
+    pageShell.dataset.rendered = "true"
+    pageShell.dataset.renderState = "ready"
+    if (currentPdf && typeof currentPdf === "object") {
+      currentPdf.retrievalBlockCache = null
+    }
+    if (anchor && Number(anchor?.pageNumber) === pageNumber) {
+      restoreViewportAnchor(anchor)
+    }
+    return true
+  } finally {
+    try {
+      page?.cleanup?.()
+    } catch (_error) {
+      // Best effort.
     }
   }
-
-  let restoredJump = false
-  if (hasRecentJump()) {
-    restoredJump = await restoreRecentJumpHighlightAfterRender()
-    if (loadToken !== renderState.loadToken || renderToken !== renderState.renderToken) {
-      return;
-    }
-  }
-
-  if (!restoredJump) {
-    scrollToPage(targetPageNumber, "instant");
-  }
-  syncSectionStatusForCurrentPage({ preferCurrent: true })
-  updatePdfControls();
-  renderPdfIntentOverlays()
-  scheduleSectionRailRender()
 }
 
-function scheduleRender(targetPageNumber, loadToken = renderState.loadToken) {
+function scheduleLazyRenderProcessing(loadToken, renderToken) {
+  if (!renderState.lazyRenderEnabled || renderState.lazyRenderRunning || renderState.initialRenderInProgress) {
+    return
+  }
+  if (renderState.lazyRenderTimer || renderState.lazyRenderQueue.length === 0) {
+    return
+  }
+
+  renderState.lazyRenderTimer = setTimeout(() => {
+    renderState.lazyRenderTimer = null
+    void processLazyRenderQueue(loadToken, renderToken)
+  }, 0)
+}
+
+async function processLazyRenderQueue(loadToken, renderToken) {
+  if (renderState.lazyRenderRunning || !renderState.pdfDoc || !currentPdf) {
+    return
+  }
+  renderState.lazyRenderRunning = true
+
+  try {
+    const pdfDoc = renderState.pdfDoc
+    const renderScale = currentPdf.renderedScale || currentPdf.scale
+    while (renderState.lazyRenderQueue.length > 0) {
+      if (!isRenderPassCurrent(loadToken, renderToken)) {
+        return
+      }
+
+      const pageNumber = renderState.lazyRenderQueue.shift()
+      renderState.lazyRenderQueueSet.delete(pageNumber)
+      if (!Number.isFinite(Number(pageNumber)) || pageNumber < 1) {
+        continue
+      }
+
+      await waitForIdleRenderSlice()
+      if (!isRenderPassCurrent(loadToken, renderToken)) {
+        return
+      }
+
+      await renderPageShellContent({
+        pdfDoc,
+        pageNumber,
+        renderScale,
+        loadToken,
+        renderToken,
+        updateStatus: false
+      })
+
+      if (!isRenderPassCurrent(loadToken, renderToken)) {
+        return
+      }
+
+      renderUserHighlightsForPage(pageNumber - 1)
+      if ((currentPdf.pageNumber || 0) === pageNumber) {
+        renderPdfIntentOverlays()
+        renderPdfWorksheetOverlays()
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+  } catch (error) {
+    if (isRenderPassCurrent(loadToken, renderToken)) {
+      logger.warn("Background page rendering failed", {
+        message: error?.message || "Unknown error"
+      })
+    }
+  } finally {
+    renderState.lazyRenderRunning = false
+    if (!isRenderPassCurrent(loadToken, renderToken)) {
+      return
+    }
+
+    updatePdfControls()
+    if (renderState.lazyRenderQueue.length > 0) {
+      scheduleLazyRenderProcessing(loadToken, renderToken)
+      return
+    }
+
+    setStatus(getLoadedStatusText(), { title: getLoadedStatusTooltipText() })
+    renderPdfIntentOverlays()
+    renderPdfWorksheetOverlays()
+    scheduleSectionRailRender()
+  }
+}
+
+async function renderAllPages(targetPageNumber, loadToken, options = {}) {
+  if (!renderState.pdfDoc || !currentPdf || loadToken !== renderState.loadToken) {
+    return
+  }
+
+  const pdfDoc = renderState.pdfDoc
+  const clampedTargetPageNumber = Math.min(
+    Math.max(Math.floor(Number(targetPageNumber) || 1), 1),
+    Math.max(pdfDoc.numPages, 1)
+  )
+  const pageRenderOrder = buildReseekRenderOrder(clampedTargetPageNumber, pdfDoc.numPages)
+  const renderScale = currentPdf.renderedScale || currentPdf.scale
+  const renderToken = ++renderState.renderToken
+  resetLazyRenderState()
+
+  const layoutSnapshot = capturePageLayoutSnapshot(options?.scaleRatio)
+  const fallbackLayout =
+    layoutSnapshot.size < pdfDoc.numPages
+      ? await getFallbackPageLayout(pdfDoc, clampedTargetPageNumber, renderScale, loadToken, renderToken)
+      : null
+  if (!isRenderPassCurrent(loadToken, renderToken)) {
+    return
+  }
+
+  clearRenderedPages()
+  renderState.lazyRenderEnabled = pdfDoc.numPages >= LAZY_RENDER_PAGE_THRESHOLD
+  seedPageShellPlaceholders(pdfDoc.numPages, layoutSnapshot, fallbackLayout)
+  ensureScaleFactor()
+  updatePdfControls()
+  connectPageObserver()
+  if (options?.anchor) {
+    restoreViewportAnchor(options.anchor)
+  }
+
+  const initialRenderCount = renderState.lazyRenderEnabled
+    ? Math.min(pageRenderOrder.length, LAZY_RENDER_PRIORITY_RADIUS * 2 + 1)
+    : pageRenderOrder.length
+  const initialOrder = pageRenderOrder.slice(0, initialRenderCount)
+
+  renderState.initialRenderInProgress = true
+  try {
+    for (const pageNumber of initialOrder) {
+      if (!isRenderPassCurrent(loadToken, renderToken)) {
+        return
+      }
+      await renderPageShellContent({
+        pdfDoc,
+        pageNumber,
+        renderScale,
+        loadToken,
+        renderToken,
+        anchor: options?.anchor,
+        updateStatus: true
+      })
+    }
+
+    if (!isRenderPassCurrent(loadToken, renderToken)) {
+      return
+    }
+
+    connectPageObserver()
+    applyVisualScale()
+    ensureSelectionSystemInitialized()
+    renderAllUserHighlights()
+
+    if (renderState.fitWidthEnabled) {
+      const correctedFitScale = await computeFitWidthScale(loadToken)
+      if (correctedFitScale && Math.abs(correctedFitScale - currentPdf.scale) > 0.005) {
+        setScalePreservingViewport(correctedFitScale, { preserveCenter: false })
+        pdfRoot.scrollLeft = 0
+        return
+      }
+    }
+
+    let restoredJump = false
+    if (hasRecentJump()) {
+      restoredJump = await restoreRecentJumpHighlightAfterRender()
+      if (!isRenderPassCurrent(loadToken, renderToken)) {
+        return
+      }
+    }
+
+    if (!restoredJump) {
+      if (options?.anchor) {
+        restoreViewportAnchor(options.anchor)
+      } else {
+        scrollToPage(clampedTargetPageNumber, "instant")
+      }
+    }
+
+    syncSectionStatusForCurrentPage({ preferCurrent: true })
+    updatePdfControls()
+    renderPdfIntentOverlays()
+    renderPdfWorksheetOverlays()
+    if (isWorksheetMode()) {
+      void ensureWorksheetQuestionsForCurrentDocument()
+    }
+    scheduleSectionRailRender()
+
+    if (!renderState.lazyRenderEnabled) {
+      setStatus(getLoadedStatusText(), { title: getLoadedStatusTooltipText() })
+      return
+    }
+
+    const remainingOrder = pageRenderOrder.slice(initialOrder.length)
+    queueLazyPages(remainingOrder)
+    requestLazyRenderAroundPage(currentPdf.pageNumber || clampedTargetPageNumber)
+    scheduleLazyRenderProcessing(loadToken, renderToken)
+  } finally {
+    renderState.initialRenderInProgress = false
+  }
+}
+
+function scheduleRender(targetPageNumber, loadToken = renderState.loadToken, options = {}) {
   renderChain = renderChain
     .then(async () => {
       if (loadToken !== renderState.loadToken) {
         return;
       }
-      await renderAllPages(targetPageNumber, loadToken);
+      await renderAllPages(targetPageNumber, loadToken, options);
     })
     .catch((error) => {
       if (loadToken !== renderState.loadToken) {
@@ -7548,6 +11099,7 @@ function handleLoadFailure(sourceType, error) {
   sidebarUiState.glossaryTerms = [];
   sidebarUiState.glossarySuggestions = [];
   sidebarUiState.walkthrough = createWalkthroughUiState()
+  resetWorksheetStateForDocument("unknown")
   sidebarUiState.toastMessage = ""
   resetOrientationStateForDocument()
   updateSectionStatus("")
@@ -7591,6 +11143,11 @@ async function loadPdfSource(source, documentParams) {
     return;
   }
 
+  await setReadingModeSetting("viewer")
+  if (loadToken !== renderState.loadToken) {
+    return;
+  }
+
   currentPdf = {
     sourceType: source.sourceType,
     filename: source.filename,
@@ -7617,6 +11174,7 @@ async function loadPdfSource(source, documentParams) {
   sidebarUiState.glossaryTerms = [];
   sidebarUiState.glossarySuggestions = [];
   sidebarUiState.walkthrough = createWalkthroughUiState()
+  resetWorksheetStateForDocument(sidebarUiState.docId)
   sidebarUiState.toastMessage = ""
   resetOrientationStateForDocument()
   setOrientationLoading("Loading PDF...")
@@ -7669,15 +11227,23 @@ async function loadPdfSource(source, documentParams) {
 
   logger.info("Loaded PDF: numPages", { numPages: pdfDoc.numPages });
   updatePdfControls();
-  await ensureOutlineSectionsForCurrentDocument(loadToken);
   await loadCardsForCurrentDocument();
-  if (modeUiState.autoGenerateOnLoad) {
-    void generateOrientationForCurrentDocument(loadToken);
+  if (modeUiState.aiEnabled) {
+    await ensureOutlineSectionsForCurrentDocument(loadToken);
+    if (modeUiState.autoGenerateOnLoad) {
+      void generateOrientationForCurrentDocument(loadToken);
+    } else {
+      void applyNonGeneratingOrientationForCurrentDocument(loadToken);
+    }
+    if (modeUiState.autoPrewarmOnLoad) {
+      void runStructurePrewarmForCurrentDocument(loadToken)
+    }
   } else {
-    void applyNonGeneratingOrientationForCurrentDocument(loadToken);
-  }
-  if (modeUiState.autoPrewarmOnLoad) {
-    void runStructurePrewarmForCurrentDocument(loadToken)
+    applyReadingMapToCurrentDocument([])
+    setOrientationReady(createEmptyOrientationData())
+    if (sidebarUiState.activeTab === "orientation") {
+      renderPanel()
+    }
   }
   await scheduleRender(1, loadToken);
 }
@@ -7693,9 +11259,13 @@ async function loadPdfFromLocalFile(file) {
     size: file.size
   });
 
-  setActiveTab(modeUiState.mode === "structure" ? "orientation" : getFlowPreferredTab(), {
+  const activeMode = getActiveReadingMode()
+  setActiveTab(
+    activeMode === "structure" ? "orientation" : activeMode === "worksheet" ? getWorksheetPreferredTab() : getFlowPreferredTab(),
+    {
     fromModeApply: true
-  });
+    }
+  );
   setStatus(`Loading: ${getShortStatusLabel(file.name, 44)}`, { title: `Loading: ${file.name}` });
 
   try {
@@ -7732,9 +11302,13 @@ async function loadPdfFromRemoteUrl(srcUrl) {
     url: sanitizeUrlForLog(normalizedSrcUrl)
   });
 
-  setActiveTab(modeUiState.mode === "structure" ? "orientation" : getFlowPreferredTab(), {
+  const activeMode = getActiveReadingMode()
+  setActiveTab(
+    activeMode === "structure" ? "orientation" : activeMode === "worksheet" ? getWorksheetPreferredTab() : getFlowPreferredTab(),
+    {
     fromModeApply: true
-  });
+    }
+  );
   const remoteLabel = normalizePdfFilename(getFilenameFromUrl(normalizedSrcUrl)) || sanitizeUrlForLog(normalizedSrcUrl)
   setStatus(`Loading: ${getShortStatusLabel(remoteLabel, 44)}`, {
     title: isFileUrl
@@ -7752,6 +11326,65 @@ async function loadPdfFromRemoteUrl(srcUrl) {
       url: normalizedSrcUrl
     }
   );
+}
+
+function downloadBlobBytes(bytes, filename = "document.pdf") {
+  if (!(bytes instanceof Uint8Array) || bytes.length === 0) {
+    return false
+  }
+  const blob = new Blob([bytes], { type: "application/pdf" })
+  const objectUrl = URL.createObjectURL(blob)
+  const link = document.createElement("a")
+  link.href = objectUrl
+  link.download = normalizePdfFilename(filename) || "document.pdf"
+  link.rel = "noopener"
+  link.style.display = "none"
+  document.body.append(link)
+  link.click()
+  link.remove()
+  setTimeout(() => {
+    URL.revokeObjectURL(objectUrl)
+  }, 5000)
+  return true
+}
+
+function openSourcePdfForDownload(url) {
+  const normalizedUrl = normalizeRemotePdfSourceUrl(url)
+  if (!normalizedUrl) {
+    return false
+  }
+  const link = document.createElement("a")
+  link.href = normalizedUrl
+  link.target = "_blank"
+  link.rel = "noopener"
+  link.style.display = "none"
+  document.body.append(link)
+  link.click()
+  link.remove()
+  return true
+}
+
+async function handleDownloadPdf() {
+  if (!currentPdf) {
+    return
+  }
+
+  const fallbackFilename = normalizePdfFilename(getCurrentPdfTitleLabel()) || "document.pdf"
+  try {
+    const { bytes, filename } = await getPdfBytes(currentPdf)
+    const didStartDownload = downloadBlobBytes(bytes, filename || fallbackFilename)
+    if (!didStartDownload) {
+      throw new Error("Download bytes unavailable.")
+    }
+    setStatus(`Download started: ${getShortStatusLabel(filename || fallbackFilename, 44)}`)
+  } catch (error) {
+    if (currentPdf.sourceType === "remote" && openSourcePdfForDownload(currentPdf.url)) {
+      setStatus("Opened source PDF in a new tab for browser download.")
+      return
+    }
+    logger.warn("Failed to download PDF", { message: error?.message || "Unknown error" })
+    setStatus("Failed to download PDF")
+  }
 }
 
 function handleZoom(delta) {
@@ -7827,13 +11460,25 @@ async function handleThemeToggle() {
 }
 
 async function setReadingModeSetting(nextMode) {
-  const normalizedMode = nextMode === "structure" ? "structure" : "flow"
-  if (currentSettings?.defaultReadingMode === normalizedMode) {
+  const normalizedMode = normalizeReadingMode(nextMode)
+  if (getActiveReadingMode() === normalizedMode) {
     return
   }
-  const settings = await setSettings({ defaultReadingMode: normalizedMode })
-  applySettingsToUi(settings)
-  logger.info("Reading mode changed", { mode: settings.defaultReadingMode })
+  syncReadingModeInputs(normalizedMode)
+  setToolbarModeToggle(normalizedMode)
+  applyReadingMode(normalizedMode, currentSettings || {})
+  if (currentPdf && renderState.pdfDoc) {
+    if (normalizedMode === "structure") {
+      if (getOrientationState().status === "idle") {
+        void generateOrientationForCurrentDocument(renderState.loadToken)
+      }
+      void runStructurePrewarmForCurrentDocument(renderState.loadToken)
+    }
+    if (normalizedMode === "worksheet") {
+      void ensureWorksheetQuestionsForCurrentDocument()
+    }
+  }
+  logger.info("Reading mode changed", { mode: normalizedMode })
 }
 
 async function handleReadingModeChange(event) {
@@ -8060,6 +11705,13 @@ pdfRoot.addEventListener("click", (event) => {
     return
   }
 
+  const worksheetTarget =
+    event.target instanceof Element ? event.target.closest("button[data-pdf-worksheet-action]") : null
+  if (worksheetTarget instanceof HTMLButtonElement) {
+    void handlePdfWorksheetOverlayClick(worksheetTarget)
+    return
+  }
+
   const target = event.target instanceof Element ? event.target.closest("button[data-pdf-intent-action]") : null
   if (!(target instanceof HTMLButtonElement)) {
     updateCurrentSectionFromPdfClick(event)
@@ -8111,6 +11763,9 @@ sidebarResizeHandle.addEventListener("pointerdown", handleSidebarResizeStart);
 sidebarResizeHandle.addEventListener("lostpointercapture", handleSidebarResizeEnd);
 
 openFileBtn.addEventListener("click", () => fileInput.click());
+downloadPdfBtn?.addEventListener("click", () => {
+  void handleDownloadPdf();
+});
 
 fileInput.addEventListener("change", async () => {
   const file = fileInput.files?.[0];
@@ -8127,14 +11782,14 @@ prevPageBtn.addEventListener("click", () => {
   if (!currentPdf) {
     return;
   }
-  scrollToPage(currentPdf.pageNumber - 1);
+  scrollToPage(currentPdf.pageNumber - 1, "instant", { align: "center" });
 });
 
 nextPageBtn.addEventListener("click", () => {
   if (!currentPdf) {
     return;
   }
-  scrollToPage(currentPdf.pageNumber + 1);
+  scrollToPage(currentPdf.pageNumber + 1, "instant", { align: "center" });
 });
 
 zoomOutBtn.addEventListener("click", () => {
@@ -8164,6 +11819,7 @@ themeToggleBtn?.addEventListener("click", () => {
 
 pdfRoot.addEventListener("scroll", handlePdfScroll, { passive: true });
 window.addEventListener("resize", handleWindowResize);
+document.addEventListener("keydown", handleViewerKeydown);
 
 diagnosticsToggleBtn.addEventListener("click", (event) => {
   event.stopPropagation();
@@ -8189,6 +11845,14 @@ verboseToggle.addEventListener("change", async () => {
   logger.info("Verbose logging updated", { enabled, persisted: didPersist });
 });
 
+debugModeToggle?.addEventListener("change", async () => {
+  const settings = await setSettings({ debugMode: Boolean(debugModeToggle.checked) })
+  applySettingsToUi(settings)
+  if (sidebarUiState.activeTab === "explain" && isWorksheetMode()) {
+    renderPanel()
+  }
+});
+
 copyDebugInfoBtn.addEventListener("click", async () => {
   try {
     const info = await getDebugInfo({
@@ -8204,12 +11868,20 @@ copyDebugInfoBtn.addEventListener("click", async () => {
   }
 });
 
+readingModeViewerRadio?.addEventListener("change", handleReadingModeChange);
 readingModeFlowRadio.addEventListener("change", handleReadingModeChange);
 readingModeStructureRadio.addEventListener("change", handleReadingModeChange);
+readingModeWorksheetRadio?.addEventListener("change", handleReadingModeChange);
+toolbarModeViewerBtn?.addEventListener("click", (event) => {
+  void handleToolbarModeToggle(event)
+});
 toolbarModeFlowBtn?.addEventListener("click", (event) => {
   void handleToolbarModeToggle(event)
 });
 toolbarModeStructureBtn?.addEventListener("click", (event) => {
+  void handleToolbarModeToggle(event)
+});
+toolbarModeWorksheetBtn?.addEventListener("click", (event) => {
   void handleToolbarModeToggle(event)
 });
 llmModeSelect.addEventListener("change", handleLlmModeChange);

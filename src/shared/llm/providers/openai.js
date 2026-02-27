@@ -12,6 +12,8 @@ const MAX_QUOTE_LENGTH = 300
 const MAX_OUTPUT_TOKENS = 500
 const DEFAULT_MAX_QUOTE_CHARS = 240
 const DEFAULT_MAX_CITATIONS = 3
+const MAX_JSON_REPAIR_INPUT_CHARS = 6000
+const JSON_REPAIR_TIMEOUT_MS = 18000
 const STABLE_DEVELOPER_PROMPT = [
   "You are Clarify, a grounded research-paper reading assistant.",
   "Use only provided context and attached file content.",
@@ -25,6 +27,17 @@ const logger = createLogger("OPENAI")
 
 function normalizeText(value) {
   return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : ""
+}
+
+function normalizeWorksheetText(value) {
+  if (typeof value !== "string") {
+    return ""
+  }
+  return value
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t\f\v]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
 }
 
 function sanitizeLogString(value) {
@@ -44,6 +57,17 @@ function clampText(value, maxLength) {
   return `${text.slice(0, Math.max(maxLength - 3, 1)).trim()}...`
 }
 
+function clampWorksheetText(value, maxLength) {
+  const text = normalizeWorksheetText(value)
+  if (!text) {
+    return ""
+  }
+  if (!Number.isFinite(maxLength) || maxLength < 1 || text.length <= maxLength) {
+    return text
+  }
+  return text.slice(0, maxLength).trim()
+}
+
 function normalizeNumber(value, fallback, min, max) {
   const numeric = Number(value)
   if (!Number.isFinite(numeric)) {
@@ -59,7 +83,9 @@ function normalizeTask(task) {
     task === "quant" ||
     task === "orientation" ||
     task === "section_intents" ||
-    task === "section_intent"
+    task === "section_intent" ||
+    task === "worksheet_questions" ||
+    task === "worksheet_answer"
   ) {
     return task
   }
@@ -86,7 +112,19 @@ function normalizeInput(input) {
         .filter((section) => section.sectionKey && section.title)
         .slice(0, 24)
     : []
-  const readingMode = source.readingMode === "structure" ? "structure" : "flow"
+  const worksheetPages = Array.isArray(source.worksheetPages)
+    ? source.worksheetPages
+        .map((entry) => ({
+          pageIndex: Number.isFinite(Number(entry?.pageIndex))
+            ? Math.max(0, Math.floor(Number(entry.pageIndex)))
+            : 0,
+          text: clampWorksheetText(entry?.text, 1800)
+        }))
+        .filter((entry) => entry.text)
+        .slice(0, 48)
+    : []
+  const readingMode =
+    source.readingMode === "structure" || source.readingMode === "worksheet" ? source.readingMode : "flow"
   const snippet = clampText(source.snippet, 1000)
   const pageIndex = Number.isFinite(Number(source.pageIndex))
     ? Math.max(0, Math.floor(Number(source.pageIndex)))
@@ -97,6 +135,9 @@ function normalizeInput(input) {
     title: clampText(source.title, MAX_TITLE_LENGTH),
     headings,
     sections,
+    worksheetPages,
+    questionText: clampText(source.questionText, 360),
+    gradeLevel: clampText(source.gradeLevel, 80),
     snippet,
     pageIndex,
     readingMode,
@@ -125,6 +166,12 @@ function taskLabel(task) {
   if (task === "section_intent") {
     return "section intent"
   }
+  if (task === "worksheet_questions") {
+    return "worksheet question extraction"
+  }
+  if (task === "worksheet_answer") {
+    return "worksheet direct answer"
+  }
   return "explanation"
 }
 
@@ -134,6 +181,12 @@ function buildSchemaForTask(task) {
   }
   if (task === "section_intent") {
     return `{"intent":"<=25 words"}`
+  }
+  if (task === "worksheet_questions") {
+    return `{"questions":[{"questionText":"string","pageIndex":0,"gradeLevel":"string|optional","kind":"question|part|item|term|prompt","label":"string|optional","sourceKey":"string|optional","parentSourceKey":"string|optional","anchorText":"string|optional","questionType":"mcq|short_answer|long_answer|multi_select|fill_blank|true_false|table_definition|unknown","responseTypes":["mcq|short_answer|long_answer|multi_select|fill_blank|true_false|table_definition"],"marksRaw":"string|optional","marksValue":null,"marksEach":false,"options":["string"],"contextWindow":"string|optional"}]}`
+  }
+  if (task === "worksheet_answer") {
+    return `{"answer":"string","answerLength":"short|long"}`
   }
   if (task === "orientation") {
     return `{"purpose":"string","contribution":"string","focusBullets":["string"],"keyTerms":["string"]}`
@@ -145,6 +198,59 @@ function buildSchemaForTask(task) {
 }
 
 function buildUserPrompt(task, input, limits) {
+  if (task === "worksheet_questions") {
+    const pagesPayload = JSON.stringify(
+      input.worksheetPages.map((entry) => ({
+        pageIndex: entry.pageIndex,
+        text: entry.text
+      }))
+    )
+    return [
+      "Task: worksheet question extraction",
+      `Return JSON schema exactly: ${buildSchemaForTask(task)}`,
+      "Extract only real worksheet/test/assignment questions from provided pages.",
+      "Keep each question text concise but faithful to the source wording.",
+      "Split compound blocks: each Part (a)/(b)/... and each numbered item should be a separate questionText.",
+      "For table-definition prompts (e.g., Term/Definition tables), emit one item per term as kind='term'.",
+      "Use kind values: question, part, item, term, prompt.",
+      "When an item belongs under another item, set parentSourceKey to that parent's sourceKey.",
+      "Provide stable short sourceKey values so the same worksheet yields consistent hierarchy on refresh.",
+      "label is optional display text (e.g., 'Question 2', 'Part (a)').",
+      "anchorText should be the exact text likely visible on the page for overlay anchoring.",
+      "Infer questionType and responseTypes from wording and option patterns.",
+      "Use questionType/responseTypes from: mcq, short_answer, long_answer, multi_select, fill_blank, true_false, table_definition, unknown.",
+      "If prompt mixes types (e.g., True/False + justify), include both in responseTypes and set questionType to the dominant first action.",
+      "If marks/points are present nearby, fill marksRaw and marksValue; marksEach=true only if clearly per item.",
+      "If marks are not stated, leave marksRaw empty and marksValue null.",
+      "If options are present, include concise option strings (e.g., 'a) Base').",
+      "contextWindow should include nearby text around the tagged prompt for precise answer placement.",
+      "Set pageIndex to the source page (0-based).",
+      "gradeLevel: include grade/marks/point hints only when explicitly present near the question; else empty string.",
+      "Do not generate answers.",
+      "Do not include duplicates.",
+      `Pages JSON: ${pagesPayload}`
+    ].join("\n")
+  }
+
+  if (task === "worksheet_answer") {
+    return [
+      "Task: worksheet direct answer",
+      `Return JSON schema exactly: ${buildSchemaForTask(task)}`,
+      "Answer as if writing a final assignment/test response.",
+      "No introductions, no filler, no extra commentary.",
+      "Use simplified markdown only when useful: **KEY ANSWER** and short bullets.",
+      "For True/False prompts: start with **TRUE** or **FALSE**, then one short justification sentence.",
+      "For MCQ prompts: start with **Answer: <option>** and keep it direct.",
+      "For term-definition prompts: return one direct definition line only.",
+      "If gradeLevel exists, match expected depth for that grade.",
+      "If context is insufficient, give the most concise accurate answer possible from available text.",
+      `Question: "${input.questionText || ""}"`,
+      `Grade hint: "${input.gradeLevel || ""}"`,
+      `Page index (0-based): ${input.pageIndex}`,
+      `Context snippet: "${input.snippet || input.contextWindow || ""}"`
+    ].join("\n")
+  }
+
   if (task === "section_intent") {
     return [
       "Task: section intent",
@@ -269,22 +375,136 @@ function extractResponseText(payload) {
   return ""
 }
 
+function stripCodeFences(text) {
+  const source = typeof text === "string" ? text : ""
+  const trimmed = source.trim()
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
+  if (fenced?.[1]) {
+    return fenced[1].trim()
+  }
+  return trimmed
+}
+
+function collectBalancedJsonObjects(text) {
+  const source = typeof text === "string" ? text : ""
+  const objects = []
+  let depth = 0
+  let start = -1
+  let inString = false
+  let escaped = false
+
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index]
+
+    if (inString) {
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (char === "\\") {
+        escaped = true
+        continue
+      }
+      if (char === "\"") {
+        inString = false
+      }
+      continue
+    }
+
+    if (char === "\"") {
+      inString = true
+      continue
+    }
+
+    if (char === "{") {
+      if (depth === 0) {
+        start = index
+      }
+      depth += 1
+      continue
+    }
+
+    if (char === "}" && depth > 0) {
+      depth -= 1
+      if (depth === 0 && start >= 0) {
+        objects.push(source.slice(start, index + 1))
+        start = -1
+      }
+    }
+  }
+
+  return objects
+}
+
+function tryParseJsonObject(candidate) {
+  const source = typeof candidate === "string" ? candidate : ""
+  if (!source.trim()) {
+    return null
+  }
+  const attempts = [
+    source.trim(),
+    stripCodeFences(source),
+    stripCodeFences(source).replace(/,\s*([}\]])/g, "$1")
+  ]
+  for (const attempt of attempts) {
+    if (!attempt) {
+      continue
+    }
+    try {
+      const parsed = JSON.parse(attempt)
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return {
+          parsed,
+          extractedJsonText: attempt
+        }
+      }
+    } catch (_error) {
+      // Try next candidate.
+    }
+  }
+  return null
+}
+
 function extractJsonObject(rawText) {
   const text = typeof rawText === "string" ? rawText : ""
-  const start = text.indexOf("{")
-  const end = text.lastIndexOf("}")
-  if (start < 0 || end < 0 || end <= start) {
+  if (!text.trim()) {
     throw new Error("OpenAI response did not contain a JSON object.")
   }
-  const candidate = text.slice(start, end + 1)
-  try {
-    return {
-      parsed: JSON.parse(candidate),
-      extractedJsonText: candidate
+
+  const candidates = []
+  const pushCandidate = (candidate) => {
+    const normalized = typeof candidate === "string" ? candidate.trim() : ""
+    if (!normalized) {
+      return
     }
-  } catch (_error) {
-    throw new Error("OpenAI returned invalid JSON payload.")
+    if (!candidates.includes(normalized)) {
+      candidates.push(normalized)
+    }
   }
+
+  pushCandidate(text)
+  pushCandidate(stripCodeFences(text))
+  const fencedOnly = stripCodeFences(text)
+  for (const candidate of collectBalancedJsonObjects(text)) {
+    pushCandidate(candidate)
+  }
+  for (const candidate of collectBalancedJsonObjects(fencedOnly)) {
+    pushCandidate(candidate)
+  }
+  const start = text.indexOf("{")
+  const end = text.lastIndexOf("}")
+  if (start >= 0 && end > start) {
+    pushCandidate(text.slice(start, end + 1))
+  }
+
+  for (const candidate of candidates) {
+    const parsedResult = tryParseJsonObject(candidate)
+    if (parsedResult) {
+      return parsedResult
+    }
+  }
+
+  throw new Error("OpenAI returned invalid JSON payload.")
 }
 
 function shouldRetryWithoutRetention(errorMessage, usedRetention) {
@@ -311,6 +531,20 @@ function buildUserContent(userPrompt, openaiFileId) {
   return content
 }
 
+function buildJsonRepairPrompt(task, rawText) {
+  const schema = buildSchemaForTask(task)
+  const malformed = clampWorksheetText(rawText, MAX_JSON_REPAIR_INPUT_CHARS)
+  return [
+    "Task: repair malformed JSON from a previous model output.",
+    `Target schema: ${schema}`,
+    "Return one strict JSON object only.",
+    "Do not include markdown fences.",
+    "Preserve meaning from the malformed text as closely as possible.",
+    "If a field is missing, fill with an empty string/empty list/null as appropriate.",
+    `Malformed model output: ${malformed}`
+  ].join("\n")
+}
+
 function buildRequestPayload(task, input, config, useRetention) {
   const limits = {
     maxQuoteChars: normalizeNumber(config?.maxQuoteChars, DEFAULT_MAX_QUOTE_CHARS, 80, 480),
@@ -319,7 +553,7 @@ function buildRequestPayload(task, input, config, useRetention) {
   const userPrompt = buildUserPrompt(task, input, limits)
   const payload = {
     model: normalizeText(config?.model) || DEFAULT_MODEL,
-    temperature: 0.2,
+    temperature: 0,
     max_output_tokens: MAX_OUTPUT_TOKENS,
     text: {
       format: { type: "json_object" }
@@ -341,39 +575,89 @@ function buildRequestPayload(task, input, config, useRetention) {
   return payload
 }
 
-async function callResponsesApi({ apiKey, payload, signal }) {
-  const response = await fetch(OPENAI_RESPONSES_API_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
+function buildJsonRepairPayload(task, rawText, config) {
+  const payload = {
+    model: normalizeText(config?.model) || DEFAULT_MODEL,
+    temperature: 0,
+    max_output_tokens: MAX_OUTPUT_TOKENS,
+    text: {
+      format: { type: "json_object" }
     },
-    body: JSON.stringify(payload),
-    signal
-  })
+    input: [
+      {
+        role: "developer",
+        content: [{ type: "input_text", text: STABLE_DEVELOPER_PROMPT }]
+      },
+      {
+        role: "user",
+        content: [{ type: "input_text", text: buildJsonRepairPrompt(task, rawText) }]
+      }
+    ]
+  }
+  return payload
+}
 
-  let json = null
+async function callResponsesApi({ apiKey, payload, timeoutMs = REQUEST_TIMEOUT_MS }) {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => {
+    controller.abort()
+  }, Math.max(1000, Number(timeoutMs) || REQUEST_TIMEOUT_MS))
+
   try {
-    json = await response.json()
-  } catch (_error) {
-    throw new Error("OpenAI Responses API response could not be parsed.")
-  }
+    const response = await fetch(OPENAI_RESPONSES_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    })
 
-  if (!response.ok) {
-    if (response.status === 429) {
-      const cooldownMs = parseRetryAfterMs(response)
-      rateLimitUntilMs = Date.now() + cooldownMs
-      const retryInSec = Math.max(1, Math.ceil(cooldownMs / 1000))
-      const apiMessage = readApiErrorMessage(json)
-      const reason = apiMessage ? ` ${apiMessage}` : ""
-      throw new Error(`OpenAI rate limit hit (429). Retry in about ${retryInSec}s.${reason}`)
+    let json = null
+    try {
+      json = await response.json()
+    } catch (_error) {
+      throw new Error("OpenAI Responses API response could not be parsed.")
     }
-    const apiMessage = readApiErrorMessage(json)
-    const reason = apiMessage ? `: ${apiMessage}` : ""
-    throw new Error(`OpenAI request failed (${response.status})${reason}`)
-  }
 
-  return { response, payload: json }
+    if (!response.ok) {
+      if (response.status === 429) {
+        const cooldownMs = parseRetryAfterMs(response)
+        rateLimitUntilMs = Date.now() + cooldownMs
+        const retryInSec = Math.max(1, Math.ceil(cooldownMs / 1000))
+        const apiMessage = readApiErrorMessage(json)
+        const reason = apiMessage ? ` ${apiMessage}` : ""
+        throw new Error(`OpenAI rate limit hit (429). Retry in about ${retryInSec}s.${reason}`)
+      }
+      const apiMessage = readApiErrorMessage(json)
+      const reason = apiMessage ? `: ${apiMessage}` : ""
+      throw new Error(`OpenAI request failed (${response.status})${reason}`)
+    }
+
+    return { response, payload: json }
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`OpenAI request timed out after ${Math.max(1000, Number(timeoutMs) || REQUEST_TIMEOUT_MS)}ms.`)
+    }
+    throw error
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
+async function repairMalformedJson({ apiKey, task, rawText, config }) {
+  const repairPayload = buildJsonRepairPayload(task, rawText, config)
+  const { payload } = await callResponsesApi({
+    apiKey,
+    payload: repairPayload,
+    timeoutMs: JSON_REPAIR_TIMEOUT_MS
+  })
+  const repairText = extractResponseText(payload)
+  if (!repairText) {
+    throw new Error("OpenAI JSON repair returned empty output.")
+  }
+  return extractJsonObject(repairText)
 }
 
 export async function generate(task, input, config = {}) {
@@ -392,76 +676,89 @@ export async function generate(task, input, config = {}) {
   const normalizedInput = normalizeInput(input)
   const wantsRetention = config.promptCacheRetention === "24h"
 
-  const controller = new AbortController()
-  const timeoutId = setTimeout(() => {
-    controller.abort()
-  }, REQUEST_TIMEOUT_MS)
-
   let useRetention = wantsRetention
   let attempts = 0
 
-  try {
-    while (attempts < 2) {
-      attempts += 1
-      const requestPayload = buildRequestPayload(normalizedTask, normalizedInput, config, useRetention)
-      logger.info("OpenAI request", {
-        endpoint: OPENAI_RESPONSES_API_URL,
-        task: normalizedTask,
-        model: requestPayload.model,
-        hasOpenAIFile: Boolean(normalizedInput.openaiFileId),
-        retention: useRetention ? "24h" : "default",
-        selectedTextLength: normalizedInput.selectedText.length,
-        contextWindowLength: normalizedInput.contextWindow.length,
-        snippetLength: normalizedInput.snippet.length,
-        headingCount: normalizedInput.headings.length,
-        sectionCount: normalizedInput.sections.length
+  while (attempts < 2) {
+    attempts += 1
+    const requestPayload = buildRequestPayload(normalizedTask, normalizedInput, config, useRetention)
+    logger.info("OpenAI request", {
+      endpoint: OPENAI_RESPONSES_API_URL,
+      task: normalizedTask,
+      model: requestPayload.model,
+      hasOpenAIFile: Boolean(normalizedInput.openaiFileId),
+      retention: useRetention ? "24h" : "default",
+      selectedTextLength: normalizedInput.selectedText.length,
+      contextWindowLength: normalizedInput.contextWindow.length,
+      snippetLength: normalizedInput.snippet.length,
+      headingCount: normalizedInput.headings.length,
+      sectionCount: normalizedInput.sections.length,
+      worksheetPageCount: normalizedInput.worksheetPages.length,
+      questionTextLength: normalizedInput.questionText.length
+    })
+
+    try {
+      const { response, payload } = await callResponsesApi({
+        apiKey,
+        payload: requestPayload
       })
 
-      try {
-        const { response, payload } = await callResponsesApi({
-          apiKey,
-          payload: requestPayload,
-          signal: controller.signal
-        })
-
-        const rawText = extractResponseText(payload)
-        if (!rawText) {
-          throw new Error("OpenAI response was empty.")
-        }
-        const { parsed, extractedJsonText } = extractJsonObject(rawText)
-        logger.info("OpenAI response ok", {
-          status: response.status,
-          rawTextLength: rawText.length,
-          extractedJsonLength: extractedJsonText.length,
-          responseFields: Object.keys(parsed || {}).slice(0, 12)
-        })
-        return {
-          ...parsed,
-          rawText,
-          extractedJsonText
-        }
-      } catch (error) {
-        const errorMessage = sanitizeLogString(error?.message || "Unknown error")
-        logger.info("OpenAI response error", {
-          message: errorMessage,
-          retention: useRetention ? "24h" : "default"
-        })
-
-        if (shouldRetryWithoutRetention(errorMessage, useRetention)) {
-          useRetention = false
-          continue
-        }
-        throw error
+      const rawText = extractResponseText(payload)
+      if (!rawText) {
+        throw new Error("OpenAI response was empty.")
       }
-    }
+      let parsedEnvelope = null
+      let usedJsonRepair = false
+      try {
+        parsedEnvelope = extractJsonObject(rawText)
+      } catch (parseError) {
+        const parseMessage = sanitizeLogString(parseError?.message || "Unknown parse error")
+        logger.warn("OpenAI JSON parse failed; attempting repair", {
+          task: normalizedTask,
+          message: parseMessage,
+          rawTextLength: rawText.length
+        })
+        try {
+          parsedEnvelope = await repairMalformedJson({
+            apiKey,
+            task: normalizedTask,
+            rawText,
+            config
+          })
+          usedJsonRepair = true
+        } catch (repairError) {
+          const repairMessage = sanitizeLogString(repairError?.message || "Unknown repair error")
+          throw new Error(`OpenAI returned invalid JSON payload. Repair failed: ${repairMessage}`)
+        }
+      }
+      const { parsed, extractedJsonText } = parsedEnvelope
+      logger.info("OpenAI response ok", {
+        status: response.status,
+        rawTextLength: rawText.length,
+        extractedJsonLength: extractedJsonText.length,
+        responseFields: Object.keys(parsed || {}).slice(0, 12),
+        jsonRepairUsed: usedJsonRepair
+      })
+      return {
+        ...parsed,
+        rawText,
+        extractedJsonText,
+        jsonRepairUsed: usedJsonRepair
+      }
+    } catch (error) {
+      const errorMessage = sanitizeLogString(error?.message || "Unknown error")
+      logger.info("OpenAI response error", {
+        message: errorMessage,
+        retention: useRetention ? "24h" : "default"
+      })
 
-    throw new Error("OpenAI request failed after retry.")
-  } catch (error) {
-    if (error?.name === "AbortError") {
-      throw new Error(`OpenAI request timed out after ${REQUEST_TIMEOUT_MS}ms.`)
+      if (shouldRetryWithoutRetention(errorMessage, useRetention)) {
+        useRetention = false
+        continue
+      }
+      throw error
     }
-    throw error
-  } finally {
-    clearTimeout(timeoutId)
   }
+
+  throw new Error("OpenAI request failed after retry.")
 }

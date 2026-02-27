@@ -2,12 +2,13 @@ export const DEFAULT_SETTINGS = Object.freeze({
   llmMode: "auto",
   openaiApiKey: null,
   theme: "light",
+  debugMode: false,
   contextScope: "selection",
   wholePdfUpload: "session",
   promptCacheRetention: "default",
   maxQuoteChars: 240,
   maxCitations: 3,
-  defaultReadingMode: "flow",
+  defaultReadingMode: "viewer",
   autoOpenPdf: false
 });
 
@@ -16,7 +17,7 @@ const VALID_THEMES = new Set(["light", "dark"]);
 const VALID_CONTEXT_SCOPES = new Set(["selection", "page", "whole_pdf"]);
 const VALID_WHOLE_PDF_UPLOAD = new Set(["off", "session", "remember"]);
 const VALID_PROMPT_CACHE_RETENTION = new Set(["default", "24h"]);
-const VALID_READING_MODES = new Set(["flow", "structure"]);
+const VALID_READING_MODES = new Set(["viewer", "flow", "structure", "worksheet"]);
 const MIN_QUOTE_CHARS = 80;
 const MAX_QUOTE_CHARS = 480;
 const MIN_CITATIONS = 1;
@@ -81,6 +82,7 @@ export function normalizeSettings(obj) {
     llmMode,
     openaiApiKey: normalizeApiKey(source.openaiApiKey),
     theme,
+    debugMode: Boolean(source.debugMode),
     contextScope,
     wholePdfUpload,
     promptCacheRetention,
