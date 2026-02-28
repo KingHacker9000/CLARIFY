@@ -182,6 +182,23 @@ html {
   color: var(--muted);
 }
 
+.zoomIndicator {
+  min-width: 56px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: #f6f6f1;
+}
+
+.zoomIndicator.isPending {
+  color: #6f5d1a;
+  border-color: #d9c789;
+  background: #fff8dc;
+}
+
 #fitWidth[aria-pressed="true"] {
   background: var(--toolbarButtonActive);
   border-color: #d6d6cc;
@@ -505,6 +522,7 @@ html {
   border: 1px solid #d7d7cd;
   box-shadow: 0 4px 16px rgba(28, 26, 20, 0.1);
   isolation: isolate;
+  backface-visibility: hidden;
 }
 
 .pdfPageShell[data-rendered="false"] .pdfPageSurface {
@@ -2455,6 +2473,16 @@ body[data-theme="dark"] .orientationMapIntentBubble {
 body[data-theme="dark"] .pdfPageShell[data-rendered="false"] .pdfPageSurface {
   background: #272727;
   border-color: #3a3a3a;
+}
+
+body[data-theme="dark"] .zoomIndicator {
+  background: #2f2f2f;
+}
+
+body[data-theme="dark"] .zoomIndicator.isPending {
+  color: #f2d676;
+  border-color: #8b7a3a;
+  background: #4b4120;
 }
 
 body[data-theme="dark"] .selectionPopoverButton:hover,

@@ -46,6 +46,13 @@ const DEFAULT_SCALE = 1.2;
 const MIN_SCALE = 0.6;
 const MAX_SCALE = 3.2;
 const ZOOM_STEP = 0.2;
+const ZOOM_QUALITY_UPGRADE_THRESHOLD = 1.22;
+const ZOOM_QUALITY_DOWNGRADE_THRESHOLD = 0.78;
+const ZOOM_QUALITY_DEBOUNCE_MS = 180;
+const ZOOM_QUALITY_INITIAL_RENDER_COUNT = 1;
+const MAX_CANVAS_OUTPUT_SCALE = 1.85;
+const MAX_CANVAS_PIXELS = 8_000_000;
+const MIN_CANVAS_OUTPUT_SCALE = 0.5;
 const SIDEBAR_DEFAULT_WIDTH = 360;
 const SIDEBAR_MIN_WIDTH = 240;
 const SIDEBAR_MAX_WIDTH_RATIO = 1 / 3;
@@ -136,6 +143,7 @@ const nextPageBtn = document.getElementById("nextPage");
 const pageIndicatorEl = document.getElementById("pageIndicator");
 const zoomOutBtn = document.getElementById("zoomOut");
 const zoomInBtn = document.getElementById("zoomIn");
+const zoomIndicatorEl = document.getElementById("zoomIndicator");
 const fitWidthBtn = document.getElementById("fitWidth");
 const highlighterToggleBtn = document.getElementById("highlighterToggle");
 const themeToggleBtn = document.getElementById("themeToggle");
@@ -189,7 +197,11 @@ const renderState = {
   lazyRenderQueueSet: new Set(),
   lazyRenderRunning: false,
   lazyRenderTimer: null,
-  initialRenderInProgress: false
+  initialRenderInProgress: false,
+  zoomQualityTimer: null,
+  pendingZoomQualityScale: null,
+  pendingZoomQualityAnchor: null,
+  pendingZoomQualityForce: false
 };
 
 let openedPdfSource = null;
@@ -200,6 +212,11 @@ let currentSettings = null;
 let renderChain = Promise.resolve();
 let scrollTicking = false;
 let fitResizeFrame = null;
+const pointerState = {
+  insidePdfRoot: false,
+  clientX: 0,
+  clientY: 0
+}
 let selectionSystem = null;
 const highlighterState = {
   items: [],
@@ -9952,9 +9969,97 @@ function showPdfMessage(message) {
 }
 
 function ensureScaleFactor() {
-  // Keep CSS text-layer scale in the same coordinate space as viewport.scale.
-  const scale = currentPdf?.renderedScale != null ? currentPdf.renderedScale : 1;
+  const scale = currentPdf?.scale != null ? currentPdf.scale : 1;
   pdfRoot.style.setProperty("--scale-factor", String(scale));
+}
+
+function isScaleEquivalent(leftScale, rightScale, tolerance = 0.01) {
+  const left = Number(leftScale)
+  const right = Number(rightScale)
+  if (!Number.isFinite(left) || !Number.isFinite(right) || left <= 0 || right <= 0) {
+    return false
+  }
+  return Math.abs(left - right) <= tolerance
+}
+
+function getPageShellRenderScale(pageShell) {
+  if (pageShell instanceof HTMLElement) {
+    const parsed = Number(pageShell.dataset.renderScale)
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed
+    }
+  }
+  const fallback = Number(currentPdf?.renderedScale || currentPdf?.scale || 1)
+  return Number.isFinite(fallback) && fallback > 0 ? fallback : 1
+}
+
+function setPageShellRenderScale(pageShell, scale) {
+  if (!(pageShell instanceof HTMLElement)) {
+    return
+  }
+  const normalizedScale = Number(scale)
+  if (!Number.isFinite(normalizedScale) || normalizedScale <= 0) {
+    return
+  }
+  pageShell.dataset.renderScale = String(normalizedScale)
+  const pageSurface = pageShell.querySelector(".pdfPageSurface")
+  if (pageSurface instanceof HTMLElement) {
+    pageSurface.style.setProperty("--scale-factor", String(normalizedScale))
+  }
+}
+
+function getPageVisualScaleRatio(pageShell) {
+  if (!currentPdf) {
+    return 1
+  }
+  const renderScale = getPageShellRenderScale(pageShell)
+  const currentScale = Number(currentPdf.scale)
+  if (!Number.isFinite(currentScale) || currentScale <= 0 || !Number.isFinite(renderScale) || renderScale <= 0) {
+    return 1
+  }
+  return currentScale / renderScale
+}
+
+function getCurrentPageShell() {
+  if (!currentPdf || renderState.pageNodes.length === 0) {
+    return null
+  }
+  const pageNumber = Math.min(
+    Math.max(Math.floor(Number(currentPdf.pageNumber) || 1), 1),
+    Math.max(renderState.pageNodes.length, 1)
+  )
+  const pageShell = renderState.pageNodes[pageNumber - 1]
+  if (pageShell instanceof HTMLElement) {
+    return pageShell
+  }
+  return getFirstRenderedPageNode()
+}
+
+function getCurrentPageQualityState() {
+  const currentScale = Number(currentPdf?.scale || 1)
+  const pageShell = getCurrentPageShell()
+  const renderScale = getPageShellRenderScale(pageShell)
+  const ratio =
+    Number.isFinite(currentScale) && currentScale > 0 && Number.isFinite(renderScale) && renderScale > 0
+      ? currentScale / renderScale
+      : 1
+  const needsRerender = ratio > ZOOM_QUALITY_UPGRADE_THRESHOLD || ratio < ZOOM_QUALITY_DOWNGRADE_THRESHOLD
+  return {
+    currentScale: Number.isFinite(currentScale) && currentScale > 0 ? currentScale : 1,
+    renderScale,
+    ratio,
+    needsRerender
+  }
+}
+
+function clearPendingZoomQualityRerender() {
+  if (renderState.zoomQualityTimer) {
+    clearTimeout(renderState.zoomQualityTimer)
+    renderState.zoomQualityTimer = null
+  }
+  renderState.pendingZoomQualityScale = null
+  renderState.pendingZoomQualityAnchor = null
+  renderState.pendingZoomQualityForce = false
 }
 
 function getRenderedPageCount() {
@@ -10043,8 +10148,7 @@ function readPageShellLayout(pageShell) {
   }
 }
 
-function capturePageLayoutSnapshot(scaleRatio = 1) {
-  const ratio = Number.isFinite(Number(scaleRatio)) && Number(scaleRatio) > 0 ? Number(scaleRatio) : 1
+function capturePageLayoutSnapshot() {
   const snapshot = new Map()
   for (const pageNode of renderState.pageNodes) {
     if (!(pageNode instanceof HTMLElement)) {
@@ -10058,9 +10162,10 @@ function capturePageLayoutSnapshot(scaleRatio = 1) {
     if (!layout) {
       continue
     }
+    const visualRatio = getPageVisualScaleRatio(pageNode)
     snapshot.set(pageNumber, {
-      width: Math.max(layout.width * ratio, 1),
-      height: Math.max(layout.height * ratio, 1)
+      width: Math.max(layout.width * visualRatio, 1),
+      height: Math.max(layout.height * visualRatio, 1)
     })
   }
   return snapshot
@@ -10072,13 +10177,16 @@ function createPageShell(pageNumber, options = {}) {
     : 1
   const width = Number(options?.width)
   const height = Number(options?.height)
+  const renderScale = Number(options?.renderScale)
   const safeWidth = Number.isFinite(width) && width > 0 ? Math.max(width, 1) : 0
   const safeHeight = Number.isFinite(height) && height > 0 ? Math.max(height, 1) : 0
+  const safeRenderScale = Number.isFinite(renderScale) && renderScale > 0 ? renderScale : Number(currentPdf?.scale || 1)
 
   const pageShell = document.createElement("section")
   pageShell.className = "pdfPageShell"
   pageShell.dataset.pageNumber = String(normalizedPageNumber)
   pageShell.dataset.pageIndex = String(normalizedPageNumber - 1)
+  pageShell.dataset.renderScale = String(Math.max(safeRenderScale, 0.1))
   pageShell.dataset.rendered = String(Boolean(options?.rendered))
   pageShell.dataset.renderState = options?.rendered ? "ready" : "placeholder"
   if (safeWidth > 0) {
@@ -10097,6 +10205,7 @@ function createPageShell(pageNumber, options = {}) {
     pageSurface.style.height = `${safeHeight}px`
   }
   pageSurface.style.setProperty("--user-unit", "1")
+  pageSurface.style.setProperty("--scale-factor", String(Math.max(safeRenderScale, 0.1)))
   pageSurface.dataset.mainRotation = "0"
 
   const canvas = document.createElement("canvas")
@@ -10127,11 +10236,13 @@ function seedPageShellPlaceholders(totalPages, layoutSnapshot = new Map(), fallb
     fallbackHeight > 0
 
   renderState.pageNodes = new Array(totalPages)
+  const pageRenderScale = Number(currentPdf?.scale || currentPdf?.renderedScale || 1)
   for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
     const layout = layoutSnapshot.get(pageNumber) || (hasFallbackLayout ? fallbackLayout : null)
     const pageShell = createPageShell(pageNumber, {
       width: layout?.width,
       height: layout?.height,
+      renderScale: pageRenderScale,
       rendered: false
     })
     insertPageShellByPageNumber(pageShell, pageNumber)
@@ -10139,127 +10250,360 @@ function seedPageShellPlaceholders(totalPages, layoutSnapshot = new Map(), fallb
   }
 }
 
-function captureViewportAnchor() {
+function findPageNodeForScrollY(scrollY) {
   if (!currentPdf || renderState.pageNodes.length === 0) {
-    return null;
+    return null
   }
 
-  const viewportCenterY = pdfRoot.scrollTop + pdfRoot.clientHeight / 2;
-  let activeNode = getFirstRenderedPageNode();
+  let activeNode = getFirstRenderedPageNode()
   if (!(activeNode instanceof HTMLElement)) {
-    return null;
+    return null
   }
 
   for (const node of renderState.pageNodes) {
     if (!(node instanceof HTMLElement)) {
-      continue;
+      continue
     }
-    const top = node.offsetTop;
-    const bottom = top + node.offsetHeight;
-    if (viewportCenterY >= top && viewportCenterY <= bottom) {
-      activeNode = node;
-      break;
+    const top = node.offsetTop
+    const bottom = top + node.offsetHeight
+    if (scrollY >= top && scrollY <= bottom) {
+      activeNode = node
+      break
     }
-    if (viewportCenterY > top) {
-      activeNode = node;
+    if (scrollY > top) {
+      activeNode = node
     }
   }
+  return activeNode
+}
 
-  const pageNumber = Number(activeNode.dataset.pageNumber || 1);
-  const pageTop = activeNode.offsetTop;
-  const pageHeight = Math.max(activeNode.offsetHeight, 1);
-  const pageSurface = activeNode.firstElementChild;
-  const pageLeft = activeNode.offsetLeft + (pageSurface?.offsetLeft || 0);
-  const pageWidth = Math.max(pageSurface?.getBoundingClientRect().width || 1, 1);
-  const viewportCenterX = pdfRoot.scrollLeft + pdfRoot.clientWidth / 2;
-  const yRatio = Math.min(Math.max((viewportCenterY - pageTop) / pageHeight, 0), 1);
-  const xRatio = Math.min(Math.max((viewportCenterX - pageLeft) / pageWidth, 0), 1);
+function getPageSurfaceScrollMetrics(pageNode) {
+  if (!(pageNode instanceof HTMLElement)) {
+    return { pageLeft: 0, pageWidth: 1 }
+  }
+  const pageSurface = pageNode.firstElementChild
+  const rootRect = pdfRoot.getBoundingClientRect()
+  const surfaceRect = pageSurface?.getBoundingClientRect?.()
+  const pageLeft =
+    Number.isFinite(surfaceRect?.left) && Number.isFinite(rootRect?.left)
+      ? pdfRoot.scrollLeft + (surfaceRect.left - rootRect.left)
+      : pageNode.offsetLeft + (pageSurface?.offsetLeft || 0)
+  const pageWidth = Math.max(surfaceRect?.width || pageSurface?.getBoundingClientRect?.().width || 1, 1)
+  return { pageLeft, pageWidth }
+}
 
-  return { pageNumber, yRatio, xRatio };
+function captureViewportAnchorAtRootPoint(viewportX, viewportY) {
+  if (!currentPdf || renderState.pageNodes.length === 0) {
+    return null
+  }
+
+  const rootWidth = Math.max(pdfRoot.clientWidth, 1)
+  const rootHeight = Math.max(pdfRoot.clientHeight, 1)
+  const clampedViewportX = clampNumber(Number(viewportX) || 0, 0, rootWidth)
+  const clampedViewportY = clampNumber(Number(viewportY) || 0, 0, rootHeight)
+  const scrollX = pdfRoot.scrollLeft + clampedViewportX
+  const scrollY = pdfRoot.scrollTop + clampedViewportY
+
+  const currentPageIndex = Math.max(0, Math.floor(Number(currentPdf.pageNumber || 1)) - 1)
+  const preferredPageNode = renderState.pageNodes[currentPageIndex]
+  const pageNode =
+    preferredPageNode instanceof HTMLElement ? preferredPageNode : findPageNodeForScrollY(scrollY)
+  if (!(pageNode instanceof HTMLElement)) {
+    return null
+  }
+
+  const pageNumber = Number(pageNode.dataset.pageNumber || 1)
+  const pageTop = pageNode.offsetTop
+  const pageHeight = Math.max(pageNode.offsetHeight, 1)
+  const { pageLeft, pageWidth } = getPageSurfaceScrollMetrics(pageNode)
+  const pageYRatio = clampRatio((scrollY - pageTop) / pageHeight)
+  const pageXRatio = clampRatio((scrollX - pageLeft) / pageWidth)
+  const viewportYRatio = clampRatio(clampedViewportY / rootHeight)
+  const viewportXRatio = clampRatio(clampedViewportX / rootWidth)
+
+  return {
+    pageNumber,
+    pageYRatio,
+    pageXRatio,
+    viewportYRatio,
+    viewportXRatio
+  }
+}
+
+function captureViewportAnchorAtClientPoint(clientX, clientY) {
+  if (!currentPdf || renderState.pageNodes.length === 0) {
+    return null
+  }
+
+  const rootRect = pdfRoot.getBoundingClientRect()
+  const numericX = Number(clientX)
+  const numericY = Number(clientY)
+  if (!Number.isFinite(numericX) || !Number.isFinite(numericY)) {
+    return null
+  }
+  const viewportX = numericX - rootRect.left
+  const viewportY = numericY - rootRect.top
+  return captureViewportAnchorAtRootPoint(viewportX, viewportY)
+}
+
+function captureViewportAnchor() {
+  if (!currentPdf || renderState.pageNodes.length === 0) {
+    return null
+  }
+  return captureViewportAnchorAtRootPoint(pdfRoot.clientWidth / 2, pdfRoot.clientHeight / 2)
 }
 
 function restoreViewportAnchor(anchor) {
   if (!anchor || renderState.pageNodes.length === 0) {
-    return;
+    return
   }
 
-  const pageNode = renderState.pageNodes[anchor.pageNumber - 1];
-  if (!pageNode) {
-    return;
+  const pageNumber = Math.min(
+    Math.max(Math.floor(Number(anchor.pageNumber || 1)), 1),
+    Math.max(renderState.pageNodes.length, 1)
+  )
+  const pageNode = renderState.pageNodes[pageNumber - 1]
+  if (!(pageNode instanceof HTMLElement)) {
+    return
   }
 
-  const pageSurface = pageNode.firstElementChild;
-  const pageCenterY = pageNode.offsetTop + anchor.yRatio * pageNode.offsetHeight;
-  const pageLeft = pageNode.offsetLeft + (pageSurface?.offsetLeft || 0);
-  const pageWidth = Math.max(pageSurface?.getBoundingClientRect().width || 1, 1);
-  const pageCenterX = pageLeft + (anchor.xRatio ?? 0.5) * pageWidth;
-  const nextScrollTop = Math.max(pageCenterY - pdfRoot.clientHeight / 2, 0);
-  const nextScrollLeft = Math.max(pageCenterX - pdfRoot.clientWidth / 2, 0);
+  const pageYRatio = clampRatio(
+    Number.isFinite(Number(anchor.pageYRatio)) ? Number(anchor.pageYRatio) : Number(anchor.yRatio ?? 0.5)
+  )
+  const pageXRatio = clampRatio(
+    Number.isFinite(Number(anchor.pageXRatio)) ? Number(anchor.pageXRatio) : Number(anchor.xRatio ?? 0.5)
+  )
+  const viewportYRatio = clampRatio(Number(anchor.viewportYRatio ?? 0.5))
+  const viewportXRatio = clampRatio(Number(anchor.viewportXRatio ?? 0.5))
 
-  pdfRoot.scrollTop = nextScrollTop;
-  pdfRoot.scrollLeft = nextScrollLeft;
-  setCurrentPage(anchor.pageNumber);
+  const pagePointY = pageNode.offsetTop + pageYRatio * Math.max(pageNode.offsetHeight, 1)
+  const { pageLeft, pageWidth } = getPageSurfaceScrollMetrics(pageNode)
+  const pagePointX = pageLeft + pageXRatio * pageWidth
+  const nextScrollTop = Math.max(pagePointY - viewportYRatio * pdfRoot.clientHeight, 0)
+  const nextScrollLeft = Math.max(pagePointX - viewportXRatio * pdfRoot.clientWidth, 0)
+  const maxScrollTop = Math.max(pdfRoot.scrollHeight - pdfRoot.clientHeight, 0)
+  const maxScrollLeft = Math.max(pdfRoot.scrollWidth - pdfRoot.clientWidth, 0)
+
+  pdfRoot.scrollTop = Math.min(nextScrollTop, maxScrollTop)
+  pdfRoot.scrollLeft = Math.min(nextScrollLeft, maxScrollLeft)
+  setCurrentPage(pageNumber)
+}
+
+function applyVisualScaleToPageNode(node) {
+  if (!currentPdf || !(node instanceof HTMLElement)) {
+    return
+  }
+  const pageSurface = node.firstElementChild
+  if (!(pageSurface instanceof HTMLElement)) {
+    return
+  }
+
+  const baseWidth = Number(node.dataset.baseWidth || 0)
+  const baseHeight = Number(node.dataset.baseHeight || 0)
+  const renderScale = getPageShellRenderScale(node)
+  const visualRatio = getPageVisualScaleRatio(node)
+  const displayHeight = baseHeight > 0 ? Math.max(baseHeight * visualRatio, 1) : 0
+  const displayWidth = baseWidth > 0 ? Math.max(baseWidth * visualRatio, 1) : 0
+
+  if (baseWidth > 0 && baseHeight > 0) {
+    node.style.height = `${displayHeight}px`
+    node.style.minHeight = `${displayHeight}px`
+    node.style.minWidth = !renderState.fitWidthEnabled && displayWidth > 0 ? `${displayWidth}px` : "0px"
+    pageSurface.style.width = `${baseWidth}px`
+    pageSurface.style.height = `${baseHeight}px`
+  }
+
+  setPageShellRenderScale(node, renderScale)
+  pageSurface.style.transformOrigin = renderState.fitWidthEnabled ? "top left" : "top center"
+  if (Math.abs(visualRatio - 1) > 0.0001) {
+    pageSurface.style.transform = `scale(${visualRatio})`
+    pageSurface.style.willChange = "transform"
+  } else {
+    pageSurface.style.transform = "none"
+    pageSurface.style.willChange = "auto"
+  }
 }
 
 function applyVisualScale() {
   if (!currentPdf || renderState.pageNodes.length === 0) {
-    return;
+    return
+  }
+  for (const node of renderState.pageNodes) {
+    applyVisualScaleToPageNode(node)
+  }
+}
+
+function needsZoomQualityRerender(scale = currentPdf?.scale, pageShell = getCurrentPageShell()) {
+  if (!currentPdf || !renderState.pdfDoc) {
+    return false
+  }
+  const targetScale = Number(scale)
+  if (!Number.isFinite(targetScale) || targetScale <= 0) {
+    return false
+  }
+  const pageRenderScale = getPageShellRenderScale(pageShell)
+  const ratio = targetScale / pageRenderScale
+  return ratio > ZOOM_QUALITY_UPGRADE_THRESHOLD || ratio < ZOOM_QUALITY_DOWNGRADE_THRESHOLD
+}
+
+function scheduleZoomQualityRerender(anchor = null, options = {}) {
+  if (!currentPdf || !renderState.pdfDoc) {
+    return
   }
 
-  for (const node of renderState.pageNodes) {
-    if (!(node instanceof HTMLElement)) {
-      continue;
+  const force = Boolean(options?.force)
+  const requestedScale = Number(options?.targetScale ?? currentPdf.scale)
+  const targetScale = clampScale(requestedScale)
+  const referencePage =
+    Number(anchor?.pageNumber) > 0 ? renderState.pageNodes[Math.floor(anchor.pageNumber) - 1] : getCurrentPageShell()
+
+  if (!force && !needsZoomQualityRerender(targetScale, referencePage)) {
+    clearPendingZoomQualityRerender()
+    updatePdfControls()
+    return
+  }
+
+  renderState.pendingZoomQualityScale = targetScale
+  renderState.pendingZoomQualityAnchor = anchor
+  renderState.pendingZoomQualityForce = force
+
+  if (renderState.zoomQualityTimer) {
+    clearTimeout(renderState.zoomQualityTimer)
+  }
+
+  renderState.zoomQualityTimer = setTimeout(() => {
+    renderState.zoomQualityTimer = null
+    const pendingScale = Number(renderState.pendingZoomQualityScale)
+    const pendingAnchor = renderState.pendingZoomQualityAnchor
+    const pendingForce = Boolean(renderState.pendingZoomQualityForce)
+    renderState.pendingZoomQualityScale = null
+    renderState.pendingZoomQualityAnchor = null
+    renderState.pendingZoomQualityForce = false
+    if (!Number.isFinite(pendingScale) || pendingScale <= 0) {
+      return
     }
-    const pageSurface = node.firstElementChild;
-    if (!pageSurface) {
-      continue;
+    void rerenderForZoomQuality(pendingScale, pendingAnchor, { force: pendingForce })
+  }, ZOOM_QUALITY_DEBOUNCE_MS)
+
+  updatePdfControls()
+}
+
+async function rerenderForZoomQuality(targetScale, anchor = null, options = {}) {
+  if (!currentPdf || !renderState.pdfDoc) {
+    return
+  }
+
+  const normalizedTargetScale = clampScale(targetScale)
+  const effectiveAnchor = anchor || captureViewportAnchor()
+  const referencePage =
+    Number(effectiveAnchor?.pageNumber) > 0
+      ? renderState.pageNodes[Math.floor(effectiveAnchor.pageNumber) - 1]
+      : getCurrentPageShell()
+  const force = Boolean(options?.force)
+  if (!force && !needsZoomQualityRerender(normalizedTargetScale, referencePage)) {
+    updatePdfControls()
+    return
+  }
+
+  const loadToken = renderState.loadToken
+  const pdfDoc = renderState.pdfDoc
+  const targetPageNumber = Math.min(
+    Math.max(Math.floor(Number(effectiveAnchor?.pageNumber || currentPdf.pageNumber || 1)), 1),
+    Math.max(pdfDoc.numPages, 1)
+  )
+
+  currentPdf.renderedScale = normalizedTargetScale
+  const renderToken = ++renderState.renderToken
+  resetLazyRenderState()
+  cancelActiveRenderTask()
+  renderState.lazyRenderEnabled = true
+  ensureScaleFactor()
+  updatePdfControls()
+
+  const pageRenderOrder = buildReseekRenderOrder(targetPageNumber, pdfDoc.numPages)
+  const initialOrder = pageRenderOrder.slice(0, Math.max(1, ZOOM_QUALITY_INITIAL_RENDER_COUNT))
+
+  renderState.initialRenderInProgress = true
+  try {
+    for (const pageNumber of initialOrder) {
+      if (!isRenderPassCurrent(loadToken, renderToken)) {
+        return
+      }
+      await renderPageShellContent({
+        pdfDoc,
+        pageNumber,
+        renderScale: normalizedTargetScale,
+        loadToken,
+        renderToken,
+        anchor: effectiveAnchor,
+        updateStatus: false,
+        force: true
+      })
+
+      if (!isRenderPassCurrent(loadToken, renderToken)) {
+        return
+      }
+
+      renderUserHighlightsForPage(pageNumber - 1)
     }
 
-    const baseWidth = Number(node.dataset.baseWidth || 0);
-    const baseHeight = Number(node.dataset.baseHeight || 0);
-
-    if (baseWidth > 0 && baseHeight > 0) {
-      node.style.height = `${Math.max(baseHeight, 1)}px`;
-      pageSurface.style.width = `${baseWidth}px`;
-      pageSurface.style.height = `${baseHeight}px`;
+    if (!isRenderPassCurrent(loadToken, renderToken)) {
+      return
     }
 
-    pageSurface.style.transformOrigin = "top left";
-    pageSurface.style.transform = "none";
+    if (effectiveAnchor) {
+      restoreViewportAnchor(effectiveAnchor)
+    }
+
+    connectPageObserver()
+    renderPdfIntentOverlays()
+    renderPdfWorksheetOverlays()
+    updatePdfControls()
+    if (isWorksheetMode()) {
+      void ensureWorksheetQuestionsForCurrentDocument()
+    }
+
+    const remainingOrder = pageRenderOrder.slice(initialOrder.length)
+    queueLazyPages(remainingOrder, { targetRenderScale: normalizedTargetScale })
+    requestLazyRenderAroundPage(currentPdf.pageNumber || targetPageNumber, LAZY_RENDER_PRIORITY_RADIUS, {
+      targetRenderScale: normalizedTargetScale
+    })
+    scheduleLazyRenderProcessing(loadToken, renderToken)
+  } finally {
+    renderState.initialRenderInProgress = false
   }
 }
 
 function setScalePreservingViewport(nextScale, options = {}) {
   if (!currentPdf || !renderState.pdfDoc) {
-    return;
+    return
   }
 
-  const clampedScale = clampScale(nextScale);
+  const clampedScale = clampScale(nextScale)
   if (Math.abs(clampedScale - currentPdf.scale) < 0.0001) {
-    return;
+    return
   }
 
-  const previousRenderedScale = Number(currentPdf.renderedScale || currentPdf.scale || clampedScale);
-  const anchor = options.preserveCenter === false ? null : captureViewportAnchor();
-  currentPdf.scale = clampedScale;
-  currentPdf.renderedScale = clampedScale;
-  ensureScaleFactor();
-  updatePdfControls();
-
-  const loadToken = renderState.loadToken;
-  const scaleRatio =
-    Number.isFinite(previousRenderedScale) && previousRenderedScale > 0
-      ? clampedScale / previousRenderedScale
-      : 1;
-  void scheduleRender(anchor?.pageNumber ?? currentPdf.pageNumber, loadToken, {
-    anchor,
-    scaleRatio
-  }).then(() => {
-    if (!anchor || loadToken !== renderState.loadToken) {
-      return;
-    }
-    restoreViewportAnchor(anchor);
-  });
+  const hasExplicitAnchor = Object.prototype.hasOwnProperty.call(options || {}, "anchor")
+  const anchor =
+    options.preserveCenter === false ? null : hasExplicitAnchor ? options.anchor : captureViewportAnchor()
+  currentPdf.scale = clampedScale
+  cancelActiveRenderTask()
+  if (renderState.lazyRenderTimer) {
+    clearTimeout(renderState.lazyRenderTimer)
+    renderState.lazyRenderTimer = null
+  }
+  renderState.lazyRenderQueue = []
+  renderState.lazyRenderQueueSet.clear()
+  ensureScaleFactor()
+  applyVisualScale()
+  if (anchor) {
+    restoreViewportAnchor(anchor)
+  }
+  updatePdfControls()
+  scheduleZoomQualityRerender(anchor, {
+    force: Boolean(options?.forceQualityRerender)
+  })
 }
 
 function getPdfAvailableWidth() {
@@ -10286,8 +10630,20 @@ function updatePdfControls() {
   const numPages = currentPdf?.numPages ?? 0;
   const pageNumber = currentPdf?.pageNumber ?? 0;
   const hasDocument = Boolean(renderState.pdfDoc && numPages);
+  const qualityState = hasDocument ? getCurrentPageQualityState() : null
 
   pageIndicatorEl.textContent = numPages ? `Page ${pageNumber} / ${numPages}` : "Page - / -";
+  if (zoomIndicatorEl instanceof HTMLElement) {
+    const zoomPercent = hasDocument ? `${Math.round(Math.max(Number(currentPdf?.scale || 1), 0.01) * 100)}%` : "--%";
+    const isPending = Boolean(hasDocument && (renderState.zoomQualityTimer || qualityState?.needsRerender))
+    zoomIndicatorEl.textContent = zoomPercent
+    zoomIndicatorEl.classList.toggle("isPending", isPending)
+    zoomIndicatorEl.title = hasDocument
+      ? isPending
+        ? `Zoom ${zoomPercent} (refining render quality)`
+        : `Zoom ${zoomPercent}`
+      : "Zoom"
+  }
   prevPageBtn.disabled = !hasDocument || pageNumber <= 1;
   nextPageBtn.disabled = !hasDocument || pageNumber >= numPages;
   zoomOutBtn.disabled = !hasDocument || currentPdf.scale <= MIN_SCALE + 0.001;
@@ -10322,6 +10678,8 @@ function cancelActiveRenderTask() {
 }
 
 function clearRenderedPages() {
+  clearPendingZoomQualityRerender()
+  pointerState.insidePdfRoot = false
   resetLazyRenderState()
   clearHighlights(pdfRoot)
   cancelActiveRenderTask();
@@ -10553,6 +10911,22 @@ function handleViewerKeydown(event) {
     return
   }
 
+  if (event.key === "+" || event.key === "=" || event.code === "NumpadAdd") {
+    event.preventDefault()
+    handleZoom(ZOOM_STEP)
+    return
+  }
+  if (event.key === "-" || event.key === "_" || event.code === "NumpadSubtract") {
+    event.preventDefault()
+    handleZoom(-ZOOM_STEP)
+    return
+  }
+  if (event.key === "0" || event.code === "Digit0" || event.code === "Numpad0") {
+    event.preventDefault()
+    void handleFitWidth()
+    return
+  }
+
   if (event.key === "ArrowLeft") {
     event.preventDefault()
     scrollToPage(currentPdf.pageNumber - 1, "instant", { align: "center" })
@@ -10639,12 +11013,16 @@ function waitForIdleRenderSlice() {
   })
 }
 
-function queueLazyPages(pageNumbers, { prioritize = false } = {}) {
+function queueLazyPages(pageNumbers, { prioritize = false, targetRenderScale = null } = {}) {
   if (!renderState.lazyRenderEnabled || !currentPdf) {
     return
   }
 
   const source = Array.isArray(pageNumbers) ? pageNumbers : [pageNumbers]
+  const normalizedTargetScale =
+    Number.isFinite(Number(targetRenderScale)) && Number(targetRenderScale) > 0
+      ? Number(targetRenderScale)
+      : Number(currentPdf.renderedScale || currentPdf.scale || 1)
   const prioritized = []
   const appended = []
 
@@ -10656,7 +11034,10 @@ function queueLazyPages(pageNumbers, { prioritize = false } = {}) {
     const pageNumber = Math.min(Math.max(Math.floor(numeric), 1), currentPdf.numPages || 1)
     const pageShell = renderState.pageNodes[pageNumber - 1]
     if (pageShell instanceof HTMLElement && pageShell.dataset.rendered === "true") {
-      continue
+      const pageRenderScale = getPageShellRenderScale(pageShell)
+      if (isScaleEquivalent(pageRenderScale, normalizedTargetScale)) {
+        continue
+      }
     }
 
     if (renderState.lazyRenderQueueSet.has(pageNumber)) {
@@ -10687,14 +11068,17 @@ function queueLazyPages(pageNumbers, { prioritize = false } = {}) {
   }
 }
 
-function requestLazyRenderAroundPage(pageNumber, radius = LAZY_RENDER_PRIORITY_RADIUS) {
+function requestLazyRenderAroundPage(pageNumber, radius = LAZY_RENDER_PRIORITY_RADIUS, options = {}) {
   if (!renderState.lazyRenderEnabled || !currentPdf || !renderState.pdfDoc) {
     return
   }
   const center = Math.min(Math.max(Math.floor(Number(pageNumber) || 1), 1), currentPdf.numPages || 1)
   const priorityOrder = buildReseekRenderOrder(center, currentPdf.numPages || 0)
   const maxPriorityPages = Math.max(radius * 2 + 1, 1)
-  queueLazyPages(priorityOrder.slice(0, maxPriorityPages), { prioritize: true })
+  queueLazyPages(priorityOrder.slice(0, maxPriorityPages), {
+    prioritize: true,
+    targetRenderScale: Number(options?.targetRenderScale || currentPdf.renderedScale || currentPdf.scale || 1)
+  })
 }
 
 async function getFallbackPageLayout(pdfDoc, pageNumber, renderScale, loadToken, renderToken) {
@@ -10723,6 +11107,20 @@ async function getFallbackPageLayout(pdfDoc, pageNumber, renderScale, loadToken,
   }
 }
 
+function computeCanvasOutputScale(pageWidth, pageHeight) {
+  const baseScale = Number(window.devicePixelRatio || 1)
+  const safeBaseScale = Number.isFinite(baseScale) && baseScale > 0 ? Math.min(baseScale, MAX_CANVAS_OUTPUT_SCALE) : 1
+  const safeWidth = Math.max(Number(pageWidth) || 1, 1)
+  const safeHeight = Math.max(Number(pageHeight) || 1, 1)
+  const maxScaleByPixels = Math.sqrt(MAX_CANVAS_PIXELS / (safeWidth * safeHeight))
+  const boundedScale = Math.min(safeBaseScale, maxScaleByPixels)
+  if (!Number.isFinite(boundedScale) || boundedScale <= 0) {
+    return 1
+  }
+  const lowerBound = Math.min(MIN_CANVAS_OUTPUT_SCALE, maxScaleByPixels)
+  return Math.max(Math.min(boundedScale, safeBaseScale), lowerBound)
+}
+
 async function renderPageShellContent({
   pdfDoc,
   pageNumber,
@@ -10730,7 +11128,8 @@ async function renderPageShellContent({
   loadToken,
   renderToken,
   anchor = null,
-  updateStatus = false
+  updateStatus = false,
+  force = false
 }) {
   if (!isRenderPassCurrent(loadToken, renderToken)) {
     return false
@@ -10738,10 +11137,17 @@ async function renderPageShellContent({
   if (!pdfDoc || !Number.isFinite(Number(pageNumber)) || pageNumber < 1) {
     return false
   }
+  const normalizedRenderScale = Number(renderScale)
+  if (!Number.isFinite(normalizedRenderScale) || normalizedRenderScale <= 0) {
+    return false
+  }
 
   const existingPageShell = renderState.pageNodes[pageNumber - 1]
-  if (existingPageShell instanceof HTMLElement && existingPageShell.dataset.rendered === "true") {
-    return false
+  if (existingPageShell instanceof HTMLElement && existingPageShell.dataset.rendered === "true" && !force) {
+    const existingScale = getPageShellRenderScale(existingPageShell)
+    if (isScaleEquivalent(existingScale, normalizedRenderScale)) {
+      return false
+    }
   }
 
   if (updateStatus) {
@@ -10756,7 +11162,7 @@ async function renderPageShellContent({
       return false
     }
 
-    const viewport = page.getViewport({ scale: renderScale })
+    const viewport = page.getViewport({ scale: normalizedRenderScale })
     if (!renderState.baseViewportWidth) {
       renderState.baseViewportWidth = page.getViewport({ scale: 1 }).width
     }
@@ -10769,7 +11175,12 @@ async function renderPageShellContent({
 
     let pageShell = renderState.pageNodes[pageNumber - 1]
     if (!(pageShell instanceof HTMLElement)) {
-      pageShell = createPageShell(pageNumber, { width: pageWidth, height: pageHeight, rendered: false })
+      pageShell = createPageShell(pageNumber, {
+        width: pageWidth,
+        height: pageHeight,
+        renderScale: normalizedRenderScale,
+        rendered: false
+      })
       insertPageShellByPageNumber(pageShell, pageNumber)
       renderState.pageNodes[pageNumber - 1] = pageShell
     }
@@ -10783,25 +11194,29 @@ async function renderPageShellContent({
 
     pageShell.dataset.baseWidth = String(pageWidth)
     pageShell.dataset.baseHeight = String(pageHeight)
+    setPageShellRenderScale(pageShell, normalizedRenderScale)
     pageShell.dataset.rendered = "false"
     pageShell.dataset.renderState = "rendering"
     pageSurface.style.width = `${pageWidth}px`
     pageSurface.style.height = `${pageHeight}px`
     pageSurface.style.setProperty("--user-unit", String(viewport.userUnit || 1))
+    pageSurface.style.setProperty("--scale-factor", String(normalizedRenderScale))
     pageSurface.dataset.mainRotation = String(viewport.rotation)
     textLayerDiv.innerHTML = ""
     textLayerDiv.dataset.mainRotation = String(viewport.rotation)
 
-    const outputScale = window.devicePixelRatio || 1
+    const outputScale = computeCanvasOutputScale(pageWidth, pageHeight)
     canvas.width = Math.max(Math.floor(pageWidth * outputScale), 1)
     canvas.height = Math.max(Math.floor(pageHeight * outputScale), 1)
     canvas.style.width = `${pageWidth}px`
     canvas.style.height = `${pageHeight}px`
 
-    const canvasContext = canvas.getContext("2d", { alpha: false })
+    const canvasContext =
+      canvas.getContext("2d", { alpha: false, desynchronized: true }) || canvas.getContext("2d", { alpha: false })
     if (!canvasContext) {
       throw new Error("Unable to get 2D rendering context.")
     }
+    canvasContext.imageSmoothingEnabled = true
 
     const transform = outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null
     const renderTask = page.render({
@@ -10846,6 +11261,7 @@ async function renderPageShellContent({
     textLayerDiv.append(endOfContent)
     pageShell.dataset.rendered = "true"
     pageShell.dataset.renderState = "ready"
+    applyVisualScaleToPageNode(pageShell)
     if (currentPdf && typeof currentPdf === "object") {
       currentPdf.retrievalBlockCache = null
     }
@@ -10957,11 +11373,13 @@ async function renderAllPages(targetPageNumber, loadToken, options = {}) {
     Math.max(pdfDoc.numPages, 1)
   )
   const pageRenderOrder = buildReseekRenderOrder(clampedTargetPageNumber, pdfDoc.numPages)
-  const renderScale = currentPdf.renderedScale || currentPdf.scale
+  const renderScale = currentPdf.scale
+  currentPdf.renderedScale = renderScale
   const renderToken = ++renderState.renderToken
+  clearPendingZoomQualityRerender()
   resetLazyRenderState()
 
-  const layoutSnapshot = capturePageLayoutSnapshot(options?.scaleRatio)
+  const layoutSnapshot = capturePageLayoutSnapshot()
   const fallbackLayout =
     layoutSnapshot.size < pdfDoc.numPages
       ? await getFallbackPageLayout(pdfDoc, clampedTargetPageNumber, renderScale, loadToken, renderToken)
@@ -11014,7 +11432,10 @@ async function renderAllPages(targetPageNumber, loadToken, options = {}) {
     if (renderState.fitWidthEnabled) {
       const correctedFitScale = await computeFitWidthScale(loadToken)
       if (correctedFitScale && Math.abs(correctedFitScale - currentPdf.scale) > 0.005) {
-        setScalePreservingViewport(correctedFitScale, { preserveCenter: false })
+        setScalePreservingViewport(correctedFitScale, {
+          preserveCenter: false,
+          forceQualityRerender: true
+        })
         pdfRoot.scrollLeft = 0
         return
       }
@@ -11393,7 +11814,38 @@ function handleZoom(delta) {
   }
 
   setFitWidthEnabled(false);
-  setScalePreservingViewport(currentPdf.scale + delta);
+  const pointerAnchor =
+    pointerState.insidePdfRoot && Number.isFinite(pointerState.clientX) && Number.isFinite(pointerState.clientY)
+      ? captureViewportAnchorAtClientPoint(pointerState.clientX, pointerState.clientY)
+      : null
+  setScalePreservingViewport(currentPdf.scale + delta, {
+    anchor: pointerAnchor || captureViewportAnchor()
+  });
+}
+
+function handlePdfWheel(event) {
+  if (!currentPdf || !renderState.pdfDoc) {
+    return
+  }
+  if (!(event.ctrlKey || event.metaKey)) {
+    return
+  }
+
+  const deltaY = Number(event.deltaY || 0)
+  if (!Number.isFinite(deltaY) || Math.abs(deltaY) < 0.01) {
+    return
+  }
+
+  event.preventDefault()
+  pointerState.insidePdfRoot = true
+  pointerState.clientX = Number(event.clientX) || 0
+  pointerState.clientY = Number(event.clientY) || 0
+  const pointerAnchor = captureViewportAnchorAtClientPoint(event.clientX, event.clientY)
+  setFitWidthEnabled(false)
+  const zoomFactor = Math.exp(-deltaY * 0.0018)
+  setScalePreservingViewport(currentPdf.scale * zoomFactor, {
+    anchor: pointerAnchor || captureViewportAnchor()
+  })
 }
 
 async function handleFitWidth() {
@@ -11416,7 +11868,10 @@ async function handleFitWidth() {
     return;
   }
 
-  setScalePreservingViewport(fitScale, { preserveCenter: false });
+  setScalePreservingViewport(fitScale, {
+    preserveCenter: false,
+    forceQualityRerender: true
+  });
   pdfRoot.scrollLeft = 0;
   updatePdfControls();
 }
@@ -11443,7 +11898,10 @@ function handleWindowResize() {
     if (!fitScale || loadToken !== renderState.loadToken) {
       return;
     }
-    setScalePreservingViewport(fitScale, { preserveCenter: false });
+    setScalePreservingViewport(fitScale, {
+      preserveCenter: false,
+      forceQualityRerender: true
+    });
     pdfRoot.scrollLeft = 0;
   });
 }
@@ -11818,6 +12276,31 @@ themeToggleBtn?.addEventListener("click", () => {
 });
 
 pdfRoot.addEventListener("scroll", handlePdfScroll, { passive: true });
+pdfRoot.addEventListener("wheel", handlePdfWheel, { passive: false });
+pdfRoot.addEventListener(
+  "pointermove",
+  (event) => {
+    pointerState.insidePdfRoot = true
+    pointerState.clientX = Number(event.clientX) || 0
+    pointerState.clientY = Number(event.clientY) || 0
+  },
+  { passive: true }
+);
+pdfRoot.addEventListener(
+  "pointerdown",
+  (event) => {
+    pointerState.insidePdfRoot = true
+    pointerState.clientX = Number(event.clientX) || 0
+    pointerState.clientY = Number(event.clientY) || 0
+  },
+  { passive: true }
+);
+pdfRoot.addEventListener("pointerleave", () => {
+  pointerState.insidePdfRoot = false
+});
+pdfRoot.addEventListener("pointercancel", () => {
+  pointerState.insidePdfRoot = false
+});
 window.addEventListener("resize", handleWindowResize);
 document.addEventListener("keydown", handleViewerKeydown);
 
