@@ -185,6 +185,7 @@ const renderState = {
   pdfDoc: null,
   loadingTask: null,
   activeRenderTask: null,
+  activeTextLayer: null,
   visibilityObserver: null,
   pageNodes: [],
   pageVisibility: new Map(),
@@ -10666,6 +10667,15 @@ function disconnectPageObserver() {
 }
 
 function cancelActiveRenderTask() {
+  if (renderState.activeTextLayer && typeof renderState.activeTextLayer.cancel === "function") {
+    try {
+      renderState.activeTextLayer.cancel();
+    } catch (_error) {
+      // Best effort.
+    }
+  }
+  renderState.activeTextLayer = null;
+
   if (!renderState.activeRenderTask) {
     return;
   }
@@ -11251,7 +11261,19 @@ async function renderPageShellContent({
       container: textLayerDiv,
       viewport
     })
-    await textLayer.render()
+    renderState.activeTextLayer = textLayer
+    try {
+      await textLayer.render()
+    } catch (error) {
+      if (error?.name !== "AbortException" && error?.name !== "RenderingCancelledException") {
+        throw error
+      }
+      return false
+    } finally {
+      if (renderState.activeTextLayer === textLayer) {
+        renderState.activeTextLayer = null
+      }
+    }
     if (!isRenderPassCurrent(loadToken, renderToken)) {
       return false
     }
@@ -11607,7 +11629,8 @@ async function loadPdfSource(source, documentParams) {
 
   const loadingTask = pdfjsLib.getDocument({
     ...documentParams,
-    wasmUrl: PDFJS_WASM_BASE_URL
+    wasmUrl: PDFJS_WASM_BASE_URL,
+    verbosity: pdfjsLib.VerbosityLevel.ERRORS
   });
   renderState.loadingTask = loadingTask;
 

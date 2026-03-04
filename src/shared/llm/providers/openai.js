@@ -713,7 +713,7 @@ export async function generate(task, input, config = {}) {
         parsedEnvelope = extractJsonObject(rawText)
       } catch (parseError) {
         const parseMessage = sanitizeLogString(parseError?.message || "Unknown parse error")
-        logger.warn("OpenAI JSON parse failed; attempting repair", {
+        logger.info("OpenAI JSON parse failed; attempting repair", {
           task: normalizedTask,
           message: parseMessage,
           rawTextLength: rawText.length
