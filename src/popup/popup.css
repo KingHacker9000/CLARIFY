@@ -35,6 +35,18 @@ body {
   background: var(--panel);
 }
 
+.toggleRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.toggleRow input {
+  margin-top: 2px;
+}
+
 button {
   padding: 10px 12px;
   border-radius: 10px;

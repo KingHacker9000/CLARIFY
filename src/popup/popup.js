@@ -4,6 +4,7 @@ import { getSettings, setSettings } from "../shared/storage.js";
 const openViewerBtn = document.getElementById("openViewer");
 const openFromTabBtn = document.getElementById("openFromTab");
 const themeToggleBtn = document.getElementById("themeToggle");
+const capturePdfsToggle = document.getElementById("capturePdfsToggle");
 const logger = createLogger("POPUP");
 
 function normalizeTheme(theme) {
@@ -23,9 +24,12 @@ function applyTheme(theme) {
   }
 }
 
-async function loadThemeState() {
+async function loadPopupState() {
   const settings = await getSettings();
   applyTheme(settings.theme);
+  if (capturePdfsToggle instanceof HTMLInputElement) {
+    capturePdfsToggle.checked = Boolean(settings.autoOpenPdf);
+  }
   logger.debug("Popup theme loaded", { theme: settings.theme });
 }
 
@@ -39,7 +43,7 @@ async function handleThemeToggle() {
 
 logger.info("Popup loaded");
 logger.debug("Popup actions ready");
-void loadThemeState();
+void loadPopupState();
 
 openViewerBtn.addEventListener("click", async () => {
   logger.info("Open viewer button clicked");
@@ -56,4 +60,13 @@ openFromTabBtn.addEventListener("click", async () => {
 
 themeToggleBtn?.addEventListener("click", () => {
   void handleThemeToggle();
+});
+
+capturePdfsToggle?.addEventListener("change", async () => {
+  if (!(capturePdfsToggle instanceof HTMLInputElement)) {
+    return;
+  }
+  const settings = await setSettings({ autoOpenPdf: capturePdfsToggle.checked });
+  capturePdfsToggle.checked = Boolean(settings.autoOpenPdf);
+  logger.info("PDF capture setting changed", { autoOpenPdf: settings.autoOpenPdf });
 });

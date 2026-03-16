@@ -15,6 +15,17 @@ function normalizeText(value) {
   return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : ""
 }
 
+function normalizeWorksheetText(value) {
+  if (typeof value !== "string") {
+    return ""
+  }
+  return value
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t\f\v]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+}
+
 function clampText(value, maxLength) {
   const text = normalizeText(value)
   if (!text) {
@@ -24,6 +35,17 @@ function clampText(value, maxLength) {
     return text
   }
   return `${text.slice(0, Math.max(maxLength - 3, 1)).trim()}...`
+}
+
+function clampWorksheetText(value, maxLength) {
+  const text = normalizeWorksheetText(value)
+  if (!text) {
+    return ""
+  }
+  if (!Number.isFinite(maxLength) || maxLength < 1 || text.length <= maxLength) {
+    return text
+  }
+  return text.slice(0, maxLength).trim()
 }
 
 function shortErrorReason(error) {
@@ -57,7 +79,19 @@ function normalizeInput(input) {
         .filter((section) => section.sectionKey && section.title)
         .slice(0, 24)
     : []
-  const readingMode = source.readingMode === "structure" ? "structure" : "flow"
+  const worksheetPages = Array.isArray(source.worksheetPages)
+    ? source.worksheetPages
+        .map((entry) => ({
+          pageIndex: Number.isFinite(Number(entry?.pageIndex))
+            ? Math.max(0, Math.floor(Number(entry.pageIndex)))
+            : 0,
+          text: clampWorksheetText(entry?.text, 1800)
+        }))
+        .filter((entry) => entry.text)
+        .slice(0, 48)
+    : []
+  const readingMode =
+    source.readingMode === "structure" || source.readingMode === "worksheet" ? source.readingMode : "flow"
   const pageIndex = Number.isFinite(Number(source.pageIndex))
     ? Math.max(0, Math.floor(Number(source.pageIndex)))
     : 0
@@ -69,6 +103,9 @@ function normalizeInput(input) {
     pageIndex,
     headings,
     sections,
+    worksheetPages,
+    questionText: clampText(source.questionText, 360),
+    gradeLevel: clampText(source.gradeLevel, 80),
     readingMode,
     openaiFileId,
     grounding: {
@@ -129,6 +166,8 @@ export async function generateLLM(task, input, options = {}) {
     contextWindowLength: normalizedInput.contextWindow.length,
     headingCount: normalizedInput.headings.length,
     sectionCount: normalizedInput.sections.length,
+    worksheetPageCount: normalizedInput.worksheetPages.length,
+    questionTextLength: normalizedInput.questionText.length,
     snippetLength: normalizedInput.snippet.length,
     hasOpenAIFile: Boolean(normalizedInput.openaiFileId)
   })

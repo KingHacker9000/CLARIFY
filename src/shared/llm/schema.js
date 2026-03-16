@@ -4,13 +4,16 @@ export const TASKS = Object.freeze([
   "quant",
   "orientation",
   "section_intents",
-  "section_intent"
+  "section_intent",
+  "worksheet_questions",
+  "worksheet_answer"
 ])
 
 const TASK_SET = new Set(TASKS)
 const MAX_SHORT_ANSWER_WORDS = 35
 const DEFAULT_MAX_QUOTE_CHARS = 240
 const DEFAULT_MAX_CITATIONS = 3
+const WORKSHEET_QUESTION_MAX_ITEMS = 180
 
 function normalizeText(value) {
   if (typeof value !== "string") {
@@ -28,6 +31,26 @@ function truncateText(value, maxLength) {
     return text
   }
   return `${text.slice(0, Math.max(maxLength - 3, 1)).trim()}...`
+}
+
+function normalizeWorksheetAnswerText(value, maxLength = 1200) {
+  if (typeof value !== "string") {
+    return ""
+  }
+  const normalized = value
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t\f\v]+/g, " ").trim())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+  if (!normalized) {
+    return ""
+  }
+  if (!Number.isFinite(maxLength) || maxLength < 1 || normalized.length <= maxLength) {
+    return normalized
+  }
+  return `${normalized.slice(0, Math.max(maxLength - 3, 1)).trim()}...`
 }
 
 function normalizeStringList(value, { maxItems = 8, maxLength = 180 } = {}) {
@@ -160,6 +183,84 @@ function normalizeOrientation(resp) {
   }
 }
 
+function normalizeWorksheetQuestions(resp) {
+  const source = resp && typeof resp === "object" ? resp : {}
+  const validKinds = new Set(["question", "part", "item", "term", "prompt"])
+  const validQuestionTypes = new Set([
+    "mcq",
+    "short_answer",
+    "long_answer",
+    "multi_select",
+    "fill_blank",
+    "true_false",
+    "table_definition",
+    "unknown"
+  ])
+  const questions = Array.isArray(source.questions)
+    ? source.questions
+        .map((item) => {
+          const questionText = truncateText(
+            item?.questionText || item?.question || item?.text || item?.prompt,
+            360
+          )
+          const gradeLevel = truncateText(item?.gradeLevel || item?.grade || item?.points || "", 80)
+          const numericPage = Number(item?.pageIndex)
+          const pageIndex = Number.isFinite(numericPage) && numericPage >= 0 ? Math.floor(numericPage) : 0
+          const kindRaw = normalizeText(item?.kind).toLowerCase()
+          const kind = validKinds.has(kindRaw) ? kindRaw : ""
+          const sourceKey = truncateText(item?.sourceKey || item?.id || "", 220)
+          const parentSourceKey = truncateText(item?.parentSourceKey || item?.parentKey || item?.parentId || "", 220)
+          const label = truncateText(item?.label || item?.title || "", 120)
+          const anchorText = truncateText(item?.anchorText || item?.anchor || "", 240)
+          const questionTypeRaw = normalizeText(item?.questionType || item?.responseType || item?.primaryResponseType).toLowerCase()
+          const questionType = validQuestionTypes.has(questionTypeRaw) ? questionTypeRaw : "unknown"
+          const responseTypes = Array.isArray(item?.responseTypes)
+            ? item.responseTypes
+                .map((entry) => normalizeText(entry).toLowerCase())
+                .filter((entry) => validQuestionTypes.has(entry))
+                .slice(0, 6)
+            : []
+          const marksRaw = truncateText(item?.marksRaw || item?.marks || item?.pointsLabel || "", 80)
+          const marksValueRaw = Number(item?.marksValue ?? item?.marks?.value)
+          const marksValue = Number.isFinite(marksValueRaw) && marksValueRaw > 0 ? marksValueRaw : null
+          const marksEach = Boolean(item?.marksEach || item?.marks?.each)
+          const options = Array.isArray(item?.options)
+            ? item.options.map((entry) => truncateText(entry, 120)).filter(Boolean).slice(0, 12)
+            : []
+          const contextWindow = truncateText(item?.contextWindow || item?.context || "", 900)
+          return {
+            questionText,
+            gradeLevel,
+            pageIndex,
+            kind,
+            sourceKey,
+            parentSourceKey,
+            label,
+            anchorText,
+            questionType,
+            responseTypes,
+            marksRaw,
+            marksValue,
+            marksEach,
+            options,
+            contextWindow
+          }
+        })
+        .filter((item) => item.questionText)
+        .slice(0, WORKSHEET_QUESTION_MAX_ITEMS)
+    : []
+  return { questions }
+}
+
+function normalizeWorksheetAnswer(resp) {
+  const source = resp && typeof resp === "object" ? resp : {}
+  const answerLengthRaw = normalizeText(source.answerLength).toLowerCase()
+  return {
+    answer: normalizeWorksheetAnswerText(source.answer || source.shortAnswer || source.response || "", 1200),
+    answerLength: answerLengthRaw === "long" || answerLengthRaw === "short" ? answerLengthRaw : ""
+  }
+}
+
 function enforceGroundingLimits(response, limits) {
   const source = response && typeof response === "object" ? response : {}
   const groundingPages = normalizeGroundingPages(source.groundingPages, limits.maxCitations)
@@ -178,6 +279,12 @@ function enforceGroundingLimits(response, limits) {
 export function normalizeLLMResponse(task, resp, options = {}) {
   const normalizedTask = normalizeTask(task)
   const limits = normalizeLimits(options)
+  if (normalizedTask === "worksheet_questions") {
+    return normalizeWorksheetQuestions(resp)
+  }
+  if (normalizedTask === "worksheet_answer") {
+    return normalizeWorksheetAnswer(resp)
+  }
   if (normalizedTask === "section_intents") {
     return normalizeSectionIntents(resp)
   }

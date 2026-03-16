@@ -20,6 +20,15 @@
           >
             <img class="toolbarIconImage" src="../../assets/icons/open.png" alt="" />
           </button>
+          <button
+            id="downloadPdf"
+            class="toolbarIconButton"
+            type="button"
+            aria-label="Download PDF"
+            title="Download PDF"
+          >
+            &#11123;
+          </button>
           <div class="toolbarGroup navGroup" aria-label="Page navigation">
             <button id="prevPage" class="toolbarIconButton" type="button" aria-label="Previous page">&larr;</button>
             <span id="pageIndicator" class="pageIndicator">Page - / -</span>
@@ -28,6 +37,7 @@
           <div class="toolbarGroup zoomGroup" aria-label="Zoom controls">
             <button id="zoomOut" class="toolbarIconButton" type="button" aria-label="Zoom out">-</button>
             <button id="zoomIn" class="toolbarIconButton" type="button" aria-label="Zoom in">+</button>
+            <span id="zoomIndicator" class="zoomIndicator" aria-live="polite">100%</span>
             <button
               id="fitWidth"
               class="toolbarIconButton toolbarImageButton"
@@ -52,11 +62,20 @@
           <div class="toolbarGroup modeGroup" aria-label="Reading mode">
             <div class="modeToggle" role="group" aria-label="Toggle reading mode">
               <button
+                id="toolbarModeViewer"
+                class="modeToggleButton"
+                type="button"
+                data-mode="viewer"
+                aria-pressed="true"
+              >
+                Viewer
+              </button>
+              <button
                 id="toolbarModeFlow"
                 class="modeToggleButton"
                 type="button"
                 data-mode="flow"
-                aria-pressed="true"
+                aria-pressed="false"
               >
                 Flow
               </button>
@@ -68,6 +87,15 @@
                 aria-pressed="false"
               >
                 Structure
+              </button>
+              <button
+                id="toolbarModeWorksheet"
+                class="modeToggleButton"
+                type="button"
+                data-mode="worksheet"
+                aria-pressed="false"
+              >
+                Worksheet
               </button>
             </div>
           </div>
@@ -99,6 +127,10 @@
                   <input id="verboseToggle" type="checkbox" />
                   Verbose logging
                 </label>
+                <label class="diagRow">
+                  <input id="debugModeToggle" type="checkbox" />
+                  Debug mode
+                </label>
                 <button id="copyDebugInfo" type="button">Copy debug info</button>
                 <span id="copyStatus" class="copyStatus" aria-live="polite"></span>
               </section>
@@ -109,12 +141,20 @@
                 <div class="settingGroup">
                   <span class="settingLabel">Reading mode</span>
                   <label class="diagRow">
+                    <input id="readingModeViewer" name="readingMode" type="radio" value="viewer" />
+                    Viewer
+                  </label>
+                  <label class="diagRow">
                     <input id="readingModeFlow" name="readingMode" type="radio" value="flow" />
                     Flow
                   </label>
                   <label class="diagRow">
                     <input id="readingModeStructure" name="readingMode" type="radio" value="structure" />
                     Structure
+                  </label>
+                  <label class="diagRow">
+                    <input id="readingModeWorksheet" name="readingMode" type="radio" value="worksheet" />
+                    Worksheet
                   </label>
                 </div>
 
@@ -182,7 +222,7 @@
 
                 <label class="diagRow">
                   <input id="autoOpenPdfToggle" type="checkbox" />
-                  Auto-open PDF links in CLARIFY
+                  Capture PDF links automatically in CLARIFY
                 </label>
               </section>
             </div>
