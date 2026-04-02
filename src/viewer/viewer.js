@@ -90,6 +90,12 @@ const WORKSHEET_PAGE_SNIPPET_MAX_CHARS = 1400;
 const WORKSHEET_DETECTION_MAX_TOTAL_CHARS = 22000;
 const WORKSHEET_QUESTION_MAX_ITEMS = 180;
 const WORKSHEET_OVERLAY_MAX_CHARS = 180;
+const FIGURE_HINT_MAX_PER_PAGE = 6;
+const FIGURE_HINT_CONTEXT_LINE_RADIUS = 2;
+const FIGURE_HINT_MAX_SELECTED_TEXT = 260;
+const FIGURE_HINT_MAX_CONTEXT_TEXT = 780;
+const ASSIST_CHAT_MAX_MESSAGES = 32;
+const ASSIST_CHAT_CONTEXT_MAX_CHARS = 1800;
 const REMOTE_LOAD_ERROR_MESSAGE =
   "This PDF could not be loaded due to site restrictions (CORS/login). Try downloading and opening it locally.";
 const FILE_URL_LOAD_HINT_MESSAGE =
@@ -263,6 +269,7 @@ function createOrientationUiState(readingMode = "flow") {
     status: "idle",
     loadingMessage: "",
     errorMessage: "",
+    showOverviewPrompt: true,
     collapsed: false,
     mapExpanded: readingMode === "structure",
     userCollapsed: false,
@@ -295,6 +302,15 @@ function createWorksheetUiState() {
   }
 }
 
+function createAssistUiState() {
+  return {
+    notesText: "",
+    chatDraft: "",
+    chatMessages: [],
+    chatPending: false
+  }
+}
+
 const sidebarUiState = {
   docId: "unknown",
   cards: [],
@@ -302,6 +318,7 @@ const sidebarUiState = {
   glossarySuggestions: [],
   walkthrough: createWalkthroughUiState(),
   worksheet: createWorksheetUiState(),
+  assist: createAssistUiState(),
   toastMessage: "",
   activeTab: "orientation",
   lastTabByMode: {
@@ -546,7 +563,7 @@ function createGroundingSourceTrigger({ cardId, sourceText, pageIndex, label, co
 
 function normalizeTabName(tab) {
   const candidate = typeof tab === "string" ? tab : ""
-  const validTabs = new Set(["orientation", "explain", "glossary", "figures", "walkthrough"])
+  const validTabs = new Set(["orientation", "explain", "glossary", "figures", "assist", "walkthrough"])
   if (!validTabs.has(candidate)) {
     return "orientation"
   }
@@ -598,6 +615,9 @@ function getEmptyMessage(tab) {
   }
   if (tab === "figures") {
     return "No figure translations yet. Select a caption and use Translate."
+  }
+  if (tab === "assist") {
+    return "Use notes for quick thoughts and chat for complex questions."
   }
   return "No walkthrough notes yet. Generate section one-liners."
 }
@@ -712,6 +732,16 @@ function createCardNode(card) {
   shortAnswer.textContent = clampText(card.shortAnswer, 280)
   article.append(shortAnswer)
 
+  const primaryQuotePreview = createGroundingSourceTrigger({
+    cardId: card.id,
+    sourceText: card.grounding?.quote,
+    pageIndex: Number.isFinite(card.grounding?.pageIndex) ? Number(card.grounding.pageIndex) : null,
+    label: "Primary quote",
+    compact: true
+  })
+  primaryQuotePreview.classList.add("cardPrimaryQuote")
+  article.append(primaryQuotePreview)
+
   if (card.type === "quant") {
     const figureIntentKey = getFigureIntentKey(card)
     if (isIntentVisible(figureIntentKey)) {
@@ -758,12 +788,9 @@ function createCardNode(card) {
     })
     sourceNodes.push(citation)
   })
-  const jumpButton = document.createElement("button")
-  jumpButton.type = "button"
-  jumpButton.className = "cardActionButton"
-  jumpButton.dataset.cardAction = "jump"
-  jumpButton.dataset.cardId = card.id
-  jumpButton.textContent = "Jump to source"
+  const trustHint = document.createElement("p")
+  trustHint.className = "cardGroundingLabel cardGroundingHint"
+  trustHint.textContent = "Click a quote to jump to source."
 
   if (sourceNodes.length > 2) {
     const alwaysVisibleSources = sourceNodes.slice(0, 2)
@@ -778,18 +805,20 @@ function createCardNode(card) {
     for (const sourceNode of hiddenSources) {
       moreDetails.append(sourceNode)
     }
-    grounding.append(groundingLabel, ...alwaysVisibleSources, moreDetails, jumpButton)
+    grounding.append(groundingLabel, ...alwaysVisibleSources, moreDetails, trustHint)
   } else {
-    grounding.append(groundingLabel, ...sourceNodes, jumpButton)
+    grounding.append(groundingLabel, ...sourceNodes, trustHint)
   }
-  article.append(grounding)
-
   const details = document.createElement("details")
   details.className = "cardDetails"
   details.open = Boolean(modeUiState.cardDetailsOpenByDefault)
+  details.classList.toggle("isOpen", details.open)
   const summary = document.createElement("summary")
-  summary.textContent = "Details"
+  summary.textContent = card.type === "quant" ? "Show deeper translation" : "Show deeper explanation"
   details.append(summary)
+  details.addEventListener("toggle", () => {
+    details.classList.toggle("isOpen", details.open)
+  })
 
   if (card.type === "quant") {
     details.append(
@@ -826,8 +855,6 @@ function createCardNode(card) {
       })()
     )
   }
-
-  article.append(details)
 
   const footer = document.createElement("footer")
   footer.className = "cardFooter"
@@ -872,7 +899,15 @@ function createCardNode(card) {
   deleteButton.textContent = ICON_DELETE
   footer.append(deleteButton)
 
-  article.append(footer)
+  const expandShell = document.createElement("details")
+  expandShell.className = "cardExpandShell"
+  expandShell.open = Boolean(card.pinned)
+  const expandSummary = document.createElement("summary")
+  expandSummary.className = "cardExpandSummary"
+  expandSummary.textContent = "Expand source and actions"
+  expandShell.append(expandSummary, grounding, details, footer)
+
+  article.append(expandShell)
   return article
 }
 
@@ -884,12 +919,15 @@ function renderCardsTab(tab) {
   }
 
   panel.innerHTML = ""
+  const hint = document.createElement("p")
+  hint.className = "cardListHint"
+  hint.textContent = "Simplified sidebar view: expand a card for full sources, details, and actions."
   const list = document.createElement("div")
   list.className = "cardList"
   for (const card of cards) {
     list.append(createCardNode(card))
   }
-  panel.append(list)
+  panel.append(hint, list)
   if (pendingCardAutoScrollId) {
     const targetCardId = pendingCardAutoScrollId
     pendingCardAutoScrollId = ""
@@ -1471,6 +1509,15 @@ function resetOrientationStateForDocument() {
   sectionIntentManagerDocId = ""
 }
 
+function isOrientationOverviewPromptVisible() {
+  return Boolean(getOrientationState().showOverviewPrompt)
+}
+
+function setOrientationOverviewPromptVisible(visible) {
+  const orientationState = getOrientationState()
+  orientationState.showOverviewPrompt = Boolean(visible)
+}
+
 function updateOrientationSections(sections) {
   const orientationState = getOrientationState()
   const safeSections = Array.isArray(sections) ? sections : []
@@ -1483,6 +1530,7 @@ function setOrientationLoading(message = "Generating orientation...") {
   orientationState.loadingMessage = sanitizeText(message) || "Generating orientation..."
   orientationState.errorMessage = ""
   orientationState.intentsStatus = "idle"
+  orientationState.showOverviewPrompt = false
 }
 
 function setOrientationError(message) {
@@ -1500,6 +1548,9 @@ function setOrientationReady(data) {
   orientationState.data = {
     ...createEmptyOrientationData(),
     ...(data && typeof data === "object" ? data : {})
+  }
+  if (hasOrientationSummary(orientationState.data)) {
+    orientationState.showOverviewPrompt = false
   }
 }
 
@@ -2193,29 +2244,163 @@ function renderWalkthroughTab() {
   panel.append(container)
 }
 
+function getAssistState() {
+  if (!sidebarUiState.assist || typeof sidebarUiState.assist !== "object") {
+    sidebarUiState.assist = createAssistUiState()
+  }
+  return sidebarUiState.assist
+}
+
+function createAssistMessageNode(message) {
+  const item = document.createElement("article")
+  item.className = `assistChatMessage ${message.role === "assistant" ? "isAssistant" : "isUser"}`
+  const role = document.createElement("p")
+  role.className = "assistChatRole"
+  role.textContent = message.role === "assistant" ? "CLARIFY" : "You"
+  const text = document.createElement("p")
+  text.className = "assistChatText"
+  text.textContent = clampText(message.text, 900)
+  item.append(role, text)
+  return item
+}
+
+function renderAssistTab() {
+  panel.innerHTML = ""
+  const assistState = getAssistState()
+  const container = document.createElement("div")
+  container.className = "assistPanel"
+
+  const notesSection = document.createElement("section")
+  notesSection.className = "assistSection"
+  const notesTitle = document.createElement("h3")
+  notesTitle.className = "panelTitle"
+  notesTitle.textContent = "Quick notes"
+  const notesInput = document.createElement("textarea")
+  notesInput.className = "assistNotesInput"
+  notesInput.dataset.assistInput = "notes"
+  notesInput.placeholder = "Capture ideas, open questions, or things to revisit."
+  notesInput.value = assistState.notesText || ""
+  const notesHint = document.createElement("p")
+  notesHint.className = "assistHint"
+  notesHint.textContent = "Notes stay local to this session."
+  notesSection.append(notesTitle, notesInput, notesHint)
+
+  const chatSection = document.createElement("section")
+  chatSection.className = "assistSection"
+  const chatTitle = document.createElement("h3")
+  chatTitle.className = "panelTitle"
+  chatTitle.textContent = "Open chat fallback"
+  const chatHint = document.createElement("p")
+  chatHint.className = "assistHint"
+  chatHint.textContent = "Ask broader or complex questions when Define, Explain, or Translate is not enough."
+
+  const chatList = document.createElement("div")
+  chatList.className = "assistChatList"
+  const messages = Array.isArray(assistState.chatMessages) ? assistState.chatMessages : []
+  if (messages.length === 0) {
+    const empty = document.createElement("p")
+    empty.className = "assistChatEmpty"
+    empty.textContent = "No chat yet. Ask your first question about the paper."
+    chatList.append(empty)
+  } else {
+    for (const message of messages) {
+      chatList.append(createAssistMessageNode(message))
+    }
+  }
+
+  const chatInput = document.createElement("textarea")
+  chatInput.className = "assistChatInput"
+  chatInput.dataset.assistInput = "chat"
+  chatInput.placeholder = "Ask a complex question... (Ctrl/Cmd+Enter to send)"
+  chatInput.value = assistState.chatDraft || ""
+
+  const actions = document.createElement("div")
+  actions.className = "assistActions"
+  const sendButton = document.createElement("button")
+  sendButton.type = "button"
+  sendButton.className = "cardActionButton"
+  sendButton.dataset.assistAction = "send-chat"
+  sendButton.disabled = assistState.chatPending
+  sendButton.textContent = assistState.chatPending ? "Thinking..." : "Ask question"
+  const clearButton = document.createElement("button")
+  clearButton.type = "button"
+  clearButton.className = "cardActionButton"
+  clearButton.dataset.assistAction = "clear-chat"
+  clearButton.disabled = assistState.chatPending || messages.length === 0
+  clearButton.textContent = "Clear chat"
+  actions.append(sendButton, clearButton)
+
+  chatSection.append(chatTitle, chatHint, chatList, chatInput, actions)
+  container.append(notesSection, chatSection)
+  panel.append(container)
+}
+
+function shouldShowOrientationOverviewPrompt() {
+  if (!currentPdf || !renderState.pdfDoc || !modeUiState.aiEnabled || isWorksheetMode()) {
+    return false
+  }
+  const orientationState = getOrientationState()
+  if (!orientationState.showOverviewPrompt || orientationState.status === "loading") {
+    return false
+  }
+  return true
+}
+
+function createOrientationOverviewPromptNode() {
+  const wrapper = document.createElement("section")
+  wrapper.className = "orientationPromptBanner"
+  const title = document.createElement("h4")
+  title.className = "orientationPromptTitle"
+  title.textContent = "Start with a paper overview?"
+  const body = document.createElement("p")
+  body.className = "orientationPromptBody"
+  body.textContent = "Generate purpose, focus points, key terms, and section context when you are ready."
+  const actions = document.createElement("div")
+  actions.className = "orientationPromptActions"
+  const generateButton = document.createElement("button")
+  generateButton.type = "button"
+  generateButton.className = "orientationAction"
+  generateButton.dataset.orientationAction = "prompt-generate"
+  generateButton.textContent = "Generate overview"
+  const dismissButton = document.createElement("button")
+  dismissButton.type = "button"
+  dismissButton.className = "orientationAction"
+  dismissButton.dataset.orientationAction = "prompt-dismiss"
+  dismissButton.textContent = "Skip for now"
+  actions.append(generateButton, dismissButton)
+  wrapper.append(title, body, actions)
+  return wrapper
+}
+
+function injectOrientationOverviewPromptIfNeeded() {
+  if (!shouldShowOrientationOverviewPrompt()) {
+    return
+  }
+  if (panel.querySelector(".orientationPromptBanner")) {
+    return
+  }
+  const node = createOrientationOverviewPromptNode()
+  panel.prepend(node)
+}
+
 function renderPanel() {
   const tab = sidebarUiState.activeTab
   if (tab === "orientation") {
     renderOrientationTab()
-    return
-  }
-  if (tab === "explain" && isWorksheetMode()) {
+  } else if (tab === "explain" && isWorksheetMode()) {
     renderWorksheetAnswersTab()
-    return
-  }
-  if (tab === "explain" || tab === "figures") {
+  } else if (tab === "explain" || tab === "figures") {
     renderCardsTab(tab)
-    return
-  }
-  if (tab === "glossary") {
+  } else if (tab === "glossary") {
     renderGlossaryTab()
-    return
-  }
-  if (tab === "walkthrough") {
+  } else if (tab === "assist") {
+    renderAssistTab()
+  } else if (tab === "walkthrough") {
     renderWalkthroughTab()
-    return
+  } else {
+    renderEmpty(tab)
   }
-  renderEmpty(tab)
+  injectOrientationOverviewPromptIfNeeded()
 }
 
 function setActiveTab(tab, options = {}) {
@@ -3540,6 +3725,217 @@ function clearPdfIntentOverlays() {
   }
 }
 
+function clearPdfFigureHintOverlays() {
+  for (const pageNode of renderState.pageNodes) {
+    if (!(pageNode instanceof HTMLElement)) {
+      continue
+    }
+    const overlays = pageNode.querySelectorAll(".pdfFigureHintOverlay")
+    for (const overlay of overlays) {
+      overlay.remove()
+    }
+  }
+}
+
+function isFigureCaptionLine(text) {
+  const source = sanitizeText(text)
+  if (!source || source.length < 8 || source.length > 260) {
+    return false
+  }
+  return /^(figure|fig\.?|table)\s+([0-9]+|[ivxlcdm]+|[a-z])(?:\b|[\s:.\-–—])/i.test(source)
+}
+
+function buildPageTextLineEntries(pageNode) {
+  const pageSurface = pageNode.querySelector(".pdfPageSurface")
+  const textLayer = pageNode.querySelector(".textLayer")
+  if (!(pageSurface instanceof HTMLElement) || !(textLayer instanceof HTMLElement)) {
+    return { pageSurface: null, lines: [] }
+  }
+  const surfaceRect = pageSurface.getBoundingClientRect()
+  const spans = Array.from(textLayer.querySelectorAll("span")).filter((span) => span instanceof HTMLElement)
+  if (spans.length === 0) {
+    return { pageSurface, lines: [] }
+  }
+
+  const lines = []
+  for (const span of spans) {
+    const text = sanitizeText(span.textContent || "")
+    if (!text) {
+      continue
+    }
+    const rect = span.getBoundingClientRect()
+    const width = Math.max(0, rect.width)
+    const height = Math.max(0, rect.height)
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) {
+      continue
+    }
+    const top = Math.max(0, rect.top - surfaceRect.top)
+    const left = Math.max(0, rect.left - surfaceRect.left)
+    const right = Math.max(left + 1, rect.right - surfaceRect.left)
+    const bottom = Math.max(top + 1, rect.bottom - surfaceRect.top)
+    const yTolerance = Math.max(2, Math.min(height * 0.45, 5))
+    let line = lines.find((entry) => Math.abs(entry.top - top) <= yTolerance)
+    if (!line) {
+      line = {
+        top,
+        bottom,
+        left,
+        right,
+        parts: [],
+        spans: []
+      }
+      lines.push(line)
+    } else {
+      line.top = Math.min(line.top, top)
+      line.bottom = Math.max(line.bottom, bottom)
+      line.left = Math.min(line.left, left)
+      line.right = Math.max(line.right, right)
+    }
+    line.parts.push({ text, left })
+    line.spans.push(span)
+  }
+
+  lines.sort((a, b) => (a.top === b.top ? a.left - b.left : a.top - b.top))
+  const normalizedLines = lines
+    .map((line) => {
+      const orderedParts = line.parts
+        .slice()
+        .sort((a, b) => a.left - b.left)
+        .map((entry) => entry.text)
+      const mergedText = sanitizeText(orderedParts.join(" "))
+      return {
+        text: mergedText,
+        top: line.top,
+        bottom: line.bottom,
+        left: line.left,
+        right: line.right
+      }
+    })
+    .filter((line) => Boolean(line.text))
+
+  return { pageSurface, lines: normalizedLines }
+}
+
+function collectFigureCaptionCandidates(pageNode) {
+  if (!(pageNode instanceof HTMLElement)) {
+    return { pageSurface: null, candidates: [] }
+  }
+  const { pageSurface, lines } = buildPageTextLineEntries(pageNode)
+  if (!(pageSurface instanceof HTMLElement) || lines.length === 0) {
+    return { pageSurface: null, candidates: [] }
+  }
+  const pageNumber = parseOptionalPageIndex(pageNode.dataset.pageNumber)
+  const pageIndex = pageNumber != null ? Math.max(0, pageNumber - 1) : null
+  if (pageIndex == null) {
+    return { pageSurface, candidates: [] }
+  }
+
+  const dedupe = new Set()
+  const candidates = []
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    if (!isFigureCaptionLine(line.text)) {
+      continue
+    }
+    const nextLine = lines[index + 1]
+    const shouldAppendNext =
+      nextLine &&
+      nextLine.top - line.bottom < 30 &&
+      /^[a-z]/.test(nextLine.text) &&
+      !isFigureCaptionLine(nextLine.text)
+    const selectedText = clampText(
+      shouldAppendNext ? `${line.text} ${nextLine.text}` : line.text,
+      FIGURE_HINT_MAX_SELECTED_TEXT
+    )
+    if (!selectedText) {
+      continue
+    }
+    const dedupeKey = `${Math.round(line.top / 6)}:${selectedText.toLowerCase().slice(0, 42)}`
+    if (dedupe.has(dedupeKey)) {
+      continue
+    }
+    dedupe.add(dedupeKey)
+    const contextStart = Math.max(0, index - FIGURE_HINT_CONTEXT_LINE_RADIUS)
+    const contextEnd = Math.min(lines.length - 1, index + FIGURE_HINT_CONTEXT_LINE_RADIUS)
+    const contextWindow = truncateText(
+      lines
+        .slice(contextStart, contextEnd + 1)
+        .map((entry) => entry.text)
+        .join(" "),
+      FIGURE_HINT_MAX_CONTEXT_TEXT
+    )
+    const maxLeft = Math.max(pageSurface.clientWidth - 184, 8)
+    const left = Math.min(Math.max(line.right + 8, 8), maxLeft)
+    const top = Math.max(6, line.top - 2)
+    candidates.push({
+      left,
+      top,
+      pageIndex,
+      selectedText,
+      contextWindow
+    })
+    if (candidates.length >= FIGURE_HINT_MAX_PER_PAGE) {
+      break
+    }
+  }
+  return { pageSurface, candidates }
+}
+
+function renderPdfFigureHintOverlays() {
+  clearPdfFigureHintOverlays()
+  if (!modeUiState.aiEnabled || isWorksheetMode()) {
+    return
+  }
+  for (const pageNode of renderState.pageNodes) {
+    const { pageSurface, candidates } = collectFigureCaptionCandidates(pageNode)
+    if (!(pageSurface instanceof HTMLElement) || candidates.length === 0) {
+      continue
+    }
+    for (const candidate of candidates) {
+      const button = document.createElement("button")
+      button.type = "button"
+      button.className = "pdfFigureHintOverlay"
+      button.dataset.pdfFigureAction = "translate"
+      button.dataset.selectedText = candidate.selectedText
+      button.dataset.contextWindow = candidate.contextWindow
+      button.dataset.pageIndex = String(candidate.pageIndex)
+      button.style.left = `${Math.round(candidate.left)}px`
+      button.style.top = `${Math.round(candidate.top)}px`
+      button.textContent = "Translate figure/table"
+      button.setAttribute("aria-label", "Translate figure or table")
+      button.title = "Translate figure/table"
+      pageSurface.append(button)
+    }
+  }
+}
+
+async function handlePdfFigureHintOverlayClick(buttonEl) {
+  if (!(buttonEl instanceof HTMLButtonElement) || buttonEl.disabled) {
+    return
+  }
+  const selectedText = clampText(buttonEl.dataset.selectedText, 500)
+  if (!selectedText) {
+    return
+  }
+  const contextWindow = clampText(buttonEl.dataset.contextWindow, MAX_CONTEXT_LENGTH) || selectedText
+  const pageIndex = parseOptionalPageIndex(buttonEl.dataset.pageIndex)
+  buttonEl.disabled = true
+  buttonEl.classList.add("isLoading")
+  setStatus("Translating figure/table...")
+  try {
+    await handleSelectionAction({
+      type: "translate",
+      selectedText,
+      pageIndex,
+      contextWindow,
+      highlightRects: []
+    })
+  } finally {
+    buttonEl.disabled = false
+    buttonEl.classList.remove("isLoading")
+  }
+}
+
 function getWorksheetState() {
   if (!sidebarUiState.worksheet || typeof sidebarUiState.worksheet !== "object") {
     sidebarUiState.worksheet = createWorksheetUiState()
@@ -3551,6 +3947,10 @@ function resetWorksheetStateForDocument(docId = "unknown") {
   const nextState = createWorksheetUiState()
   nextState.docId = sanitizeText(docId) || "unknown"
   sidebarUiState.worksheet = nextState
+}
+
+function resetAssistStateForDocument() {
+  sidebarUiState.assist = createAssistUiState()
 }
 
 function normalizeWorksheetSearchText(value) {
@@ -6709,6 +7109,7 @@ async function ensureDigestForSection(sectionKey) {
 
 function renderPdfIntentOverlays() {
   clearPdfIntentOverlays()
+  renderPdfFigureHintOverlays()
   if (!modeUiState.aiEnabled || isWorksheetMode()) {
     return
   }
@@ -9616,6 +10017,80 @@ async function handleSelectionAction(payload) {
   })
 }
 
+function appendAssistChatMessage(role, text) {
+  const assistState = getAssistState()
+  const normalizedRole = role === "assistant" ? "assistant" : "user"
+  const normalizedText = clampText(text, 900)
+  if (!normalizedText) {
+    return
+  }
+  assistState.chatMessages = [
+    ...assistState.chatMessages,
+    {
+      id: makeId("chat"),
+      role: normalizedRole,
+      text: normalizedText,
+      createdAt: Date.now()
+    }
+  ].slice(-ASSIST_CHAT_MAX_MESSAGES)
+}
+
+async function buildAssistChatContext() {
+  if (!currentPdf || !renderState.pdfDoc) {
+    return ""
+  }
+  const sections = getReadingMapSections()
+  const range = getCurrentSectionRange(currentPdf.pageNumber || 1, sections)
+  const snippet = await getSectionSnippetFromRange(range, {
+    maxPages: 2,
+    maxChars: ASSIST_CHAT_CONTEXT_MAX_CHARS
+  })
+  if (snippet) {
+    return snippet
+  }
+  const pageIndex = Math.max(0, (currentPdf.pageNumber || 1) - 1)
+  const pageText = await getPageText(renderState.pdfDoc, pageIndex)
+  return truncateText(sanitizeText(pageText), ASSIST_CHAT_CONTEXT_MAX_CHARS)
+}
+
+async function handleAssistSendChatAction() {
+  const assistState = getAssistState()
+  if (assistState.chatPending) {
+    return
+  }
+  const question = clampText(assistState.chatDraft, 480)
+  if (!question) {
+    setStatus("Type a question first.")
+    return
+  }
+  assistState.chatDraft = ""
+  assistState.chatPending = true
+  appendAssistChatMessage("user", question)
+  renderPanel()
+
+  const pageIndex = Math.max(0, (currentPdf?.pageNumber || 1) - 1)
+  try {
+    const contextWindow = await buildAssistChatContext()
+    const llmInput = {
+      selectedText: question,
+      contextWindow: contextWindow || question,
+      pageIndex,
+      readingMode: getReadingModeOrDefault()
+    }
+    const { response } = await generateLLM("explanation", llmInput)
+    const answer = clampText(response?.shortAnswer || response?.eli5, 520) || "I could not generate an answer yet."
+    appendAssistChatMessage("assistant", answer)
+  } catch (error) {
+    appendAssistChatMessage("assistant", "I ran into an issue while generating that answer. Please try again.")
+    logger.warn("Assist chat failed", {
+      message: error?.message || "Unknown error"
+    })
+  } finally {
+    assistState.chatPending = false
+    renderPanel()
+  }
+}
+
 async function handlePanelCardAction(event) {
   const eventTarget = event.target instanceof Element ? event.target : null
   if (!eventTarget) {
@@ -9625,6 +10100,19 @@ async function handlePanelCardAction(event) {
   const orientationButton = eventTarget.closest("button[data-orientation-action]")
   if (orientationButton && panel.contains(orientationButton)) {
     const action = orientationButton.dataset.orientationAction
+    if (action === "prompt-generate") {
+      setOrientationOverviewPromptVisible(false)
+      setActiveTab("orientation")
+      if (renderState.pdfDoc && currentPdf) {
+        void generateOrientationForCurrentDocument(renderState.loadToken)
+      }
+      return
+    }
+    if (action === "prompt-dismiss") {
+      setOrientationOverviewPromptVisible(false)
+      renderPanel()
+      return
+    }
     if (action === "expand") {
       toggleOrientationCollapsed(false)
       return
@@ -9658,6 +10146,7 @@ async function handlePanelCardAction(event) {
       return
     }
     if (action === "regenerate") {
+      setOrientationOverviewPromptVisible(false)
       if (renderState.pdfDoc && currentPdf) {
         void generateOrientationForCurrentDocument(renderState.loadToken, { force: true })
       }
@@ -9771,6 +10260,22 @@ async function handlePanelCardAction(event) {
     return
   }
 
+  const assistButton = eventTarget.closest("button[data-assist-action]")
+  if (assistButton && panel.contains(assistButton)) {
+    const assistAction = sanitizeText(assistButton.dataset.assistAction)
+    if (assistAction === "send-chat") {
+      void handleAssistSendChatAction()
+      return
+    }
+    if (assistAction === "clear-chat") {
+      const assistState = getAssistState()
+      assistState.chatMessages = []
+      assistState.chatDraft = ""
+      renderPanel()
+    }
+    return
+  }
+
   const button = eventTarget.closest("button[data-card-action]")
   if (!button || !panel.contains(button)) {
     return
@@ -9846,6 +10351,36 @@ async function handlePanelCardAction(event) {
   }
 }
 
+function handlePanelInput(event) {
+  const target = event.target instanceof Element ? event.target : null
+  if (!(target instanceof HTMLTextAreaElement)) {
+    return
+  }
+  const inputType = sanitizeText(target.dataset.assistInput)
+  const assistState = getAssistState()
+  if (inputType === "notes") {
+    assistState.notesText = target.value
+    return
+  }
+  if (inputType === "chat") {
+    assistState.chatDraft = target.value
+  }
+}
+
+function handlePanelKeydown(event) {
+  const target = event.target instanceof Element ? event.target : null
+  if (!(target instanceof HTMLTextAreaElement)) {
+    return
+  }
+  if (sanitizeText(target.dataset.assistInput) !== "chat") {
+    return
+  }
+  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+    event.preventDefault()
+    void handleAssistSendChatAction()
+  }
+}
+
 function ensureSelectionSystemInitialized() {
   if (selectionSystem) {
     return;
@@ -9918,10 +10453,12 @@ function applySettingsToUi(settings) {
   setApiPresenceStatus(settings);
   updateContextScopeStatus();
   if (getActiveReadingMode() === "structure" && currentPdf && renderState.pdfDoc) {
-    if (getOrientationState().status === "idle") {
+    if (getOrientationState().status === "idle" && !isOrientationOverviewPromptVisible()) {
       void generateOrientationForCurrentDocument(renderState.loadToken)
     }
-    void runStructurePrewarmForCurrentDocument(renderState.loadToken)
+    if (!isOrientationOverviewPromptVisible()) {
+      void runStructurePrewarmForCurrentDocument(renderState.loadToken)
+    }
   }
   if (currentPdf && renderState.pageNodes.length > 0) {
     renderPdfIntentOverlays()
@@ -11617,6 +12154,7 @@ async function loadPdfSource(source, documentParams) {
   sidebarUiState.glossaryTerms = [];
   sidebarUiState.glossarySuggestions = [];
   sidebarUiState.walkthrough = createWalkthroughUiState()
+  resetAssistStateForDocument()
   resetWorksheetStateForDocument(sidebarUiState.docId)
   sidebarUiState.toastMessage = ""
   resetOrientationStateForDocument()
@@ -11950,10 +12488,12 @@ async function setReadingModeSetting(nextMode) {
   applyReadingMode(normalizedMode, currentSettings || {})
   if (currentPdf && renderState.pdfDoc) {
     if (normalizedMode === "structure") {
-      if (getOrientationState().status === "idle") {
+      if (getOrientationState().status === "idle" && !isOrientationOverviewPromptVisible()) {
         void generateOrientationForCurrentDocument(renderState.loadToken)
       }
-      void runStructurePrewarmForCurrentDocument(renderState.loadToken)
+      if (!isOrientationOverviewPromptVisible()) {
+        void runStructurePrewarmForCurrentDocument(renderState.loadToken)
+      }
     }
     if (normalizedMode === "worksheet") {
       void ensureWorksheetQuestionsForCurrentDocument()
@@ -12177,12 +12717,21 @@ document.querySelectorAll(".tab").forEach((button) => {
 panel.addEventListener("click", (event) => {
   void handlePanelCardAction(event);
 });
+panel.addEventListener("input", handlePanelInput);
+panel.addEventListener("keydown", handlePanelKeydown);
 pdfRoot.addEventListener("click", (event) => {
   const highlightTarget =
     event.target instanceof Element ? event.target.closest(".userHighlightRect") : null
   if (highlightTarget instanceof HTMLButtonElement) {
     removeHighlightById(highlightTarget.dataset.highlightId)
     setStatus("Highlight removed.")
+    return
+  }
+
+  const figureHintTarget =
+    event.target instanceof Element ? event.target.closest("button[data-pdf-figure-action]") : null
+  if (figureHintTarget instanceof HTMLButtonElement) {
+    void handlePdfFigureHintOverlayClick(figureHintTarget)
     return
   }
 
@@ -12448,4 +12997,3 @@ if (src) {
 } else {
   setStatus("No PDF loaded");
 }
-

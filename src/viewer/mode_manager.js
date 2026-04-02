@@ -44,9 +44,9 @@ function getModeConfig(mode, settings) {
       defaultTab: "orientation",
       cardDetailsOpenByDefault: true,
       maxGroundingQuotes: Math.min(maxCitations, 3),
-      autoGenerateOnLoad: true,
+      autoGenerateOnLoad: false,
       autoBuildWalkthroughOnLoad: false,
-      autoPrewarmOnLoad: true,
+      autoPrewarmOnLoad: false,
       showMicroActions: false,
       sidebarVisible: true,
       aiEnabled: true

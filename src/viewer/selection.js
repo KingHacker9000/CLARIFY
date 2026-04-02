@@ -16,9 +16,9 @@ const HIGHLIGHT_ICON_DARK_THEME_URL = new URL(
 
 const ACTIONS = [
   { type: "highlight", label: "Highlight", iconName: "highlight" },
-  { type: "define", label: "Define", icon: "\uD83D\uDCD6" },
-  { type: "explain", label: "Explain", icon: "\uD83D\uDCA1" },
-  { type: "translate", label: "Translate (Figures)", icon: "\uD83D\uDCCA" }
+  { type: "define", label: "Define term", icon: "\uD83D\uDCD6" },
+  { type: "explain", label: "Explain text", icon: "\uD83D\uDCA1" },
+  { type: "translate", label: "Translate figure/table", icon: "\uD83D\uDCCA" }
 ];
 
 function resolveActionIconUrl(action) {
@@ -373,16 +373,22 @@ export function initSelectionSystem({ pdfRoot, onAction, isEnabled }) {
       button.type = "button";
       button.className = "selectionPopoverButton";
       button.dataset.action = action.type;
+      const iconWrap = document.createElement("span");
+      iconWrap.className = "selectionPopoverButtonIcon";
       const iconUrl = resolveActionIconUrl(action);
       if (iconUrl) {
         const icon = document.createElement("img");
         icon.className = "selectionPopoverIconImage";
         icon.src = iconUrl;
         icon.alt = "";
-        button.append(icon);
+        iconWrap.append(icon);
       } else {
-        button.textContent = action.icon;
+        iconWrap.textContent = action.icon;
       }
+      const label = document.createElement("span");
+      label.className = "selectionPopoverButtonLabel";
+      label.textContent = action.label;
+      button.append(iconWrap, label);
       button.title = action.label;
       button.setAttribute("aria-label", action.label);
       button.addEventListener("click", (event) => {

@@ -560,8 +560,8 @@ html {
 }
 
 .selectionPopoverIconImage {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   object-fit: contain;
   display: block;
 }
@@ -617,6 +617,45 @@ html {
   border: 2px solid rgba(31, 90, 34, 0.2);
   border-top-color: #1f5a22;
   animation: worksheetOverlaySpin 0.72s linear infinite;
+}
+
+.pdfFigureHintOverlay {
+  position: absolute;
+  z-index: 6;
+  border: 1px solid #d1d9c4;
+  border-radius: 999px;
+  background: rgba(246, 251, 238, 0.95);
+  color: #324d2a;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  padding: 4px 9px;
+  cursor: pointer;
+  opacity: 0.46;
+  box-shadow: 0 2px 8px rgba(36, 72, 26, 0.14);
+  transition: transform 120ms ease, border-color 120ms ease, background-color 120ms ease;
+}
+
+.pdfPageSurface:hover .pdfFigureHintOverlay {
+  opacity: 0.95;
+}
+
+.pdfFigureHintOverlay:hover {
+  transform: translateY(-1px);
+  border-color: #b4c5a3;
+  background: rgba(240, 249, 229, 0.98);
+}
+
+.pdfFigureHintOverlay:focus-visible {
+  outline: 2px solid #7b9ef5;
+  outline-offset: 1px;
+}
+
+.pdfFigureHintOverlay.isLoading {
+  opacity: 0.7;
+  cursor: default;
 }
 
 @keyframes worksheetOverlaySpin {
@@ -820,8 +859,8 @@ html {
 .selectionPopover {
   position: absolute;
   z-index: 30;
-  display: inline-flex;
-  align-items: center;
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
   padding: 6px;
   background: #fff;
@@ -835,15 +874,30 @@ html {
   background: #fdfdfb;
   color: var(--text);
   border-radius: 8px;
-  width: 30px;
-  height: 30px;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+  text-align: left;
+  cursor: pointer;
+}
+
+.selectionPopoverButtonIcon {
+  width: 14px;
+  height: 14px;
   display: inline-grid;
   place-items: center;
-  padding: 0;
-  font: inherit;
-  font-size: 16px;
-  line-height: 1.2;
-  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.selectionPopoverButtonLabel {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .selectionPopoverButton:hover {
@@ -1550,6 +1604,132 @@ body[data-mode="worksheet"] .worksheetAnswerCards {
   line-height: 1.42;
 }
 
+.orientationPromptBanner {
+  border: 1px solid #d4dcc8;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #fcfdf8 0%, #f5f8ee 100%);
+  padding: 10px;
+  margin-bottom: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.orientationPromptTitle {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.orientationPromptBody {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.42;
+  color: #4c5840;
+}
+
+.orientationPromptActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.assistPanel {
+  display: grid;
+  gap: 10px;
+}
+
+.assistSection {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.assistHint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.assistNotesInput,
+.assistChatInput {
+  width: 100%;
+  min-height: 84px;
+  border: 1px solid #d6d6ca;
+  border-radius: 10px;
+  background: #fcfcf9;
+  color: var(--text);
+  font: inherit;
+  line-height: 1.4;
+  resize: vertical;
+  padding: 8px 9px;
+}
+
+.assistChatInput {
+  min-height: 76px;
+}
+
+.assistNotesInput:focus-visible,
+.assistChatInput:focus-visible {
+  outline: 2px solid #7b9ef5;
+  outline-offset: 1px;
+}
+
+.assistChatList {
+  border: 1px solid #d9d9cc;
+  border-radius: 10px;
+  background: #f9faf5;
+  padding: 8px;
+  max-height: 230px;
+  overflow: auto;
+  display: grid;
+  gap: 7px;
+}
+
+.assistChatEmpty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.assistChatMessage {
+  border: 1px solid #d8ddd0;
+  border-radius: 10px;
+  padding: 7px 8px;
+  display: grid;
+  gap: 3px;
+  background: #fff;
+}
+
+.assistChatMessage.isAssistant {
+  border-color: #cfdcc3;
+  background: #f6fbef;
+}
+
+.assistChatRole {
+  margin: 0;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #5f5f57;
+  font-weight: 700;
+}
+
+.assistChatText {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.assistActions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .walkthroughPanel {
   display: grid;
   gap: 10px;
@@ -1689,6 +1869,17 @@ body[data-mode="worksheet"] .worksheetAnswerCards {
 .cardList {
   display: grid;
   gap: 12px;
+}
+
+.cardListHint {
+  margin: 0 0 8px;
+  padding: 7px 9px;
+  border: 1px solid #d8dece;
+  border-radius: 8px;
+  background: #f8fbf3;
+  color: #415238;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .worksheetAnswerList {
@@ -1972,6 +2163,41 @@ body[data-mode="worksheet"] .worksheetAnswerCards {
   line-height: 1.4;
 }
 
+.cardPrimaryQuote {
+  font-size: 12px;
+}
+
+.cardExpandShell {
+  border-top: 1px solid #ecefe5;
+  padding-top: 7px;
+  display: grid;
+  gap: 8px;
+}
+
+.cardExpandSummary {
+  cursor: pointer;
+  color: #58654b;
+  font-size: 12px;
+  font-weight: 600;
+  list-style: none;
+}
+
+.cardExpandSummary::-webkit-details-marker {
+  display: none;
+}
+
+.cardExpandSummary::before {
+  content: "\25B8";
+  display: inline-block;
+  margin-right: 6px;
+  color: #6f7f62;
+  transition: transform 120ms ease;
+}
+
+.cardExpandShell[open] > .cardExpandSummary::before {
+  transform: rotate(90deg);
+}
+
 .cardIntentOverlay {
   width: 20px;
   height: 20px;
@@ -2009,9 +2235,9 @@ body[data-mode="worksheet"] .worksheetAnswerCards {
 }
 
 .cardGrounding {
-  border: 1px solid #deded2;
+  border: 1px solid #d5dccb;
   border-radius: 10px;
-  background: #f8f8f4;
+  background: #f7faf1;
   padding: 8px;
   display: grid;
   gap: 8px;
@@ -2023,12 +2249,16 @@ body[data-mode="worksheet"] .worksheetAnswerCards {
   color: var(--muted);
 }
 
+.cardGroundingHint {
+  font-size: 11px;
+}
+
 .cardGroundingSource {
   width: 100%;
   appearance: none;
-  border: 1px solid #d7d7ca;
+  border: 1px solid #cad8be;
   border-radius: 10px;
-  background: #fff;
+  background: #fbfdf8;
   padding: 8px 10px;
   display: grid;
   gap: 6px;
@@ -2040,8 +2270,8 @@ body[data-mode="worksheet"] .worksheetAnswerCards {
 }
 
 .cardGroundingSource:hover {
-  background: #fdfcf4;
-  border-color: #c6c6b3;
+  background: #f4faeb;
+  border-color: #b7c9a7;
 }
 
 .cardGroundingSource:focus-visible {
@@ -2104,7 +2334,25 @@ body[data-mode="worksheet"] .worksheetAnswerCards {
 
 .cardDetails summary {
   cursor: pointer;
-  color: var(--muted);
+  color: #58654b;
+  font-weight: 600;
+  list-style: none;
+}
+
+.cardDetails summary::-webkit-details-marker {
+  display: none;
+}
+
+.cardDetails summary::before {
+  content: "\25B8";
+  display: inline-block;
+  margin-right: 6px;
+  color: #6f7f62;
+  transition: transform 120ms ease;
+}
+
+.cardDetails.isOpen summary::before {
+  transform: rotate(90deg);
 }
 
 body[data-mode="flow"] .cardDetails summary {
@@ -2439,6 +2687,7 @@ body[data-theme="dark"] .panelToast {
 
 body[data-theme="dark"] .orientationHeader,
 body[data-theme="dark"] .orientationSection,
+body[data-theme="dark"] .orientationPromptBanner,
 body[data-theme="dark"] .orientationLoading,
 body[data-theme="dark"] .orientationLeadItem,
 body[data-theme="dark"] .orientationBullets li,
@@ -2447,6 +2696,10 @@ body[data-theme="dark"] .walkthroughConfirm,
 body[data-theme="dark"] .walkthroughItem,
 body[data-theme="dark"] .walkthroughJump,
 body[data-theme="dark"] .walkthroughPreview,
+body[data-theme="dark"] .assistSection,
+body[data-theme="dark"] .assistChatList,
+body[data-theme="dark"] .assistChatMessage,
+body[data-theme="dark"] .cardListHint,
 body[data-theme="dark"] .sidebarCard,
 body[data-theme="dark"] .worksheetAnswerCard,
 body[data-theme="dark"] .cardGrounding,
@@ -2459,6 +2712,7 @@ body[data-theme="dark"] .selectionPopover,
 body[data-theme="dark"] .selectionPopoverButton,
 body[data-theme="dark"] .pdfIntentOverlay,
 body[data-theme="dark"] .pdfWorksheetOverlay,
+body[data-theme="dark"] .pdfFigureHintOverlay,
 body[data-theme="dark"] .pdfIntentBubble,
 body[data-theme="dark"] .pdfWorksheetBubble,
 body[data-theme="dark"] .pdfWorksheetAnswerCard,
@@ -2473,6 +2727,39 @@ body[data-theme="dark"] .orientationMapIntentBubble {
 body[data-theme="dark"] .pdfPageShell[data-rendered="false"] .pdfPageSurface {
   background: #272727;
   border-color: #3a3a3a;
+}
+
+body[data-theme="dark"] .orientationPromptBanner {
+  background: linear-gradient(180deg, #30392f 0%, #2b3329 100%);
+  border-color: #4b5e4b;
+}
+
+body[data-theme="dark"] .assistNotesInput,
+body[data-theme="dark"] .assistChatInput {
+  background: #262626;
+  border-color: #454545;
+  color: var(--text);
+}
+
+body[data-theme="dark"] .assistChatMessage.isAssistant {
+  background: #2f4030;
+  border-color: #4d6650;
+}
+
+body[data-theme="dark"] .cardDetails summary {
+  color: #b7c2ad;
+}
+
+body[data-theme="dark"] .cardDetails summary::before {
+  color: #8fa284;
+}
+
+body[data-theme="dark"] .cardExpandSummary {
+  color: #b7c2ad;
+}
+
+body[data-theme="dark"] .cardExpandSummary::before {
+  color: #8fa284;
 }
 
 body[data-theme="dark"] .zoomIndicator {
@@ -2492,8 +2779,13 @@ body[data-theme="dark"] .orientationChip:hover,
 body[data-theme="dark"] .orientationToggleMap:hover,
 body[data-theme="dark"] .orientationIconButton:hover,
 body[data-theme="dark"] .orientationMapActionButton:hover,
-body[data-theme="dark"] .cardActionButton:hover {
+body[data-theme="dark"] .cardActionButton:hover,
+body[data-theme="dark"] .pdfFigureHintOverlay:hover {
   background: #3b3b3b;
+}
+
+body[data-theme="dark"] .cardExpandSummary:hover {
+  color: #d9e2d1;
 }
 
 body[data-theme="dark"] .orientationAction,
@@ -2518,6 +2810,11 @@ body[data-theme="dark"] .pdfWorksheetOverlay {
   background: #314336;
   border-color: #4f6a56;
   color: #d0ead7;
+}
+
+body[data-theme="dark"] .pdfFigureHintOverlay {
+  border-color: #536756;
+  color: #d6ead8;
 }
 
 body[data-theme="dark"] .pdfWorksheetOverlay.isLoading::after {
@@ -2643,6 +2940,7 @@ body[data-theme="dark"] .cardGroundingSourceLabel,
 body[data-theme="dark"] .walkthroughSectionNumber,
 body[data-theme="dark"] .glossaryMeta,
 body[data-theme="dark"] .orientationMutedText,
+body[data-theme="dark"] .assistHint,
 body[data-theme="dark"] .orientationMapExpand,
 body[data-theme="dark"] .orientationMapPageButton {
   color: #b6b6b6;
@@ -2654,7 +2952,9 @@ body[data-theme="dark"] .orientationBullets,
 body[data-theme="dark"] .orientationMapTitleButton,
 body[data-theme="dark"] .walkthroughSectionTitle,
 body[data-theme="dark"] .walkthroughPreview,
-body[data-theme="dark"] .cardGroundingSourceText {
+body[data-theme="dark"] .cardGroundingSourceText,
+body[data-theme="dark"] .assistChatText,
+body[data-theme="dark"] .orientationPromptBody {
   color: #e7e7e7;
 }
 
@@ -2779,5 +3079,9 @@ body[data-theme="dark"] .sidebarResizeHandle:focus-visible::before {
   #status {
     flex-basis: 100%;
     max-width: none;
+  }
+
+  .selectionPopover {
+    grid-template-columns: 1fr;
   }
 }
