@@ -411,6 +411,305 @@ function makeWorksheetAnswerResponse(seed, questionText, gradeLevel, snippet) {
   }
 }
 
+function makeProjectRelevanceResponse(seed, input) {
+  const projectBrief = normalizeText(input.projectBrief)
+  const paperTitle = normalizeText(input.title) || "this paper"
+  const keyTerms = Array.isArray(input.projectKeyTerms) ? input.projectKeyTerms.map((term) => normalizeText(term)) : []
+  const score = 45 + (seed % 45)
+  const recommendation = score >= 75 ? "include" : score <= 56 ? "exclude" : "review"
+  const matchedTerm = keyTerms.find(Boolean) || "project goals"
+  return {
+    fitScore: score,
+    recommendation,
+    relevanceSummary: projectBrief
+      ? `${paperTitle} appears ${recommendation === "include" ? "well aligned" : recommendation === "exclude" ? "weakly aligned" : "partially aligned"} with the project brief, especially around ${matchedTerm}.`
+      : `${paperTitle} has ${recommendation === "include" ? "strong" : recommendation === "exclude" ? "limited" : "mixed"} alignment with the current project goals.`,
+    methodMatch: `Method alignment is strongest around ${matchedTerm}, with remaining uncertainty in dataset comparability.`,
+    gapsOrRisks: [
+      "Evaluation details may be insufficient for direct transfer.",
+      "Need confirmation that datasets and constraints match project scope."
+    ],
+    recommendedSections: ["Introduction", "Method", "Results", "Limitations"],
+    groundingPages: [0, 1].slice(0, recommendation === "exclude" ? 1 : 2),
+    groundingQuotes: [
+      `Quoted evidence for ${paperTitle} and ${matchedTerm}.`,
+      "Additional evidence should be verified in the results section."
+    ].slice(0, recommendation === "exclude" ? 1 : 2)
+  }
+}
+
+function makeProjectCompareResponse(seed, papers, rubric) {
+  const safePapers = Array.isArray(papers) ? papers.filter((paper) => normalizeText(paper?.paperId)) : []
+  const criteria = Array.isArray(rubric) && rubric.length > 0 ? rubric : ["Method fit", "Dataset fit", "Evidence quality"]
+  const columns = ["Criterion", ...safePapers.map((paper) => normalizeText(paper.title) || normalizeText(paper.paperId))]
+  const rows = criteria.slice(0, 12).map((criterion, index) => ({
+    criterion: normalizeText(criterion) || `Criterion ${index + 1}`,
+    cells: safePapers.map((paper, paperIndex) => ({
+      paperId: normalizeText(paper.paperId) || `paper_${paperIndex + 1}`,
+      value:
+        (seed + index + paperIndex) % 3 === 0
+          ? "Strong support with explicit evidence."
+          : (seed + index + paperIndex) % 3 === 1
+            ? "Moderate support; needs deeper validation."
+            : "Limited evidence for this criterion.",
+      groundingPage: Math.max(0, (index + paperIndex) % 4),
+      groundingQuote: `Mock evidence snippet for ${normalizeText(paper.title) || normalizeText(paper.paperId)}.`
+    }))
+  }))
+
+  return {
+    columns,
+    rows,
+    crossPaperInsights: [
+      "Most papers agree on baseline direction but differ in effect size.",
+      "Method families cluster into stronger and weaker evidence groups."
+    ],
+    contradictions: ["One paper reports opposite behavior under a narrower setting."],
+    evidenceGaps: ["Ablation or robustness evidence is missing in at least one compared paper."]
+  }
+}
+
+function makeProjectMatrixRowFillResponse(seed, input) {
+  const columns = Array.isArray(input.matrixColumns) ? input.matrixColumns : []
+  const cells = []
+  const hiddenFeatures = []
+  for (let index = 0; index < columns.length; index += 1) {
+    const column = columns[index]
+    const columnId = normalizeText(column?.columnId || column?.id)
+    if (!columnId || columnId === "paper_key") {
+      continue
+    }
+    const label = normalizeText(column?.label || columnId)
+    const type = normalizeText(column?.type || "categorical").toLowerCase()
+    let value = ""
+    if (type === "numeric") {
+      value = String(1 + ((seed + index) % 5))
+    } else if (type === "boolean") {
+      value = (seed + index) % 2 === 0 ? "Yes" : "No"
+    } else if (type === "text") {
+      value = `Mock summary for ${label.toLowerCase()}.`
+      hiddenFeatures.push({
+        columnId,
+        tags: ["baseline", (seed + index) % 2 === 0 ? "high-fit" : "medium-fit"]
+      })
+    } else {
+      value = pick(seed + index, ["High", "Medium", "Low", "Mixed"])
+    }
+    cells.push({
+      columnId,
+      value,
+      confidence: 0.62 + ((seed + index) % 30) / 100,
+      evidenceSnippet: `Mock evidence for ${label}.`,
+      evidencePage: Math.max(0, (seed + index) % 4),
+      insufficientReason: ""
+    })
+  }
+  return {
+    cells,
+    hiddenFeatures,
+    warnings: ["Mock provider used for matrix row fill."]
+  }
+}
+
+function makeProjectScreeningSuggestResponse(seed, input) {
+  const reasons = Array.isArray(input.screenReasonLibrary)
+    ? input.screenReasonLibrary
+        .map((reason) => ({
+          code: normalizeText(reason?.code),
+          label: normalizeText(reason?.label)
+        }))
+        .filter((reason) => reason.code || reason.label)
+    : []
+  const projectTerms = Array.isArray(input.projectKeyTerms)
+    ? input.projectKeyTerms.map((term) => normalizeText(term)).filter(Boolean)
+    : []
+  const term = projectTerms[seed % Math.max(projectTerms.length, 1)] || "project scope"
+  const decisionCycle = ["include", "needs_info", "exclude", "review"]
+  const decisionSuggestion = decisionCycle[seed % decisionCycle.length]
+  const selectedReasons =
+    reasons.length > 0
+      ? reasons.slice(0, Math.min(2, reasons.length)).map((reason) => reason.code || reason.label)
+      : decisionSuggestion === "exclude"
+        ? ["out_of_scope"]
+        : decisionSuggestion === "needs_info"
+          ? ["no_full_text"]
+          : ["review"]
+
+  return {
+    decisionSuggestion,
+    confidence: 0.55 + ((seed % 35) / 100),
+    reasonCandidates: selectedReasons,
+    evidenceSnippet:
+      decisionSuggestion === "exclude"
+        ? `Title/abstract indicates weak alignment with ${term}.`
+        : decisionSuggestion === "needs_info"
+          ? `Title appears relevant to ${term}, but evidence details are incomplete.`
+          : `Title/abstract suggests alignment with ${term} and likely inclusion value.`,
+    evidencePage: 0,
+    insufficientReason: decisionSuggestion === "review" ? "Abstract context is too limited for a firm decision." : ""
+  }
+}
+
+function makeProjectContributionMapResponse(seed, input) {
+  const matrixRows = Array.isArray(input.matrixRows) ? input.matrixRows : []
+  const matrixColumns = Array.isArray(input.matrixColumns) ? input.matrixColumns : []
+  const clusterIds = Array.from(
+    new Set(
+      matrixRows
+        .map((row) => Number(row?.clusterId))
+        .filter((clusterId) => Number.isFinite(clusterId) && clusterId >= 0)
+        .map((clusterId) => Math.floor(clusterId))
+    )
+  ).slice(0, 8)
+
+  const clustersSummary =
+    clusterIds.length > 0
+      ? clusterIds.map((clusterId, index) => ({
+          label: `Cluster ${clusterId}`,
+          summary:
+            index % 2 === 0
+              ? "Concentrates on established methods with broad evaluation coverage."
+              : "Shows specialized setups with narrower evidence coverage.",
+          confidence: 0.58 + ((seed + index) % 25) / 100
+        }))
+      : [
+          {
+            label: "Unclustered set",
+            summary: "Current matrix rows are sparse; run clustering after filling more columns.",
+            confidence: 0.62
+          }
+        ]
+
+  const featureLabel =
+    normalizeText(matrixColumns.find((column) => column?.clusterEnabled)?.label) ||
+    normalizeText(matrixColumns[0]?.label) ||
+    "method-task-data features"
+
+  const underexploredZones = [
+    {
+      label: `Low-density combinations in ${featureLabel}`,
+      summary: "Few rows cover this combination; candidate area for a focused contribution experiment.",
+      confidence: 0.66
+    },
+    {
+      label: "Cross-domain transfer claims",
+      summary: "Claims appear in summaries but supporting comparative evidence is limited.",
+      confidence: 0.61
+    }
+  ]
+
+  const differentiationIdeas = [
+    {
+      label: "Target underrepresented regime",
+      summary: "Design experiments on low-density combinations and benchmark against nearest cluster baselines.",
+      confidence: 0.7
+    },
+    {
+      label: "Resolve contradiction zone",
+      summary: "Prioritize settings where reported gains conflict and run controlled ablations.",
+      confidence: 0.65
+    }
+  ]
+
+  const evidenceLinks = matrixRows.slice(0, 12).map((row, index) => {
+    const firstCell = Array.isArray(row?.cells) ? row.cells.find((cell) => normalizeText(cell?.value)) : null
+    return {
+      label: normalizeText(row?.paperKey) || `Row ${index + 1}`,
+      rowId: normalizeText(row?.rowId || row?.id),
+      clusterId: Number.isFinite(Number(row?.clusterId)) ? Math.floor(Number(row.clusterId)) : null,
+      columnId: normalizeText(firstCell?.columnId),
+      value: normalizeText(firstCell?.value)
+    }
+  })
+
+  return {
+    clustersSummary,
+    underexploredZones,
+    differentiationIdeas,
+    evidenceLinks
+  }
+}
+
+function makeLiteratureImportResponse(seed, input) {
+  const projectNameBase = normalizeText(input.documentName) || "Imported literature review"
+  const papers = []
+  const sourcePapers = Array.isArray(input.seedPapers) ? input.seedPapers : []
+  for (let index = 0; index < sourcePapers.length; index += 1) {
+    const entry = sourcePapers[index]
+    const title = normalizeText(entry?.title)
+    if (!title) {
+      continue
+    }
+    papers.push({
+      title,
+      url: normalizeText(entry?.url),
+      authors: Array.isArray(entry?.authors) ? entry.authors.map((author) => normalizeText(author)).filter(Boolean) : [],
+      year: Number.isFinite(Number(entry?.year)) ? Math.floor(Number(entry.year)) : null,
+      venue: normalizeText(entry?.venue),
+      tags: Array.isArray(entry?.tags) ? entry.tags.map((tag) => normalizeText(tag)).filter(Boolean) : [],
+      status: "queued",
+      priority: 2,
+      notes: normalizeText(entry?.notes),
+      arxivId: normalizeText(entry?.arxivId),
+      doi: normalizeText(entry?.doi),
+      confidence: "medium",
+      searchQuery: normalizeText(entry?.searchQuery)
+    })
+  }
+
+  if (papers.length === 0) {
+    papers.push(
+      {
+        title: "Attention Is All You Need",
+        url: "https://arxiv.org/pdf/1706.03762.pdf",
+        authors: ["Ashish Vaswani", "Noam Shazeer", "Niki Parmar"],
+        year: 2017,
+        venue: "NeurIPS",
+        tags: ["transformers", "nlp"],
+        status: "queued",
+        priority: 2,
+        notes: "Found from imported literature notes.",
+        arxivId: "1706.03762",
+        doi: "",
+        confidence: "high",
+        searchQuery: ""
+      },
+      {
+        title: "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+        url: "",
+        authors: ["Jacob Devlin", "Ming-Wei Chang", "Kenton Lee", "Kristina Toutanova"],
+        year: 2018,
+        venue: "NAACL",
+        tags: ["nlp", "pretraining"],
+        status: "queued",
+        priority: 2,
+        notes: "No direct PDF in source notes.",
+        arxivId: "1810.04805",
+        doi: "",
+        confidence: "medium",
+        searchQuery: "BERT pre-training language understanding pdf"
+      }
+    )
+  }
+
+  const maxPapers = Number.isFinite(Number(input.maxImportedPapers))
+    ? Math.max(1, Math.floor(Number(input.maxImportedPapers)))
+    : 120
+
+  return {
+    project: {
+      name: input.importMode === "new_project" ? projectNameBase : "",
+      researchQuestion: "What evidence trends appear across imported prior work?",
+      objective: "Bootstrap the literature review workspace from existing notes.",
+      scopeNotes: "This project metadata was inferred from imported document content.",
+      keyTerms: ["literature review", "evidence synthesis", "screening"],
+      rubric: ["Method fit", "Evidence quality", "Relevance to objective"]
+    },
+    papers: papers.slice(0, maxPapers),
+    warnings: seed % 2 === 0 ? ["Mock provider used for literature import extraction."] : []
+  }
+}
+
 export async function generate(task, input = {}) {
   const normalizedTask = normalizeText(task).toLowerCase()
   const selectedText = normalizeText(input.selectedText) || "this selection"
@@ -442,9 +741,60 @@ export async function generate(task, input = {}) {
   const questionText = normalizeText(input.questionText)
   const gradeLevel = normalizeText(input.gradeLevel)
   const snippet = normalizeText(input.snippet)
+  const projectBrief = normalizeText(input.projectBrief)
+  const projectKeyTerms = Array.isArray(input.projectKeyTerms)
+    ? input.projectKeyTerms.map((term) => normalizeText(term)).filter(Boolean)
+    : []
+  const projectRubric = Array.isArray(input.projectRubric)
+    ? input.projectRubric.map((item) => normalizeText(item)).filter(Boolean)
+    : []
+  const papers = Array.isArray(input.papers)
+    ? input.papers.map((paper, index) => ({
+        paperId: normalizeText(paper?.paperId) || `paper_${index + 1}`,
+        title: normalizeText(paper?.title),
+        summary: normalizeText(paper?.summary),
+        status: normalizeText(paper?.status),
+        tags: Array.isArray(paper?.tags) ? paper.tags.map((tag) => normalizeText(tag)).filter(Boolean) : []
+      }))
+    : []
+  const matrixColumns = Array.isArray(input.matrixColumns)
+    ? input.matrixColumns.map((column, index) => ({
+        columnId: normalizeText(column?.columnId || column?.id) || `col_${index + 1}`,
+        label: normalizeText(column?.label || ""),
+        type: normalizeText(column?.type || "categorical").toLowerCase(),
+        clusterEnabled: column?.clusterEnabled !== false
+      }))
+    : []
+  const screenReasonLibrary = Array.isArray(input.screenReasonLibrary)
+    ? input.screenReasonLibrary.map((reason) => ({
+        code: normalizeText(reason?.code),
+        label: normalizeText(reason?.label),
+        description: normalizeText(reason?.description)
+      }))
+    : []
+  const matrixRows = Array.isArray(input.matrixRows)
+    ? input.matrixRows.map((row, index) => ({
+        rowId: normalizeText(row?.rowId || row?.id) || `row_${index + 1}`,
+        paperKey: normalizeText(row?.paperKey || ""),
+        clusterId: Number.isFinite(Number(row?.clusterId)) ? Math.floor(Number(row.clusterId)) : null,
+        cells: Array.isArray(row?.cells)
+          ? row.cells.map((cell) => ({
+              columnId: normalizeText(cell?.columnId || ""),
+              label: normalizeText(cell?.label || ""),
+              value: normalizeText(cell?.value || "")
+            }))
+          : []
+      }))
+    : []
+  const importMode = input.importMode === "new_project" ? "new_project" : "active_project"
+  const importDocumentName = normalizeText(input.importDocumentName || title)
+  const importDocumentType = normalizeText(input.importDocumentType)
+  const maxImportedPapers = Number.isFinite(Number(input.maxImportedPapers))
+    ? Math.max(10, Math.min(220, Math.floor(Number(input.maxImportedPapers))))
+    : 120
   const pageIndex = Number.isFinite(Number(input.pageIndex)) ? Math.max(0, Math.floor(Number(input.pageIndex))) : 0
   const seed = hashString(
-    `${normalizedTask}|${selectedText}|${title}|${sectionTitle}|${headings.join("|")}|${readingMode}|${snippet}|${pageIndex}|${questionText}|${gradeLevel}`
+    `${normalizedTask}|${selectedText}|${title}|${sectionTitle}|${headings.join("|")}|${readingMode}|${snippet}|${pageIndex}|${questionText}|${gradeLevel}|${projectBrief}|${projectKeyTerms.join("|")}|${projectRubric.join("|")}|${papers.map((paper) => paper.paperId).join("|")}|${importMode}|${importDocumentName}|${importDocumentType}|${maxImportedPapers}`
   )
 
   if (normalizedTask === "quant") {
@@ -464,6 +814,42 @@ export async function generate(task, input = {}) {
   }
   if (normalizedTask === "worksheet_answer") {
     return makeWorksheetAnswerResponse(seed, questionText, gradeLevel, snippet || input.contextWindow)
+  }
+  if (normalizedTask === "project_relevance") {
+    return makeProjectRelevanceResponse(seed, {
+      title,
+      projectBrief,
+      projectKeyTerms
+    })
+  }
+  if (normalizedTask === "project_compare_table") {
+    return makeProjectCompareResponse(seed, papers, projectRubric)
+  }
+  if (normalizedTask === "project_matrix_row_fill") {
+    return makeProjectMatrixRowFillResponse(seed, {
+      matrixColumns
+    })
+  }
+  if (normalizedTask === "project_screening_suggest") {
+    return makeProjectScreeningSuggestResponse(seed, {
+      projectKeyTerms,
+      screenReasonLibrary
+    })
+  }
+  if (normalizedTask === "project_contribution_map") {
+    return makeProjectContributionMapResponse(seed, {
+      matrixColumns,
+      matrixRows
+    })
+  }
+  if (normalizedTask === "literature_import") {
+    return makeLiteratureImportResponse(seed, {
+      importMode,
+      documentName: importDocumentName,
+      documentType: importDocumentType,
+      maxImportedPapers,
+      seedPapers: []
+    })
   }
   if (normalizedTask === "definition") {
     return makeDefinitionResponse(seed, selectedText)

@@ -15,9 +15,11 @@ Reading research papers usually means constant context switching across tabs and
 ## ✅ What It Does
 
 - 📂 Opens local and remote PDFs in a custom PDF.js viewer.
+- 🧪 Includes a project-centric Research Home for literature review workflows.
 - 🖱️ Shows selection actions: `Highlight`, `Define`, `Explain`, `Translate (Figures)`.
 - 🧭 Generates orientation summaries and section-level reading guidance.
 - 💾 Stores per-document cards, glossary entries, walkthrough notes, and orientation cache.
+- 📚 Stores project briefs, curated paper libraries, project-fit analyses, and comparison tables.
 - 🎨 Supports light/dark themes, flow/structure reading modes, and diagnostics.
 - 🤖 Supports `mock` and `OpenAI` LLM providers with fallback handling.
 
@@ -34,6 +36,7 @@ Reading research papers usually means constant context switching across tabs and
 
 Use one of these:
 
+- Extension popup -> **Open Research Home**
 - Extension popup -> **Open CLARIFY Viewer**
 - Extension popup -> **Open current tab (if PDF)**
 - Right-click a PDF link -> **Open PDF in CLARIFY**
@@ -46,7 +49,28 @@ Use one of these:
 
 ## 🧠 How To Use
 
-### Selection actions
+### Research Home Quick Start
+
+Research Home now uses a simple left-rail flow:
+
+- Start screen: create a project, import a review, or reopen a recent project.
+- `Discover`: search for candidate papers.
+- `Screen`: make include/exclude/needs-info decisions.
+- `Extract`: fill the literature matrix for included papers.
+- `Insights`: compare included papers, then synthesize and map contribution space.
+
+Recommended first run:
+
+1. Click `Create project`.
+2. Choose `Search papers`, `Add PDF / URL`, or `Import review`.
+3. Review the screening queue and make one decision.
+4. Open `Extract` and run matrix autofill.
+5. Open `Insights` once you have at least two included papers.
+
+Advanced controls live behind each page's `More` menu or the left-rail `Settings` button.
+Use `How To` in the left rail for the compact checklist.
+
+### Viewer Selection Actions
 
 1. Select text inside the PDF.
 2. Choose one action from the popover:
@@ -55,7 +79,7 @@ Use one of these:
 - `Explain`
 - `Translate (Figures)`
 
-### ⌨️ Keyboard shortcuts
+### ⌨️ Viewer Keyboard Shortcuts
 
 | Action | Windows/Linux | macOS |
 | --- | --- | --- |
@@ -65,7 +89,7 @@ Use one of these:
 | Translate figure/caption selection | `Ctrl+Shift+T` | `Cmd+Shift+T` |
 | Dismiss selection UI | `Esc` | `Esc` |
 
-### Sidebar tabs
+### Viewer Sidebar Tabs
 
 - 📘 `Orientation`: Purpose, contribution, focus bullets, key terms, reading map.
 - 💡 `Explain`: Definition/explanation cards grounded to page/section snippets.
@@ -115,6 +139,25 @@ Debug entry points:
 - Viewer logs: DevTools in the viewer tab
 - Debug bundle: Viewer menu -> **Copy debug info**
 
+### Automated tests
+
+Run the test suite with:
+
+```bash
+npm test
+```
+
+Live matrix-fill smoke test:
+
+```bash
+npm run test:live
+```
+
+Key behavior:
+
+- Tests can read API keys from `.env` (`API_KEY` or `OPENAI_API_KEY`).
+- Runtime extension behavior does **not** use `.env`; it uses the OpenAI key saved in Research Home settings (`chrome.storage.local`).
+
 ## 🧱 Repository Layout
 
 ```text
@@ -147,7 +190,6 @@ Debug entry points:
 
 - Some remote PDFs cannot be fetched due to CORS/auth restrictions.
 - `file://` auto-redirect behavior can vary by browser settings.
-- This is a prototype and does not yet include automated tests.
 
 ## 🗺️ Roadmap Direction
 

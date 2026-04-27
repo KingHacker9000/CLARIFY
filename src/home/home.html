@@ -1,0 +1,643 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CLARIFY Research Home</title>
+    <link rel="stylesheet" href="./home.css" />
+  </head>
+  <body>
+    <div class="appShell">
+      <aside class="appRail" aria-label="Research navigation">
+        <div class="railBrand">
+          <img src="../../assets/icons/logo.png" alt="" class="railLogo" />
+          <span>Clarify</span>
+        </div>
+
+        <button id="openProjectCreate" type="button" class="railCreateButton">New project</button>
+
+        <button type="button" class="railProjectButton pipelineStep isActive" data-view-target="project">
+          <span id="activeProjectLabel">No project selected</span>
+        </button>
+
+        <select id="projectSwitcher" class="railProjectSelect" aria-label="Switch project"></select>
+
+        <nav class="railNav">
+          <button type="button" class="railNavButton pipelineStep" data-view-target="discover">
+            <span>Discover</span>
+            <span id="pipelineQueueDiscover" class="railCount">0</span>
+          </button>
+          <button type="button" class="railNavButton pipelineStep" data-view-target="screen">
+            <span>Screen</span>
+            <span id="pipelineQueueScreen" class="railCount">0</span>
+          </button>
+          <button type="button" class="railNavButton pipelineStep" data-view-target="matrix">
+            <span>Extract</span>
+            <span id="pipelineQueueExtract" class="railCount">0</span>
+          </button>
+          <button type="button" class="railNavButton pipelineStep" data-view-target="compare">
+            <span>Insights</span>
+            <span id="pipelineQueueCompare" class="railCount">0</span>
+          </button>
+        </nav>
+
+        <div class="railFooter">
+          <button id="openTutorial" type="button" class="railGhostButton">How To</button>
+          <button id="openViewer" type="button" class="railGhostButton">Open Viewer</button>
+          <button id="refreshAll" type="button" class="railGhostButton">Refresh</button>
+          <button id="openHomeSettings" type="button" class="railGhostButton">Settings</button>
+          <p id="pipelineMetricsSummary" class="railMetrics"></p>
+          <span id="pipelineQueuePosition" class="visuallyHidden">0</span>
+        </div>
+      </aside>
+
+      <main class="appMain">
+        <span id="homeStatus" class="statusText" aria-live="polite"></span>
+
+        <section id="projectPane" class="pane isActivePane" data-tutorial-target="project">
+          <div id="startPanel" class="startPanel">
+            <img src="../../assets/icons/logo.png" alt="" class="startLogo" />
+            <p class="kicker">Research workspace</p>
+            <h1>Start with a project.</h1>
+            <p class="leadText">Create a focused workspace, add papers, then move through screening and extraction one step at a time.</p>
+            <div class="heroActions">
+              <button id="openProjectCreateHero" type="button">Create project</button>
+              <button id="openImportReviewStart" type="button" class="buttonGhost">Import review</button>
+            </div>
+            <div class="recentProjectsBlock">
+              <div class="sectionHeading">
+                <h2>Recent projects</h2>
+                <label class="inlineToggle">
+                  <input id="showArchivedToggle" type="checkbox" />
+                  Archived
+                </label>
+              </div>
+              <div id="projectList" class="projectList"></div>
+            </div>
+          </div>
+
+          <div id="firstPaperPanel" class="focusPanel" hidden>
+            <p class="kicker">Next step</p>
+            <h1>Add or find your first paper.</h1>
+            <p class="leadText">Search for candidates, add a PDF or URL, or import an existing review document.</p>
+            <div class="firstPaperActions">
+              <button id="startSearchPapers" type="button">Search papers</button>
+              <button id="addLocalPaper" type="button" class="buttonGhost">Add PDF</button>
+              <button id="openImportReviewEmpty" type="button" class="buttonGhost">Import review</button>
+            </div>
+            <div class="urlAddRow">
+              <input id="paperUrlInput" type="url" placeholder="Paste a paper URL..." />
+              <button id="addPaperUrl" type="button">Add URL</button>
+            </div>
+            <div class="nextStepsRow" aria-label="What happens next">
+              <span>Screen</span>
+              <span>Extract</span>
+              <span>Compare</span>
+            </div>
+          </div>
+
+          <div id="projectHomePanel" class="focusPanel" hidden>
+            <div class="sectionHeading">
+              <div>
+                <p class="kicker">Project</p>
+                <h1 id="projectHomeTitle">Keep moving.</h1>
+              </div>
+              <button id="nextActionButton" type="button">Next step</button>
+            </div>
+            <p id="projectHomeSummary" class="leadText"></p>
+            <div class="projectStatsRow">
+              <span id="projectPaperStat">0 papers</span>
+              <span id="projectScreenStat">0 to screen</span>
+              <span id="projectMatrixStat">0 matrix rows</span>
+            </div>
+            <details class="compactDisclosure">
+              <summary>Paper library</summary>
+              <div class="libraryActions">
+                <div class="urlAddRow">
+                  <input id="projectPaperUrlInputMirror" type="url" placeholder="Paste a paper URL..." />
+                  <button id="projectPaperUrlAddMirror" type="button">Add URL</button>
+                </div>
+                <button id="projectAddLocalPaperMirror" type="button" class="buttonGhost">Add PDF</button>
+              </div>
+              <div id="paperList" class="paperList"></div>
+              <span id="paperCount" class="subtleText"></span>
+            </details>
+          </div>
+        </section>
+
+        <section id="discoverPane" class="pane" data-tutorial-target="discover">
+          <div class="focusHeader">
+            <div>
+              <p class="kicker">Discover</p>
+              <h1>Find papers for this project.</h1>
+            </div>
+            <button id="discoverMoreButton" type="button" class="moreButton" data-toggle-advanced="discoverAdvanced">More</button>
+          </div>
+          <div class="searchSurface">
+            <input id="discoverKeywords" type="text" placeholder="Search keywords, method, task, dataset..." />
+            <button id="discoverRunSearch" type="button">Search</button>
+          </div>
+          <span id="discoverMeta" class="subtleText"></span>
+          <details id="discoverAdvanced" class="compactDisclosure advancedDisclosure">
+            <summary>Advanced discovery</summary>
+            <div class="discoverSavedBar">
+              <input id="discoverMustHave" type="text" placeholder="Must-have terms" />
+              <input id="discoverExcludeTerms" type="text" placeholder="Exclude terms" />
+              <input id="discoverYearFrom" type="number" min="1800" max="2100" placeholder="Year from" />
+              <input id="discoverYearTo" type="number" min="1800" max="2100" placeholder="Year to" />
+              <input id="discoverVenueFilter" type="text" placeholder="Venue filter" />
+              <select id="discoverTypeFilter">
+                <option value="all">All types</option>
+                <option value="preprint">Preprint</option>
+                <option value="conference">Conference</option>
+                <option value="journal">Journal</option>
+              </select>
+            </div>
+            <div class="discoverSavedBar">
+              <button id="discoverSaveSearch" type="button" class="buttonGhost">Save Search</button>
+              <button id="discoverDedupe" type="button" class="buttonGhost">Dedupe</button>
+              <select id="discoverSavedSearchSelect"></select>
+              <button id="discoverLoadSavedSearch" type="button" class="buttonGhost">Load</button>
+              <button id="discoverRunSavedSearchNow" type="button">Run Selected</button>
+              <button id="discoverRunSavedSearches" type="button" class="buttonGhost">Run Due</button>
+              <button id="discoverDeleteSavedSearch" type="button" class="buttonDanger">Delete</button>
+            </div>
+            <div class="discoverSavedBar">
+              <label class="inlineToggle">
+                <input id="discoverSavedAutoEnabled" type="checkbox" />
+                Auto
+              </label>
+              <input id="discoverSavedIntervalDays" type="number" min="1" max="30" placeholder="Interval days" />
+              <select id="discoverGroupFilter">
+                <option value="all">All candidates</option>
+                <option value="new_this_run">New this run</option>
+                <option value="likely_duplicates">Likely duplicates</option>
+                <option value="promoted">Already queued</option>
+              </select>
+              <select id="discoverSeedPaperSelect"></select>
+              <select id="discoverCitationDirection">
+                <option value="both">Citations: backward + forward</option>
+                <option value="backward">Citations: backward only</option>
+                <option value="forward">Citations: forward only</option>
+              </select>
+              <button id="discoverExpandCitations" type="button" class="buttonGhost">Expand from Seed</button>
+            </div>
+          </details>
+          <div id="discoverRunReport" class="subtleText"></div>
+          <div id="discoverTableWrap" class="matrixTableWrap"></div>
+          <details class="compactDisclosure advancedDisclosure">
+            <summary>Citation graph</summary>
+            <div id="discoverGraphWrap" class="matrixTableWrap"></div>
+          </details>
+        </section>
+
+        <section id="screenPane" class="pane" data-tutorial-target="screen">
+          <div class="focusHeader">
+            <div>
+              <p class="kicker">Screen</p>
+              <h1>Review one paper at a time.</h1>
+            </div>
+            <button id="screenMoreButton" type="button" class="moreButton" data-toggle-advanced="screenAdvanced">More</button>
+          </div>
+          <span id="screenMeta" class="subtleText"></span>
+          <div id="screenEvidencePane" class="analysisPanel evidencePanel"></div>
+          <div class="decisionBar">
+            <button id="screenDecisionInclude" type="button">Include</button>
+            <button id="screenDecisionExclude" type="button" class="buttonDanger">Exclude</button>
+            <button id="screenDecisionNeedsInfo" type="button" class="buttonGhost">Needs info</button>
+            <button id="screenDecisionNext" type="button" class="buttonGhost">Next</button>
+          </div>
+          <details id="screenAdvanced" class="compactDisclosure advancedDisclosure">
+            <summary>Screening details</summary>
+            <div class="screenControls">
+              <select id="screenReasonSelect"></select>
+              <input id="screenQualityScore" type="number" min="0" max="100" placeholder="Quality score (0-100)" />
+              <input id="screenDecisionNote" type="text" placeholder="Decision note (optional)" />
+              <button id="screenSuggestDecision" type="button" class="buttonGhost">Suggest</button>
+            </div>
+            <div class="discoverSavedBar">
+              <input id="screenReasonCode" type="text" placeholder="reason_code" />
+              <input id="screenReasonLabel" type="text" placeholder="Label" />
+              <input id="screenReasonDescription" type="text" placeholder="Description" />
+              <button id="screenAddReason" type="button" class="buttonGhost">Add Reason</button>
+            </div>
+            <div id="screenReasonLibraryList" class="projectList"></div>
+          </details>
+          <div id="screenQueueWrap" class="matrixTableWrap"></div>
+        </section>
+
+        <section id="matrixPane" class="pane" data-tutorial-target="matrix">
+          <div class="focusHeader">
+            <div>
+              <p class="kicker">Extract</p>
+              <h1>Fill the literature matrix.</h1>
+            </div>
+            <button id="matrixMoreButton" type="button" class="moreButton" data-toggle-advanced="matrixAdvanced">More</button>
+          </div>
+          <div id="matrixSetupPanel" class="matrixSetupPanel" hidden>
+            <div>
+              <p class="kicker">Matrix setup</p>
+              <h2>Set up your criteria table.</h2>
+              <p>Start blank, add criteria manually, or import a CSV and review how each column should be used.</p>
+            </div>
+            <div class="matrixSetupActions">
+              <button id="matrixSetupImportCsv" type="button">Import CSV</button>
+              <button id="matrixSetupAddColumn" type="button" class="buttonGhost">Add Criterion</button>
+              <button id="matrixStartBlank" type="button" class="buttonGhost">Start Blank Matrix</button>
+            </div>
+          </div>
+          <div class="matrixActionBar">
+            <input id="matrixGlobalFilter" type="search" placeholder="Filter rows..." />
+            <button id="matrixAddRow" type="button" class="buttonGhost">Add Row</button>
+            <button id="matrixToolbarAddColumn" type="button" class="buttonGhost">Add Criterion</button>
+            <button id="matrixToolbarImportCsv" type="button" class="buttonGhost">Import CSV</button>
+            <button id="matrixOpenColumns" type="button" class="buttonGhost">Edit Columns</button>
+            <button id="matrixOpenTrash" type="button" class="buttonGhost">Trash</button>
+            <select id="matrixDensitySelect" aria-label="Matrix density">
+              <option value="comfortable">Comfortable</option>
+              <option value="compact">Compact</option>
+            </select>
+            <button id="matrixRunAutofillAll" type="button">Auto-fill All</button>
+          </div>
+          <span id="matrixMeta" class="subtleText"></span>
+          <div id="matrixUndoBar" class="matrixUndoBar" hidden>
+            <span id="matrixUndoText"></span>
+            <button id="matrixUndoRestore" type="button" class="buttonGhost">Undo</button>
+          </div>
+          <div id="matrixSchemaHint" class="matrixSchemaHint" hidden>
+            <p>No criteria columns configured yet. Add criteria once, then every paper row uses the same matrix schema.</p>
+            <div class="rowButtons">
+              <button id="matrixQuickImportCsv" type="button">Import CSV</button>
+              <button id="matrixQuickAddColumn" type="button" class="buttonGhost">Add criterion</button>
+              <button id="matrixQuickOpenSettings" type="button" class="buttonGhost">Columns</button>
+            </div>
+          </div>
+          <div id="matrixTableWrap" class="matrixTableWrap"></div>
+          <details id="matrixAdvanced" class="compactDisclosure advancedDisclosure">
+            <summary>Matrix tools</summary>
+            <div class="matrixTopBar">
+              <button id="matrixClearFilters" type="button" class="buttonGhost">Clear Filters</button>
+              <label class="inlineToggle">
+                <input id="matrixShowExcluded" type="checkbox" />
+                Show excluded
+              </label>
+              <button id="matrixRunClustering" type="button" class="buttonGhost">Run Clustering</button>
+              <button id="matrixExportCsv" type="button" class="buttonGhost">Export CSV</button>
+              <button id="matrixExportXlsx" type="button" class="buttonGhost">Export XLSX</button>
+            </div>
+            <span id="matrixClusterMeta" class="subtleText"></span>
+            <div class="matrixClusterFilters">
+              <input id="matrixClusterFilter" type="text" placeholder="Filter by cluster id..." />
+            </div>
+            <canvas id="matrixClusterCanvas" width="960" height="320"></canvas>
+          </details>
+          <details id="matrixSettings" class="compactDisclosure advancedDisclosure matrixSettingsDisclosure">
+            <summary>Matrix settings</summary>
+            <div class="matrixSettingsBody">
+              <section class="matrixSection">
+                <h3>Schema</h3>
+                <p class="subtleText">Configure shared criteria columns for every row in this project matrix.</p>
+                <div class="matrixSchemaBar">
+                  <select id="matrixTemplateSelect"></select>
+                  <button id="matrixApplyTemplate" type="button">Apply Template</button>
+                  <button id="matrixSaveTemplate" type="button" class="buttonGhost">Save Template</button>
+                  <button id="matrixImportCsv" type="button" class="buttonGhost">Bootstrap CSV</button>
+                  <button id="matrixAddColumn" type="button" class="buttonGhost">Add Criterion</button>
+                </div>
+                <div id="matrixSchemaList" class="matrixSchemaList"></div>
+              </section>
+
+              <section class="matrixSection">
+                <h3>Google Sheets sync</h3>
+                <p class="subtleText">Optionally connect a sheet to keep matrix rows synced outside Clarify.</p>
+                <div class="matrixSheetsBar">
+                  <input id="matrixGoogleClientId" type="text" placeholder="Google OAuth Client ID" />
+                  <input id="matrixGoogleApiKey" type="text" placeholder="Google API Key (optional)" />
+                  <button id="matrixConnectGoogle" type="button">Connect Google</button>
+                  <button id="matrixDisconnectGoogle" type="button" class="buttonGhost">Disconnect</button>
+                </div>
+                <div class="matrixSheetsBar">
+                  <input id="matrixSheetSearch" type="search" placeholder="Search spreadsheets..." />
+                  <button id="matrixLoadSheets" type="button" class="buttonGhost">Load Sheets</button>
+                  <select id="matrixSpreadsheetSelect"></select>
+                  <select id="matrixWorksheetSelect"></select>
+                  <label class="inlineToggle">
+                    <input id="matrixAutoSyncToggle" type="checkbox" />
+                    Auto-sync
+                  </label>
+                  <button id="matrixSyncNow" type="button">Sync Now</button>
+                </div>
+                <div id="matrixSyncReport" class="subtleText"></div>
+              </section>
+            </div>
+          </details>
+        </section>
+
+        <section id="comparePane" class="pane" data-tutorial-target="compare">
+          <div class="focusHeader">
+            <div>
+              <p class="kicker">Insights</p>
+              <h1>Compare included papers.</h1>
+            </div>
+            <span id="compareMeta" class="subtleText"></span>
+          </div>
+          <div class="decisionBar">
+            <button id="runCompare" type="button">Run comparison</button>
+            <button type="button" class="buttonGhost" data-insights-stage="synthesis">Synthesis</button>
+            <button type="button" class="buttonGhost" data-insights-stage="contribution">Contribution</button>
+          </div>
+          <details class="compactDisclosure advancedDisclosure">
+            <summary>Export and cache</summary>
+            <div class="rowButtons">
+              <button id="exportMarkdown" type="button" disabled>Export Markdown</button>
+              <button id="exportCsv" type="button" disabled>Export CSV</button>
+              <button id="clearCompareCache" type="button" class="buttonGhost">Clear Cache</button>
+            </div>
+          </details>
+          <div id="compareWarnings" class="warnings"></div>
+          <div id="compareOutput" class="compareOutput"></div>
+        </section>
+
+        <section id="synthesisPane" class="pane" data-tutorial-target="synthesis" data-insights-mode="synthesis">
+          <div id="synthesisOverviewBlocks">
+            <div class="focusHeader">
+              <div>
+                <p class="kicker">Synthesis</p>
+                <h1>Use comparison results.</h1>
+              </div>
+              <button type="button" class="buttonGhost" data-insights-stage="compare">Back to compare</button>
+            </div>
+            <div id="synthesisSummary" class="synthesisBlock"></div>
+            <div class="synthesisBlock">
+              <h3>Consensus</h3>
+              <ul id="synthesisConsensus"></ul>
+            </div>
+            <div class="synthesisBlock">
+              <h3>Disagreements</h3>
+              <ul id="synthesisContradictions"></ul>
+            </div>
+            <div class="synthesisBlock">
+              <h3>Evidence Gaps</h3>
+              <ul id="synthesisGaps"></ul>
+            </div>
+          </div>
+
+          <div id="contributionSection" class="synthesisBlock">
+            <div class="focusHeader">
+              <div>
+                <p class="kicker">Contribution</p>
+                <h1>Map your opening.</h1>
+              </div>
+              <span id="contributionMeta" class="subtleText"></span>
+            </div>
+            <div class="decisionBar">
+              <button id="runContributionMap" type="button">Run Contribution Map</button>
+              <button id="exportContributionMd" type="button" class="buttonGhost">Export Markdown</button>
+              <button id="exportContributionCsv" type="button" class="buttonGhost">Export CSV</button>
+            </div>
+            <div class="synthesisBlock">
+              <h3>Cluster Summaries</h3>
+              <ul id="contributionClusters"></ul>
+            </div>
+            <div class="synthesisBlock">
+              <h3>Underexplored Zones</h3>
+              <ul id="contributionZones"></ul>
+            </div>
+            <div class="synthesisBlock">
+              <h3>Differentiation Ideas</h3>
+              <ul id="contributionIdeas"></ul>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <aside id="checklistDrawer" class="sideDrawer" hidden>
+      <div class="drawerHeader">
+        <h3>Getting Started</h3>
+        <button id="closeChecklist" type="button" class="iconButton" aria-label="Close checklist">X</button>
+      </div>
+      <ul id="checklistList" class="checklistList"></ul>
+    </aside>
+    <div id="checklistBackdrop" class="drawerBackdrop" hidden></div>
+
+    <aside id="homeSettingsDrawer" class="sideDrawer settingsDrawer" hidden>
+      <div class="drawerHeader">
+        <h3>Settings</h3>
+        <button id="closeHomeSettings" type="button" class="iconButton" aria-label="Close settings">X</button>
+      </div>
+
+      <section class="settingsSection">
+        <h4>Appearance</h4>
+        <div class="settingsGrid">
+          <label>
+            Density
+            <select id="homeDensitySetting">
+              <option value="compact">Compact</option>
+              <option value="comfortable">Comfortable</option>
+            </select>
+          </label>
+          <label>
+            Accent Preset
+            <select id="homeAccentSetting">
+              <option value="ocean">Ocean</option>
+              <option value="forest">Forest</option>
+              <option value="sunset">Sunset</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section class="settingsSection">
+        <h4>Workflow Defaults</h4>
+        <div class="settingsGrid">
+          <label>
+            Start workflow tab on
+            <select id="homeDefaultWorkflowStageSetting">
+              <option value="discover">Discover</option>
+              <option value="screen">Screen</option>
+              <option value="matrix">Extract</option>
+            </select>
+          </label>
+          <label>
+            Start insights tab on
+            <select id="homeDefaultInsightsStageSetting">
+              <option value="compare">Compare</option>
+              <option value="synthesis">Synthesis</option>
+              <option value="contribution">Contribution</option>
+            </select>
+          </label>
+          <label class="inlineToggle">
+            <input id="homeAdvancedCollapsedSetting" type="checkbox" />
+            Collapse advanced controls by default
+          </label>
+          <label class="inlineToggle">
+            <input id="homeChecklistEnabledSetting" type="checkbox" />
+            Show checklist by default
+          </label>
+        </div>
+      </section>
+
+      <section class="settingsSection">
+        <h4>Integrations</h4>
+        <div class="apiSettingsBlock">
+          <label>
+            LLM mode
+            <select id="homeLlmModeSelect">
+              <option value="auto">Auto</option>
+              <option value="mock">Mock</option>
+              <option id="homeLlmModeOpenAIOption" value="openai">OpenAI</option>
+            </select>
+          </label>
+          <label>
+            OpenAI model
+            <select id="homeOpenaiModelPreset">
+              <option value="gpt-4.1-mini">gpt-4.1-mini (recommended)</option>
+              <option value="gpt-4.1">gpt-4.1</option>
+              <option value="gpt-4o-mini">gpt-4o-mini</option>
+              <option value="custom">Custom</option>
+            </select>
+          </label>
+          <label id="homeOpenaiModelCustomWrap" hidden>
+            Custom model id
+            <input
+              id="homeOpenaiModelCustom"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="gpt-4.1-mini"
+            />
+          </label>
+          <label>
+            OpenAI API key
+            <input
+              id="homeOpenaiApiKeyInput"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="sk-..."
+            />
+          </label>
+          <div class="apiSettingsActions">
+            <button id="homeSaveApiKey" type="button">Save Key</button>
+            <button id="homeClearApiKey" type="button" class="buttonGhost">Clear</button>
+          </div>
+          <span id="homeApiKeyStatus" class="subtleText" aria-live="polite">No key set</span>
+        </div>
+      </section>
+    </aside>
+    <div id="homeSettingsBackdrop" class="drawerBackdrop" hidden></div>
+
+    <div id="llmRuntimeFlag" class="llmRuntimeFlag" data-state="ready" role="status" aria-live="polite">LLM status</div>
+
+    <div id="projectModal" class="wizardOverlay" hidden>
+      <div class="projectModalCard" role="dialog" aria-modal="true" aria-labelledby="projectFormTitle">
+        <div class="wizardHeader">
+          <p class="wizardStepLabel">Project Setup</p>
+          <button id="closeProjectModal" type="button" class="iconButton" aria-label="Close project form">X</button>
+        </div>
+        <form id="projectForm" class="projectForm">
+          <h3 id="projectFormTitle">New project</h3>
+          <input id="projectName" type="text" placeholder="Project name" required />
+          <textarea id="projectQuestion" rows="2" placeholder="Research question"></textarea>
+          <textarea id="projectObjective" rows="2" placeholder="Objective"></textarea>
+          <textarea id="projectScope" rows="2" placeholder="Scope notes"></textarea>
+          <textarea id="projectKeyTerms" rows="2" placeholder="Key terms (comma separated)"></textarea>
+          <textarea id="projectRubric" rows="3" placeholder="Comparison rubric (one criterion per line)"></textarea>
+          <div class="rowButtons">
+            <button type="submit" id="saveProject">Save project</button>
+            <button type="button" id="resetProjectForm" class="buttonGhost">Clear</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div id="matrixCsvImportModal" class="wizardOverlay" hidden>
+      <div class="projectModalCard matrixCsvImportCard" role="dialog" aria-modal="true" aria-labelledby="matrixCsvImportTitle">
+        <div class="wizardHeader">
+          <p class="wizardStepLabel">CSV Import</p>
+          <button id="matrixCancelCsvImport" type="button" class="iconButton" aria-label="Close CSV import">X</button>
+        </div>
+        <div class="matrixCsvImportHeader">
+          <div>
+            <h3 id="matrixCsvImportTitle">Review column mapping</h3>
+            <p id="matrixCsvImportMeta" class="subtleText"></p>
+          </div>
+          <div class="rowButtons">
+            <button id="matrixConfirmCsvImport" type="button">Import linked rows</button>
+            <button id="matrixCancelCsvImportSecondary" type="button" class="buttonGhost">Cancel</button>
+          </div>
+        </div>
+        <div id="matrixCsvMappingWrap" class="matrixCsvMappingWrap"></div>
+      </div>
+    </div>
+
+    <div id="matrixAutofillModal" class="wizardOverlay" hidden>
+      <div class="projectModalCard matrixAutofillCard" role="dialog" aria-modal="true" aria-labelledby="matrixAutofillTitle">
+        <div class="wizardHeader">
+          <p class="wizardStepLabel">Auto-fill Columns</p>
+          <button id="matrixAutofillClose" type="button" class="iconButton" aria-label="Cancel auto-fill">X</button>
+        </div>
+        <div>
+          <h3 id="matrixAutofillTitle">How should filled columns be handled?</h3>
+          <p id="matrixAutofillPaperTitle" class="subtleText"></p>
+        </div>
+        <p class="subtleText">This row already has filled criteria. Choose whether to leave those values alone or replace them with a new auto-fill pass.</p>
+        <div class="matrixAutofillChoices">
+          <button id="matrixAutofillIgnoreFilled" type="button">Ignore filled columns</button>
+          <button id="matrixAutofillOverwriteFilled" type="button" class="buttonGhost">Overwrite filled columns</button>
+          <button id="matrixAutofillCancel" type="button" class="buttonGhost">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <aside id="matrixRowDrawer" class="sideDrawer matrixDrawer" hidden aria-label="Matrix row details">
+      <div class="drawerHeader">
+        <h3 id="matrixRowDrawerTitle">Matrix Row</h3>
+        <button id="closeMatrixRowDrawer" type="button" class="iconButton" aria-label="Close row drawer">X</button>
+      </div>
+      <div id="matrixRowDrawerBody" class="matrixDrawerBody"></div>
+    </aside>
+
+    <aside id="matrixColumnsDrawer" class="sideDrawer matrixDrawer" hidden aria-label="Matrix columns">
+      <div class="drawerHeader">
+        <h3>Criteria Columns</h3>
+        <button id="closeMatrixColumnsDrawer" type="button" class="iconButton" aria-label="Close columns drawer">X</button>
+      </div>
+      <div class="matrixDrawerToolbar">
+        <button id="matrixColumnsAddCriterion" type="button">Add Criterion</button>
+        <button id="matrixColumnsImportCsv" type="button" class="buttonGhost">Import CSV</button>
+      </div>
+      <div id="matrixColumnsDrawerList" class="matrixDrawerBody"></div>
+    </aside>
+
+    <aside id="matrixTrashDrawer" class="sideDrawer matrixDrawer" hidden aria-label="Matrix trash">
+      <div class="drawerHeader">
+        <h3>Trash</h3>
+        <button id="closeMatrixTrashDrawer" type="button" class="iconButton" aria-label="Close trash drawer">X</button>
+      </div>
+      <div id="matrixTrashDrawerBody" class="matrixDrawerBody"></div>
+    </aside>
+    <div id="matrixDrawerBackdrop" class="drawerBackdrop" hidden></div>
+
+    <select id="importTargetMode" hidden>
+      <option value="active_project">Import into active project</option>
+      <option value="new_project">Create new project from document</option>
+    </select>
+    <button id="importLiteratureDocument" type="button" hidden>Import Review Document</button>
+    <button id="openChecklistFromWorkspace" type="button" hidden>Open</button>
+    <ul id="workspaceChecklistList" hidden></ul>
+    <ul id="workspaceActivityList" hidden></ul>
+    <section id="workflowStageBar" hidden></section>
+    <section id="insightsStageBar" hidden>
+      <button type="button" data-insights-stage="compare">Compare</button>
+      <button type="button" data-insights-stage="synthesis">Synthesis</button>
+      <button type="button" data-insights-stage="contribution">Contribution</button>
+    </section>
+
+    <input id="localPaperInput" type="file" accept="application/pdf" hidden />
+    <input id="importDocumentInput" type="file" hidden />
+    <input id="matrixImportCsvInput" type="file" accept=".csv,text/csv" hidden />
+    <script type="module" src="./home.js"></script>
+  </body>
+</html>

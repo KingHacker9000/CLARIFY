@@ -228,6 +228,135 @@ html {
   text-overflow: ellipsis;
 }
 
+.llmRuntimeFlag {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 80;
+  max-width: min(320px, calc(100vw - 36px));
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(252, 252, 250, 0.95);
+  color: var(--text);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.16);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.llmRuntimeFlag::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #227a43;
+}
+
+.llmRuntimeFlag[data-state="missing_key"],
+.llmRuntimeFlag[data-state="mock"],
+.llmRuntimeFlag[data-state="fallback"],
+.llmRuntimeFlag[data-state="rate_limit"] {
+  border-color: #d6ad57;
+  background: rgba(255, 248, 226, 0.96);
+  color: #644411;
+}
+
+.llmRuntimeFlag[data-state="missing_key"]::before,
+.llmRuntimeFlag[data-state="mock"]::before,
+.llmRuntimeFlag[data-state="fallback"]::before,
+.llmRuntimeFlag[data-state="rate_limit"]::before {
+  background: #9b641a;
+}
+
+.llmRuntimeFlag[data-state="quota"] {
+  border-color: #d38f85;
+  background: rgba(253, 231, 228, 0.97);
+  color: #84241b;
+}
+
+.llmRuntimeFlag[data-state="auth"] {
+  border-color: #d38f85;
+  background: rgba(253, 231, 228, 0.97);
+  color: #84241b;
+}
+
+.llmRuntimeFlag[data-state="quota"]::before {
+  background: #b42318;
+}
+
+.llmRuntimeFlag[data-state="auth"]::before {
+  background: #b42318;
+}
+
+body[data-theme="dark"] .llmRuntimeFlag {
+  background: rgba(43, 43, 43, 0.96);
+}
+
+body[data-theme="dark"] .llmRuntimeFlag[data-state="missing_key"],
+body[data-theme="dark"] .llmRuntimeFlag[data-state="mock"],
+body[data-theme="dark"] .llmRuntimeFlag[data-state="fallback"],
+body[data-theme="dark"] .llmRuntimeFlag[data-state="rate_limit"] {
+  background: rgba(63, 51, 28, 0.96);
+  color: #f4d38d;
+}
+
+body[data-theme="dark"] .llmRuntimeFlag[data-state="quota"] {
+  background: rgba(72, 32, 29, 0.96);
+  color: #f1aaa2;
+}
+
+body[data-theme="dark"] .llmRuntimeFlag[data-state="auth"] {
+  background: rgba(72, 32, 29, 0.96);
+  color: #f1aaa2;
+}
+
+.projectContext {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.projectChip {
+  max-width: 210px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  border-radius: 999px !important;
+  padding: 4px 10px !important;
+}
+
+.projectChipMenu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 240px;
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.1);
+  z-index: 24;
+}
+
+.projectChipMenu[hidden] {
+  display: none;
+}
+
+.projectChipMenu button {
+  width: 100%;
+  text-align: left;
+}
+
 .toolbarRight {
   position: relative;
   display: flex;
@@ -2449,6 +2578,54 @@ body[data-mode="structure"] .walkthroughHeader {
   gap: 10px;
 }
 
+.projectPanel {
+  display: grid;
+  gap: 10px;
+}
+
+.projectSection {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.projectSectionTitle {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.projectStatRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.projectStatChip {
+  border: 1px solid #cad8be;
+  border-radius: 999px;
+  background: #f4faeb;
+  color: #445841;
+  font-size: 12px;
+  padding: 2px 8px;
+}
+
+.projectParagraph {
+  margin: 0;
+  line-height: 1.4;
+}
+
+.projectList {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.35;
+}
+
 .glossaryTerm {
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -2633,6 +2810,10 @@ body[data-theme="dark"] .diagnosticsMenu {
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
 }
 
+body[data-theme="dark"] .projectChipMenu {
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
+}
+
 body[data-theme="dark"] #wholePdfSettings,
 body[data-theme="dark"] .diagnosticsMenu select,
 body[data-theme="dark"] .diagnosticsMenu .apiKeyInput {
@@ -2722,6 +2903,17 @@ body[data-theme="dark"] .orientationMapIntentBubble {
   border-color: #444;
   color: var(--text);
   box-shadow: none;
+}
+
+body[data-theme="dark"] .projectSection {
+  background: #2f2f2f;
+  border-color: #444;
+}
+
+body[data-theme="dark"] .projectStatChip {
+  border-color: #4a5d50;
+  background: #333f37;
+  color: #d3e8da;
 }
 
 body[data-theme="dark"] .pdfPageShell[data-rendered="false"] .pdfPageSurface {

@@ -2,6 +2,7 @@ import { createLogger } from "../shared/diagnostics.js";
 import { getSettings, setSettings } from "../shared/storage.js";
 
 const openViewerBtn = document.getElementById("openViewer");
+const openHomeBtn = document.getElementById("openHome");
 const openFromTabBtn = document.getElementById("openFromTab");
 const themeToggleBtn = document.getElementById("themeToggle");
 const capturePdfsToggle = document.getElementById("capturePdfsToggle");
@@ -48,6 +49,12 @@ void loadPopupState();
 openViewerBtn.addEventListener("click", async () => {
   logger.info("Open viewer button clicked");
   await chrome.runtime.sendMessage({ type: "OPEN_VIEWER" });
+  window.close();
+});
+
+openHomeBtn?.addEventListener("click", async () => {
+  logger.info("Open research home button clicked");
+  await chrome.runtime.sendMessage({ type: "OPEN_HOME" });
   window.close();
 });
 

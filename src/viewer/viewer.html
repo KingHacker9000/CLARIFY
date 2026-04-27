@@ -101,6 +101,24 @@
           </div>
           <span id="status">No PDF loaded</span>
           <span id="contextScopeStatus" class="contextScopeStatus">Context: Selection</span>
+          <div class="projectContext">
+            <button
+              id="activeProjectChip"
+              class="projectChip"
+              type="button"
+              aria-label="Active Project"
+              aria-expanded="false"
+            >
+              Project: None
+            </button>
+            <div id="projectChipMenu" class="projectChipMenu" hidden>
+              <p id="activeProjectSummary" class="helperText">No active project.</p>
+              <button id="projectAddCurrent" type="button">Add paper to project</button>
+              <button id="projectRemoveCurrent" type="button">Remove paper from project</button>
+              <button id="projectRefreshFit" type="button">Refresh project fit</button>
+              <button id="projectOpenHome" type="button">Open Research Home</button>
+            </div>
+          </div>
           <div class="toolbarRight">
             <button
               id="themeToggle"
@@ -165,6 +183,26 @@
                   <option id="llmModeOpenAIOption" value="openai">OpenAI</option>
                 </select>
                 <span id="llmModeHelp" class="helperText" hidden>Set key to enable.</span>
+
+                <label class="settingLabel" for="openaiModelPresetSelect">OpenAI model</label>
+                <select id="openaiModelPresetSelect">
+                  <option value="gpt-4.1-mini">gpt-4.1-mini (recommended)</option>
+                  <option value="gpt-4.1">gpt-4.1</option>
+                  <option value="gpt-4o-mini">gpt-4o-mini</option>
+                  <option value="custom">Custom</option>
+                </select>
+                <label id="openaiModelCustomWrap" class="settingLabel" for="openaiModelCustomInput" hidden>
+                  Custom model id
+                </label>
+                <input
+                  id="openaiModelCustomInput"
+                  class="apiKeyInput"
+                  type="text"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="gpt-4.1-mini"
+                  hidden
+                />
 
                 <div class="settingGroup">
                   <label class="settingLabel" for="contextScopeSelect">Context Scope</label>
@@ -259,6 +297,7 @@
           <button class="tab" data-tab="glossary">&#128278;</button>
           <button class="tab" data-tab="figures">&#128202;</button>
           <button class="tab" data-tab="assist">&#128172;</button>
+          <button class="tab" data-tab="project">&#128269;</button>
           <button id="walkthroughTabButton" class="tab" data-tab="walkthrough">&#129513;</button>
         </div>
 
@@ -268,6 +307,7 @@
       </aside>
     </div>
 
+    <div id="llmRuntimeFlag" class="llmRuntimeFlag" data-state="ready" role="status" aria-live="polite">LLM status</div>
     <input id="fileInput" type="file" accept="application/pdf" hidden />
     <script type="module" src="./viewer.js"></script>
   </body>

@@ -1,0 +1,9 @@
+{
+  "name": "clarify",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/openai_provider.test.mjs tests/llm_runtime_behavior.test.mjs",
+    "test:live": "node --test tests/live_matrix_smoke.test.mjs"
+  }
+}

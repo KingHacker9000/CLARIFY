@@ -3,23 +3,31 @@ import { createLogger, getDebugInfo } from "../shared/diagnostics.js";
 import { initSelectionSystem } from "./selection.js";
 import { clearHighlights, collectHighlightMatchesOnPages, highlightOnPage } from "./highlight.js";
 import {
+  addProjectPaper,
   addGlossaryTerm,
   appendCard,
   clearOpenAIKey,
   getCards,
+  getActiveProjectId,
   getGlossaryTerms,
   getOpenAIFileId,
   getOutline,
+  getProjectById,
+  getProjectPaperAnalysis,
+  getProjectPaperByDocId,
   getIntents,
   getOrientationCache,
   getSettings,
   getVerbose,
   getWalkthrough,
+  removeProjectPaper,
   setOutline,
+  setProjectPaperAnalysis,
   removeCard,
   setOpenAIFileId,
   setOrientationCache,
   setWalkthrough,
+  setActiveProjectId,
   removeGlossaryTerm,
   setSettings,
   setVerbose,
@@ -27,6 +35,7 @@ import {
 } from "../shared/storage.js";
 import { deriveDocId, makeId, normalizeCard } from "../shared/models.js";
 import { generateLLM } from "../shared/llm/index.js";
+import { buildLlmRuntimeStatus, LLM_RUNTIME_STATUS_EVENT } from "../shared/llm_runtime_status.js";
 import { uploadPdfToOpenAI } from "../shared/openai/files.js";
 import { getPdfBytes, REMOTE_BYTES_BLOCKED } from "./pdf_bytes.js";
 import { extractOutline } from "./outline.js";
@@ -96,12 +105,15 @@ const FIGURE_HINT_MAX_SELECTED_TEXT = 260;
 const FIGURE_HINT_MAX_CONTEXT_TEXT = 780;
 const ASSIST_CHAT_MAX_MESSAGES = 32;
 const ASSIST_CHAT_CONTEXT_MAX_CHARS = 1800;
+const PROJECT_CONTEXT_SNIPPET_MAX_CHARS = 1600;
 const REMOTE_LOAD_ERROR_MESSAGE =
   "This PDF could not be loaded due to site restrictions (CORS/login). Try downloading and opening it locally.";
 const FILE_URL_LOAD_HINT_MESSAGE =
   "If this file URL doesn't load, open it locally using the Open PDF button.";
 const WHOLE_PDF_LOCAL_REQUIRED_MESSAGE =
   "Whole PDF requires local access. Download this PDF and open it locally.";
+const OPENAI_MODEL_PRESETS = Object.freeze(["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini"]);
+const DEFAULT_OPENAI_MODEL = OPENAI_MODEL_PRESETS[0];
 const ICON_PIN = "\uD83D\uDCCC";
 const ICON_COPY = "\uD83D\uDCCB";
 const ICON_DELETE = "\uD83D\uDDD1\uFE0F";
@@ -134,6 +146,14 @@ const sidebarResizeHandle = document.getElementById("sidebarResizeHandle");
 const panel = document.getElementById("panel");
 const statusEl = document.getElementById("status");
 const contextScopeStatusEl = document.getElementById("contextScopeStatus");
+const llmRuntimeFlag = document.getElementById("llmRuntimeFlag");
+const activeProjectChip = document.getElementById("activeProjectChip");
+const projectChipMenu = document.getElementById("projectChipMenu");
+const activeProjectSummaryEl = document.getElementById("activeProjectSummary");
+const projectAddCurrentBtn = document.getElementById("projectAddCurrent");
+const projectRemoveCurrentBtn = document.getElementById("projectRemoveCurrent");
+const projectRefreshFitBtn = document.getElementById("projectRefreshFit");
+const projectOpenHomeBtn = document.getElementById("projectOpenHome");
 const toolbarModeFlowBtn = document.getElementById("toolbarModeFlow");
 const toolbarModeStructureBtn = document.getElementById("toolbarModeStructure");
 const toolbarModeWorksheetBtn = document.getElementById("toolbarModeWorksheet");
@@ -167,6 +187,9 @@ const readingModeWorksheetRadio = document.getElementById("readingModeWorksheet"
 const llmModeSelect = document.getElementById("llmModeSelect");
 const llmModeOpenAIOption = document.getElementById("llmModeOpenAIOption");
 const llmModeHelpEl = document.getElementById("llmModeHelp");
+const openaiModelPresetSelect = document.getElementById("openaiModelPresetSelect");
+const openaiModelCustomWrap = document.getElementById("openaiModelCustomWrap");
+const openaiModelCustomInput = document.getElementById("openaiModelCustomInput");
 const openaiApiKeyInput = document.getElementById("openaiApiKeyInput");
 const saveApiKeyBtn = document.getElementById("saveApiKey");
 const clearApiKeyBtn = document.getElementById("clearApiKey");
@@ -311,6 +334,17 @@ function createAssistUiState() {
   }
 }
 
+function createProjectUiState() {
+  return {
+    projectId: "",
+    project: null,
+    paper: null,
+    analysis: null,
+    loading: false,
+    warnings: []
+  }
+}
+
 const sidebarUiState = {
   docId: "unknown",
   cards: [],
@@ -319,6 +353,7 @@ const sidebarUiState = {
   walkthrough: createWalkthroughUiState(),
   worksheet: createWorksheetUiState(),
   assist: createAssistUiState(),
+  project: createProjectUiState(),
   toastMessage: "",
   activeTab: "orientation",
   lastTabByMode: {
@@ -331,6 +366,7 @@ const sidebarUiState = {
 let recentJumpState = null;
 let orientationRunToken = 0;
 let worksheetRunToken = 0;
+let projectRunToken = 0;
 let panelToastTimer = null;
 let sectionIntentManager = null
 let sectionIntentManagerDocId = ""
@@ -521,6 +557,43 @@ function truncateText(value, maxLength = 220) {
   return normalized.slice(0, maxLength).trim()
 }
 
+function normalizeOpenAIModelId(value) {
+  const normalized = sanitizeText(value)
+  if (!normalized || normalized.length > 120) {
+    return ""
+  }
+  if (/[\u0000-\u001F\u007F]/.test(normalized)) {
+    return ""
+  }
+  return /^[A-Za-z0-9._:-]+$/.test(normalized) ? normalized : ""
+}
+
+function getOpenAIModelPreset(modelId) {
+  const normalized = normalizeOpenAIModelId(modelId)
+  if (!normalized) {
+    return DEFAULT_OPENAI_MODEL
+  }
+  return OPENAI_MODEL_PRESETS.includes(normalized) ? normalized : "custom"
+}
+
+function syncOpenAIModelControls(settings = currentSettings) {
+  if (!(openaiModelPresetSelect instanceof HTMLSelectElement)) {
+    return
+  }
+  const modelId = normalizeOpenAIModelId(settings?.openaiModel) || DEFAULT_OPENAI_MODEL
+  const preset = getOpenAIModelPreset(modelId)
+  openaiModelPresetSelect.value = preset
+  const showCustom = preset === "custom"
+  if (openaiModelCustomWrap instanceof HTMLElement) {
+    openaiModelCustomWrap.hidden = !showCustom
+  }
+  if (openaiModelCustomInput instanceof HTMLInputElement) {
+    openaiModelCustomInput.hidden = !showCustom
+    openaiModelCustomInput.disabled = !showCustom
+    openaiModelCustomInput.value = showCustom ? modelId : ""
+  }
+}
+
 function parseOptionalPageIndex(value) {
   const numeric = Number(value)
   if (!Number.isFinite(numeric) || numeric < 0) {
@@ -563,7 +636,7 @@ function createGroundingSourceTrigger({ cardId, sourceText, pageIndex, label, co
 
 function normalizeTabName(tab) {
   const candidate = typeof tab === "string" ? tab : ""
-  const validTabs = new Set(["orientation", "explain", "glossary", "figures", "assist", "walkthrough"])
+  const validTabs = new Set(["orientation", "explain", "glossary", "figures", "assist", "project", "walkthrough"])
   if (!validTabs.has(candidate)) {
     return "orientation"
   }
@@ -618,6 +691,9 @@ function getEmptyMessage(tab) {
   }
   if (tab === "assist") {
     return "Use notes for quick thoughts and chat for complex questions."
+  }
+  if (tab === "project") {
+    return "Select an active project to view project fit and reading guidance for this paper."
   }
   return "No walkthrough notes yet. Generate section one-liners."
 }
@@ -2335,6 +2411,441 @@ function renderAssistTab() {
   panel.append(container)
 }
 
+function getProjectState() {
+  if (!sidebarUiState.project || typeof sidebarUiState.project !== "object") {
+    sidebarUiState.project = createProjectUiState()
+  }
+  return sidebarUiState.project
+}
+
+function projectRecommendationLabel(value) {
+  const normalized = sanitizeText(value).toLowerCase()
+  if (normalized === "include") {
+    return "Include"
+  }
+  if (normalized === "exclude") {
+    return "Exclude"
+  }
+  return "Review"
+}
+
+function renderProjectListItems(items, fallbackText) {
+  const list = document.createElement("ul")
+  list.className = "projectList"
+  const source = Array.isArray(items) ? items.filter(Boolean) : []
+  if (source.length === 0) {
+    const item = document.createElement("li")
+    item.textContent = fallbackText
+    list.append(item)
+    return list
+  }
+  for (const text of source.slice(0, 12)) {
+    const item = document.createElement("li")
+    item.textContent = text
+    list.append(item)
+  }
+  return list
+}
+
+function renderProjectTab() {
+  const projectState = getProjectState()
+  panel.innerHTML = ""
+  const container = document.createElement("article")
+  container.className = "projectPanel"
+
+  if (!projectState.projectId || !projectState.project) {
+    const section = document.createElement("section")
+    section.className = "projectSection"
+    const title = document.createElement("h3")
+    title.className = "projectSectionTitle"
+    title.textContent = "No Active Project"
+    const body = document.createElement("p")
+    body.className = "projectParagraph"
+    body.textContent = "Open Research Home to select or create a project."
+    const actions = document.createElement("div")
+    actions.className = "rowButtons"
+    const openHomeButton = document.createElement("button")
+    openHomeButton.type = "button"
+    openHomeButton.dataset.projectAction = "open-home"
+    openHomeButton.textContent = "Open Research Home"
+    actions.append(openHomeButton)
+    section.append(title, body, actions)
+    container.append(section)
+    panel.append(container)
+    return
+  }
+
+  const summarySection = document.createElement("section")
+  summarySection.className = "projectSection"
+  const summaryTitle = document.createElement("h3")
+  summaryTitle.className = "projectSectionTitle"
+  summaryTitle.textContent = projectState.project.name || "Active Project"
+  summarySection.append(summaryTitle)
+
+  if (projectState.project.researchQuestion) {
+    const question = document.createElement("p")
+    question.className = "projectParagraph"
+    question.textContent = projectState.project.researchQuestion
+    summarySection.append(question)
+  }
+  if (projectState.project.objective) {
+    const objective = document.createElement("p")
+    objective.className = "projectParagraph"
+    objective.textContent = projectState.project.objective
+    summarySection.append(objective)
+  }
+
+  const actionRow = document.createElement("div")
+  actionRow.className = "rowButtons"
+  const addButton = document.createElement("button")
+  addButton.type = "button"
+  addButton.dataset.projectAction = "add-current"
+  addButton.textContent = projectState.paper ? "Paper in Project" : "Add paper to project"
+  addButton.disabled = Boolean(projectState.paper)
+  const removeButton = document.createElement("button")
+  removeButton.type = "button"
+  removeButton.dataset.projectAction = "remove-current"
+  removeButton.textContent = "Remove paper from project"
+  removeButton.disabled = !projectState.paper
+  const refreshButton = document.createElement("button")
+  refreshButton.type = "button"
+  refreshButton.dataset.projectAction = "refresh-fit"
+  refreshButton.textContent = projectState.loading ? "Refreshing..." : "Refresh project fit"
+  refreshButton.disabled = projectState.loading
+  actionRow.append(addButton, removeButton, refreshButton)
+  summarySection.append(actionRow)
+
+  if (Array.isArray(projectState.warnings) && projectState.warnings.length > 0) {
+    const warning = document.createElement("p")
+    warning.className = "projectParagraph"
+    warning.textContent = projectState.warnings[0]
+    summarySection.append(warning)
+  }
+
+  container.append(summarySection)
+
+  const analysis = projectState.analysis
+  if (analysis) {
+    const analysisSection = document.createElement("section")
+    analysisSection.className = "projectSection"
+    const analysisTitle = document.createElement("h3")
+    analysisTitle.className = "projectSectionTitle"
+    analysisTitle.textContent = "Project Fit"
+    const statRow = document.createElement("div")
+    statRow.className = "projectStatRow"
+    const fitChip = document.createElement("span")
+    fitChip.className = "projectStatChip"
+    fitChip.textContent = `Fit: ${Math.floor(clampNumber(Number(analysis.fitScore), 0, 100))}%`
+    const recommendationChip = document.createElement("span")
+    recommendationChip.className = "projectStatChip"
+    recommendationChip.textContent = `Recommendation: ${projectRecommendationLabel(analysis.recommendation)}`
+    statRow.append(fitChip, recommendationChip)
+    const summary = document.createElement("p")
+    summary.className = "projectParagraph"
+    summary.textContent = analysis.relevanceSummary || "No relevance summary yet."
+    const method = document.createElement("p")
+    method.className = "projectParagraph"
+    method.textContent = analysis.methodMatch || ""
+    const risksTitle = document.createElement("h4")
+    risksTitle.className = "projectSectionTitle"
+    risksTitle.textContent = "Gaps / Risks"
+    const risks = renderProjectListItems(analysis.gapsOrRisks, "No major risks identified.")
+    const sectionsTitle = document.createElement("h4")
+    sectionsTitle.className = "projectSectionTitle"
+    sectionsTitle.textContent = "Read First"
+    const sections = renderProjectListItems(analysis.recommendedSections, "No section guidance yet.")
+    analysisSection.append(analysisTitle, statRow, summary, method, risksTitle, risks, sectionsTitle, sections)
+    container.append(analysisSection)
+  } else {
+    const emptySection = document.createElement("section")
+    emptySection.className = "projectSection"
+    const title = document.createElement("h3")
+    title.className = "projectSectionTitle"
+    title.textContent = "Project Fit"
+    const body = document.createElement("p")
+    body.className = "projectParagraph"
+    body.textContent = "Run Refresh project fit to generate project-specific relevance guidance for this paper."
+    emptySection.append(title, body)
+    container.append(emptySection)
+  }
+
+  panel.append(container)
+}
+
+function normalizeProjectId(value) {
+  return typeof value === "string" && value.trim() ? value.trim().slice(0, 120) : ""
+}
+
+function setProjectChipMenuOpen(open) {
+  if (!(projectChipMenu instanceof HTMLElement) || !(activeProjectChip instanceof HTMLButtonElement)) {
+    return
+  }
+  const expanded = Boolean(open)
+  projectChipMenu.hidden = !expanded
+  activeProjectChip.setAttribute("aria-expanded", String(expanded))
+}
+
+function buildCurrentPaperProjectSource() {
+  if (!currentPdf) {
+    return null
+  }
+  const docId = deriveDocId(currentPdf)
+  if (!docId || docId === "unknown") {
+    return null
+  }
+
+  const filename = clampText(currentPdf.filename || "Document", 220)
+  const url = sanitizeText(currentPdf.url)
+  const isFileUrl = url.toLowerCase().startsWith("file://")
+  if (currentPdf.sourceType === "local") {
+    const localFingerprint = `${filename}:${Number(currentPdf.fileSize || 0)}:${Number(currentPdf.fileLastModified || 0)}`
+    return {
+      docId,
+      title: filename,
+      sourceType: "local",
+      sourceRef: {
+        localFingerprint,
+        filename,
+        fileSize: Number(currentPdf.fileSize || 0),
+        fileLastModified: Number(currentPdf.fileLastModified || 0)
+      }
+    }
+  }
+  return {
+    docId,
+    title: filename,
+    sourceType: isFileUrl ? "file" : "remote",
+    sourceRef: { url }
+  }
+}
+
+function updateProjectChipUi() {
+  const projectState = getProjectState()
+  const project = projectState.project
+  const projectName = project?.name ? clampText(project.name, 42) : "None"
+
+  if (activeProjectChip instanceof HTMLButtonElement) {
+    activeProjectChip.textContent = `Project: ${projectName}`
+    activeProjectChip.disabled = false
+    activeProjectChip.title = project ? `Active project: ${project.name}` : "No active project"
+  }
+
+  if (activeProjectSummaryEl instanceof HTMLElement) {
+    if (!project) {
+      activeProjectSummaryEl.textContent = "No active project."
+    } else if (!currentPdf || !projectState.paper) {
+      activeProjectSummaryEl.textContent = "Current paper is not yet added to this project."
+    } else {
+      const fitScore = Number.isFinite(Number(projectState.analysis?.fitScore))
+        ? ` | fit ${Math.max(0, Math.min(100, Math.floor(Number(projectState.analysis.fitScore))))}%`
+        : ""
+      activeProjectSummaryEl.textContent = `In project: ${projectState.paper.title || "Current paper"}${fitScore}`
+    }
+  }
+
+  if (projectAddCurrentBtn instanceof HTMLButtonElement) {
+    projectAddCurrentBtn.disabled = !project || !currentPdf || Boolean(projectState.paper)
+  }
+  if (projectRemoveCurrentBtn instanceof HTMLButtonElement) {
+    projectRemoveCurrentBtn.disabled = !project || !currentPdf || !projectState.paper
+  }
+  if (projectRefreshFitBtn instanceof HTMLButtonElement) {
+    projectRefreshFitBtn.disabled = !project || !currentPdf || Boolean(projectState.loading)
+    projectRefreshFitBtn.textContent = projectState.loading ? "Refreshing project fit..." : "Refresh project fit"
+  }
+}
+
+async function loadProjectContextState(preferredProjectId = "") {
+  const projectState = getProjectState()
+  const requestedProjectId = normalizeProjectId(preferredProjectId)
+  const persistedProjectId = normalizeProjectId(await getActiveProjectId())
+  const candidateProjectId = requestedProjectId || persistedProjectId
+  if (!candidateProjectId) {
+    projectState.projectId = ""
+    projectState.project = null
+    projectState.paper = null
+    projectState.analysis = null
+    projectState.warnings = []
+    updateProjectChipUi()
+    if (sidebarUiState.activeTab === "project") {
+      renderPanel()
+    }
+    return
+  }
+
+  const project = await getProjectById(candidateProjectId)
+  if (!project) {
+    projectState.projectId = ""
+    projectState.project = null
+    projectState.paper = null
+    projectState.analysis = null
+    projectState.warnings = requestedProjectId ? ["Requested project was not found."] : []
+    updateProjectChipUi()
+    if (sidebarUiState.activeTab === "project") {
+      renderPanel()
+    }
+    return
+  }
+
+  if (requestedProjectId && requestedProjectId !== persistedProjectId) {
+    await setActiveProjectId(project.id)
+  }
+  projectState.projectId = project.id
+  projectState.project = project
+  projectState.warnings = []
+  await syncProjectStateForCurrentDocument()
+}
+
+async function syncProjectStateForCurrentDocument() {
+  const projectState = getProjectState()
+  const project = projectState.project
+  if (!project?.id || !currentPdf) {
+    projectState.paper = null
+    projectState.analysis = null
+    updateProjectChipUi()
+    if (sidebarUiState.activeTab === "project") {
+      renderPanel()
+    }
+    return
+  }
+
+  const docId = deriveDocId(currentPdf)
+  const runToken = ++projectRunToken
+  const [paper, analysis] = await Promise.all([
+    getProjectPaperByDocId(project.id, docId),
+    getProjectPaperAnalysis(project.id, docId)
+  ])
+  if (runToken !== projectRunToken) {
+    return
+  }
+  projectState.paper = paper
+  projectState.analysis = analysis
+  updateProjectChipUi()
+  if (sidebarUiState.activeTab === "project") {
+    renderPanel()
+  }
+}
+
+async function addCurrentDocumentToProject() {
+  const projectState = getProjectState()
+  const project = projectState.project
+  if (!project?.id || !currentPdf) {
+    return null
+  }
+  const source = buildCurrentPaperProjectSource()
+  if (!source) {
+    return null
+  }
+
+  const added = await addProjectPaper(project.id, {
+    docId: source.docId,
+    title: source.title,
+    sourceType: source.sourceType,
+    sourceRef: source.sourceRef,
+    status: "reading",
+    priority: 2
+  })
+  if (!added) {
+    return null
+  }
+  projectState.paper = added
+  updateProjectChipUi()
+  if (sidebarUiState.activeTab === "project") {
+    renderPanel()
+  }
+  return added
+}
+
+async function removeCurrentDocumentFromProject() {
+  const projectState = getProjectState()
+  const project = projectState.project
+  if (!project?.id || !currentPdf) {
+    return false
+  }
+  const paper = projectState.paper || (await getProjectPaperByDocId(project.id, deriveDocId(currentPdf)))
+  if (!paper?.id) {
+    return false
+  }
+  const didRemove = await removeProjectPaper(project.id, paper.id)
+  if (!didRemove) {
+    return false
+  }
+  projectState.paper = null
+  projectState.analysis = null
+  projectState.warnings = []
+  updateProjectChipUi()
+  if (sidebarUiState.activeTab === "project") {
+    renderPanel()
+  }
+  return true
+}
+
+async function refreshProjectFitForCurrentDocument() {
+  const projectState = getProjectState()
+  const project = projectState.project
+  if (!project?.id || !currentPdf || !renderState.pdfDoc) {
+    return
+  }
+
+  if (!projectState.paper) {
+    await addCurrentDocumentToProject()
+  }
+
+  projectState.loading = true
+  updateProjectChipUi()
+  if (sidebarUiState.activeTab === "project") {
+    renderPanel()
+  }
+
+  try {
+    const settings = currentSettings ?? (await getSettings())
+    const docId = deriveDocId(currentPdf)
+    const projectBrief = buildProjectBriefText(project)
+    const contextWindow = await buildAssistChatContext()
+    const deepSettings = { ...settings, contextScope: "whole_pdf" }
+    const deepResolution = await ensureOpenAIFileId({
+      docId,
+      currentPdf,
+      settings: deepSettings,
+      apiKey: settings?.openaiApiKey
+    })
+    const { providerUsed, response, warnings } = await generateLLM("project_relevance", {
+      title: clampText(currentPdf.filename || "Document", 220),
+      selectedText: clampText(currentPdf.filename || "Current paper", 200),
+      contextWindow: contextWindow || clampText(currentPdf.filename || "Current paper", 220),
+      pageIndex: Math.max(0, (currentPdf.pageNumber || 1) - 1),
+      openaiFileId: deepResolution.fileId,
+      projectBrief,
+      projectKeyTerms: Array.isArray(project.keyTerms) ? project.keyTerms : [],
+      projectRubric: Array.isArray(project.rubric) ? project.rubric : []
+    })
+    const combinedWarnings = [
+      ...(Array.isArray(deepResolution.warnings) ? deepResolution.warnings : []),
+      ...(Array.isArray(warnings) ? warnings : [])
+    ]
+    const analysis = await setProjectPaperAnalysis(project.id, docId, {
+      ...response,
+      provider: providerUsed,
+      warnings: combinedWarnings,
+      degraded: !deepResolution.fileId || combinedWarnings.length > 0,
+      deepAttempted: true
+    })
+    projectState.analysis = analysis
+    projectState.warnings = combinedWarnings
+    setStatus("Project fit updated.")
+  } catch (error) {
+    const message = clampText(error?.message || "Project fit failed.", 220)
+    projectState.warnings = [message]
+    setStatus("Failed to refresh project fit.")
+  } finally {
+    projectState.loading = false
+    updateProjectChipUi()
+    if (sidebarUiState.activeTab === "project") {
+      renderPanel()
+    }
+  }
+}
+
 function shouldShowOrientationOverviewPrompt() {
   if (!currentPdf || !renderState.pdfDoc || !modeUiState.aiEnabled || isWorksheetMode()) {
     return false
@@ -2395,6 +2906,8 @@ function renderPanel() {
     renderGlossaryTab()
   } else if (tab === "assist") {
     renderAssistTab()
+  } else if (tab === "project") {
+    renderProjectTab()
   } else if (tab === "walkthrough") {
     renderWalkthroughTab()
   } else {
@@ -2433,6 +2946,76 @@ function setStatus(text, options = {}) {
   statusEl.textContent = message
   const explicitTitle = sanitizeText(options?.title)
   statusEl.title = explicitTitle || message
+}
+
+function renderLlmRuntimeFlag(status) {
+  if (!(llmRuntimeFlag instanceof HTMLElement)) {
+    return;
+  }
+  const nextStatus = status && typeof status === "object" ? status : buildLlmRuntimeStatus({ settings: currentSettings });
+  const label = sanitizeText(nextStatus.label) || "LLM status";
+  const detail = sanitizeText(nextStatus.detail) || label;
+  const stateName = sanitizeText(nextStatus.state) || "ready";
+  llmRuntimeFlag.textContent = label;
+  llmRuntimeFlag.title = detail;
+  llmRuntimeFlag.dataset.state = stateName;
+  llmRuntimeFlag.dataset.detail = detail;
+  llmRuntimeFlag.dataset.provider = sanitizeText(nextStatus.providerUsed);
+  llmRuntimeFlag.dataset.task = sanitizeText(nextStatus.task);
+  llmRuntimeFlag.dataset.reason = sanitizeText(nextStatus.reason);
+  llmRuntimeFlag.setAttribute("aria-label", detail);
+  llmRuntimeFlag.setAttribute("role", "button");
+  llmRuntimeFlag.tabIndex = 0;
+}
+
+function buildLlmRuntimeFlagMessage() {
+  if (!(llmRuntimeFlag instanceof HTMLElement)) {
+    return "";
+  }
+  const label = sanitizeText(llmRuntimeFlag.textContent) || "LLM status";
+  const detail = sanitizeText(llmRuntimeFlag.dataset.detail || llmRuntimeFlag.title);
+  const reason = sanitizeText(llmRuntimeFlag.dataset.reason);
+  const provider = sanitizeText(llmRuntimeFlag.dataset.provider);
+  const task = sanitizeText(llmRuntimeFlag.dataset.task);
+  const lines = [label];
+  if (detail && detail !== label) {
+    lines.push(detail);
+  }
+  if (reason && reason !== detail) {
+    lines.push(`Reason: ${reason}`);
+  }
+  if (provider) {
+    lines.push(`Provider: ${provider}`);
+  }
+  if (task) {
+    lines.push(`Task: ${task}`);
+  }
+  return lines.join("\n");
+}
+
+function shouldShowLlmRuntimeFlagDetails() {
+  const stateName = sanitizeText(llmRuntimeFlag?.dataset?.state);
+  const reason = sanitizeText(llmRuntimeFlag?.dataset?.reason);
+  return Boolean(reason || ["fallback", "quota", "rate_limit", "auth", "timeout", "error"].includes(stateName));
+}
+
+function handleLlmRuntimeFlagShortcut() {
+  if (shouldShowLlmRuntimeFlagDetails()) {
+    const message = buildLlmRuntimeFlagMessage();
+    if (message) {
+      setStatus(message.replace(/\n/g, " | "));
+      return;
+    }
+  }
+  openViewerApiSettingsShortcut();
+}
+
+function openViewerApiSettingsShortcut() {
+  setDiagnosticsMenuOpen(true);
+  requestAnimationFrame(() => {
+    openaiApiKeyInput?.scrollIntoView({ block: "center" });
+    openaiApiKeyInput?.focus();
+  });
 }
 
 function getShortStatusLabel(value, maxLength = 42) {
@@ -9322,6 +9905,40 @@ function clampGroundingCitations(citationPages, citationQuotes, settings) {
   }
 }
 
+function buildProjectBriefText(project) {
+  const source = project && typeof project === "object" ? project : null
+  if (!source) {
+    return ""
+  }
+  const parts = []
+  if (source.researchQuestion) {
+    parts.push(`Research question: ${sanitizeText(source.researchQuestion)}`)
+  }
+  if (source.objective) {
+    parts.push(`Objective: ${sanitizeText(source.objective)}`)
+  }
+  if (source.scopeNotes) {
+    parts.push(`Scope: ${sanitizeText(source.scopeNotes)}`)
+  }
+  return clampText(parts.join(" "), 2200)
+}
+
+function applyProjectContextToLlmInput(input) {
+  const baseInput = input && typeof input === "object" ? { ...input } : {}
+  const projectState = getProjectState()
+  const project = projectState?.project
+  if (!project) {
+    return baseInput
+  }
+  const projectBrief = buildProjectBriefText(project)
+  if (projectBrief) {
+    baseInput.projectBrief = projectBrief
+  }
+  baseInput.projectKeyTerms = Array.isArray(project.keyTerms) ? project.keyTerms : []
+  baseInput.projectRubric = Array.isArray(project.rubric) ? project.rubric : []
+  return baseInput
+}
+
 async function buildCardFromSelection(payload) {
   const cardType = mapSelectionActionToCardType(payload?.type)
   if (!cardType) {
@@ -9339,7 +9956,7 @@ async function buildCardFromSelection(payload) {
   })
   const docId = deriveDocId(currentPdf)
   const preWarnings = []
-  const llmInput = {
+  const llmInput = applyProjectContextToLlmInput({
     selectedText: clampText(selectedText, 200),
     contextWindow: clampText(contextWindow, 800),
     title: clampText(selectedText, 180),
@@ -9348,7 +9965,7 @@ async function buildCardFromSelection(payload) {
       sectionTitle: grounding.sectionTitle,
       quote: clampText(grounding.quote, 300)
     }
-  }
+  })
 
   if (contextScope === "whole_pdf") {
     if (settings?.llmMode === "mock") {
@@ -9960,6 +10577,7 @@ async function loadCardsForCurrentDocument() {
     ...createWalkthroughUiState(),
     items: normalizeWalkthroughItems(walkthroughItems)
   }
+  await syncProjectStateForCurrentDocument()
   renderPanel()
   logger.info("Loaded cards for current document", {
     docId,
@@ -9984,37 +10602,45 @@ async function handleSelectionAction(payload) {
     return
   }
 
-  const card = await buildCardFromSelection(payload)
-  if (!card) {
-    return
+  try {
+    const card = await buildCardFromSelection(payload)
+    if (!card) {
+      return
+    }
+
+    const docId = deriveDocId(currentPdf)
+    sidebarUiState.docId = docId
+
+    const persistedCard = await appendCard(docId, card)
+    const finalCard = persistedCard ? normalizeCard(persistedCard) : card
+    sidebarUiState.cards = [...sidebarUiState.cards, finalCard]
+
+    if (finalCard.type === "quant") {
+      setActiveTab("figures")
+    } else {
+      setActiveTab("explain")
+    }
+    if (modeUiState.mode === "flow") {
+      pendingCardAutoScrollId = finalCard.id
+    }
+
+    if (sidebarState.collapsed) {
+      setSidebarCollapsed(false)
+    }
+
+    logger.info("Card created from selection action", {
+      actionType: payload?.type,
+      cardType: finalCard.type,
+      docId,
+      cardId: finalCard.id
+    })
+  } catch (error) {
+    logger.warn("Selection action failed", {
+      actionType: payload?.type,
+      message: error?.message || "Unknown error"
+    })
+    setStatus(clampText(error?.message || "Unable to process this selection right now.", 220))
   }
-
-  const docId = deriveDocId(currentPdf)
-  sidebarUiState.docId = docId
-
-  const persistedCard = await appendCard(docId, card)
-  const finalCard = persistedCard ? normalizeCard(persistedCard) : card
-  sidebarUiState.cards = [...sidebarUiState.cards, finalCard]
-
-  if (finalCard.type === "quant") {
-    setActiveTab("figures")
-  } else {
-    setActiveTab("explain")
-  }
-  if (modeUiState.mode === "flow") {
-    pendingCardAutoScrollId = finalCard.id
-  }
-
-  if (sidebarState.collapsed) {
-    setSidebarCollapsed(false)
-  }
-
-  logger.info("Card created from selection action", {
-    actionType: payload?.type,
-    cardType: finalCard.type,
-    docId,
-    cardId: finalCard.id
-  })
 }
 
 function appendAssistChatMessage(role, text) {
@@ -10071,12 +10697,12 @@ async function handleAssistSendChatAction() {
   const pageIndex = Math.max(0, (currentPdf?.pageNumber || 1) - 1)
   try {
     const contextWindow = await buildAssistChatContext()
-    const llmInput = {
+    const llmInput = applyProjectContextToLlmInput({
       selectedText: question,
       contextWindow: contextWindow || question,
       pageIndex,
       readingMode: getReadingModeOrDefault()
-    }
+    })
     const { response } = await generateLLM("explanation", llmInput)
     const answer = clampText(response?.shortAnswer || response?.eli5, 520) || "I could not generate an answer yet."
     appendAssistChatMessage("assistant", answer)
@@ -10236,6 +10862,29 @@ async function handlePanelCardAction(event) {
     }
     if (action === "jump") {
       void jumpToWorksheetQuestion(question)
+      return
+    }
+  }
+
+  const projectButton = eventTarget.closest("button[data-project-action]")
+  if (projectButton && panel.contains(projectButton)) {
+    const projectAction = sanitizeText(projectButton.dataset.projectAction)
+    if (projectAction === "open-home") {
+      await chrome.runtime.sendMessage({ type: "OPEN_HOME", projectId: getProjectState().projectId || "" })
+      return
+    }
+    if (projectAction === "add-current") {
+      const added = await addCurrentDocumentToProject()
+      setStatus(added ? "Paper added to project." : "Unable to add paper to project.")
+      return
+    }
+    if (projectAction === "remove-current") {
+      const didRemove = await removeCurrentDocumentFromProject()
+      setStatus(didRemove ? "Paper removed from project." : "Paper is not in project.")
+      return
+    }
+    if (projectAction === "refresh-fit") {
+      await refreshProjectFitForCurrentDocument()
       return
     }
   }
@@ -10422,11 +11071,13 @@ function applySettingsToUi(settings) {
   syncReadingModeInputs(effectiveReadingMode)
   setToolbarModeToggle(effectiveReadingMode)
   applyReadingMode(effectiveReadingMode, settings)
+  renderLlmRuntimeFlag()
 
   const hasOpenAIKey = Boolean(settings.openaiApiKey);
   llmModeOpenAIOption.disabled = !hasOpenAIKey;
   llmModeHelpEl.hidden = hasOpenAIKey;
   llmModeSelect.value = hasOpenAIKey || settings.llmMode !== "openai" ? settings.llmMode : "auto";
+  syncOpenAIModelControls(settings);
 
   contextScopeSelect.value = settings.contextScope;
   wholePdfSettings.hidden = settings.contextScope !== "whole_pdf";
@@ -10488,6 +11139,7 @@ async function loadSettingsState() {
   logger.info("Settings loaded", {
     llmMode: settings.llmMode,
     hasOpenAIKey: Boolean(settings.openaiApiKey),
+    openaiModel: settings.openaiModel,
     theme: settings.theme,
     debugMode: Boolean(settings.debugMode),
     contextScope: settings.contextScope,
@@ -12082,9 +12734,14 @@ function handleLoadFailure(sourceType, error) {
   resetWorksheetStateForDocument("unknown")
   sidebarUiState.toastMessage = ""
   resetOrientationStateForDocument()
+  const projectState = getProjectState()
+  projectState.paper = null
+  projectState.analysis = null
+  projectState.loading = false
   updateSectionStatus("")
   ensureScaleFactor();
   updatePdfControls();
+  updateProjectChipUi()
   renderPanel();
 
   if (sourceType === "remote") {
@@ -12158,10 +12815,16 @@ async function loadPdfSource(source, documentParams) {
   resetWorksheetStateForDocument(sidebarUiState.docId)
   sidebarUiState.toastMessage = ""
   resetOrientationStateForDocument()
+  const projectState = getProjectState()
+  projectState.paper = null
+  projectState.analysis = null
+  projectState.loading = false
+  projectState.warnings = []
   setOrientationLoading("Loading PDF...")
   updateSectionStatus("")
   ensureScaleFactor();
   updatePdfControls();
+  updateProjectChipUi()
   renderPanel();
   showPdfMessage("Loading PDF...");
 
@@ -12521,112 +13184,126 @@ async function handleSummarizeCurrentSectionAction() {
   if (!currentPdf || !renderState.pdfDoc) {
     return
   }
-  const sections = getReadingMapSections()
-  const activeSectionKey = sanitizeText(currentPdf.currentSectionKey)
-  const range = activeSectionKey
-    ? getSectionRangeForSectionKey(activeSectionKey, sections, currentPdf.pageNumber || 1)
-    : getCurrentSectionRange(currentPdf.pageNumber || 1, sections)
-  const pageStart = Math.max(0, range.startPageIndex)
-  const sectionSnippet = await getSectionSnippetFromRange(range, { maxPages: 2, maxChars: 1400 })
-  if (!sectionSnippet) {
-    setStatus("No section text available yet.")
-    return
-  }
-  const sectionTitle = clampText(range.sectionTitle, 160) || `Page ${pageStart + 1}`
-  const grounding = buildGrounding({
-    pageIndex: pageStart,
-    sectionId: range.sectionId,
-    sectionTitle,
-    selectedText: sectionTitle,
-    contextWindow: sectionSnippet
-  })
-  const { response, warnings, providerUsed } = await generateLLM("explanation", {
-    selectedText: sectionTitle,
-    contextWindow: sectionSnippet,
-    pageIndex: pageStart,
-    readingMode: getReadingModeOrDefault()
-  })
-  const generatedCard = normalizeCard({
-    id: makeId("card"),
-    type: "explanation",
-    title: `Section summary: ${sectionTitle}`,
-    shortAnswer: response?.shortAnswer || `Summary for ${sectionTitle}`,
-    details: {
-      eli5: response?.eli5,
-      steps: response?.steps || [],
-      paperUsage: response?.paperUsage || []
-    },
-    grounding: {
-      pageIndex: grounding.pageIndex,
-      sectionId: grounding.sectionId,
-      sectionTitle: grounding.sectionTitle,
-      quote: grounding.quote
-    },
-    selectedText: sectionTitle,
-    contextWindow: sectionSnippet,
-    createdAt: Date.now(),
-    meta: {
-      provider: providerUsed,
-      warnings: Array.isArray(warnings) ? warnings : []
+  try {
+    const sections = getReadingMapSections()
+    const activeSectionKey = sanitizeText(currentPdf.currentSectionKey)
+    const range = activeSectionKey
+      ? getSectionRangeForSectionKey(activeSectionKey, sections, currentPdf.pageNumber || 1)
+      : getCurrentSectionRange(currentPdf.pageNumber || 1, sections)
+    const pageStart = Math.max(0, range.startPageIndex)
+    const sectionSnippet = await getSectionSnippetFromRange(range, { maxPages: 2, maxChars: 1400 })
+    if (!sectionSnippet) {
+      setStatus("No section text available yet.")
+      return
     }
-  })
-  const docId = deriveDocId(currentPdf)
-  sidebarUiState.docId = docId
-  const persistedCard = await appendCard(docId, generatedCard)
-  const finalCard = persistedCard ? normalizeCard(persistedCard) : generatedCard
-  sidebarUiState.cards = [...sidebarUiState.cards, finalCard]
-  pendingCardAutoScrollId = finalCard.id
-  setActiveTab("explain")
-  showPanelToast("Section summary added")
-  syncSectionStatusForCurrentPage({ preferCurrent: true })
+    const sectionTitle = clampText(range.sectionTitle, 160) || `Page ${pageStart + 1}`
+    const grounding = buildGrounding({
+      pageIndex: pageStart,
+      sectionId: range.sectionId,
+      sectionTitle,
+      selectedText: sectionTitle,
+      contextWindow: sectionSnippet
+    })
+    const { response, warnings, providerUsed } = await generateLLM("explanation", {
+      selectedText: sectionTitle,
+      contextWindow: sectionSnippet,
+      pageIndex: pageStart,
+      readingMode: getReadingModeOrDefault()
+    })
+    const generatedCard = normalizeCard({
+      id: makeId("card"),
+      type: "explanation",
+      title: `Section summary: ${sectionTitle}`,
+      shortAnswer: response?.shortAnswer || `Summary for ${sectionTitle}`,
+      details: {
+        eli5: response?.eli5,
+        steps: response?.steps || [],
+        paperUsage: response?.paperUsage || []
+      },
+      grounding: {
+        pageIndex: grounding.pageIndex,
+        sectionId: grounding.sectionId,
+        sectionTitle: grounding.sectionTitle,
+        quote: grounding.quote
+      },
+      selectedText: sectionTitle,
+      contextWindow: sectionSnippet,
+      createdAt: Date.now(),
+      meta: {
+        provider: providerUsed,
+        warnings: Array.isArray(warnings) ? warnings : []
+      }
+    })
+    const docId = deriveDocId(currentPdf)
+    sidebarUiState.docId = docId
+    const persistedCard = await appendCard(docId, generatedCard)
+    const finalCard = persistedCard ? normalizeCard(persistedCard) : generatedCard
+    sidebarUiState.cards = [...sidebarUiState.cards, finalCard]
+    pendingCardAutoScrollId = finalCard.id
+    setActiveTab("explain")
+    showPanelToast("Section summary added")
+    syncSectionStatusForCurrentPage({ preferCurrent: true })
+  } catch (error) {
+    logger.warn("Section summary action failed", {
+      message: error?.message || "Unknown error"
+    })
+    setStatus(clampText(error?.message || "Unable to summarize this section right now.", 220))
+  }
 }
 
 async function handleKeyTermsSoFarAction() {
   if (!currentPdf || !renderState.pdfDoc) {
     return
   }
-  const currentPageIndex = Math.max(0, (currentPdf.pageNumber || 1) - 1)
-  const startPageIndex = Math.max(0, currentPageIndex - 2)
-  const parts = []
-  for (let pageIndex = startPageIndex; pageIndex <= currentPageIndex; pageIndex += 1) {
-    const pageText = await getPageText(renderState.pdfDoc, pageIndex)
-    const text = sanitizeText(pageText)
-    if (text) {
-      parts.push(text)
+  try {
+    const currentPageIndex = Math.max(0, (currentPdf.pageNumber || 1) - 1)
+    const startPageIndex = Math.max(0, currentPageIndex - 2)
+    const parts = []
+    for (let pageIndex = startPageIndex; pageIndex <= currentPageIndex; pageIndex += 1) {
+      const pageText = await getPageText(renderState.pdfDoc, pageIndex)
+      const text = sanitizeText(pageText)
+      if (text) {
+        parts.push(text)
+      }
     }
+    const snippet = truncateText(parts.join(" "), 1400)
+    if (!snippet) {
+      setStatus("No text available for key terms yet.")
+      return
+    }
+    const sections = getReadingMapSections()
+    const headings = sections
+      .filter((section) => (parseOptionalPageIndex(section?.pageIndex) ?? 0) <= currentPageIndex)
+      .map((section) => getSectionDisplayTitle(section))
+      .filter(Boolean)
+      .slice(0, 16)
+    const { response } = await generateLLM("orientation", {
+      title: currentPdf.filename || "Document",
+      contextWindow: snippet,
+      headings,
+      readingMode: getReadingModeOrDefault()
+    })
+    const terms = Array.isArray(response?.keyTerms)
+      ? response.keyTerms.map((term) => clampText(term, 48)).filter(Boolean).slice(0, 8)
+      : []
+    if (terms.length === 0) {
+      setStatus("No key terms generated.")
+      return
+    }
+    sidebarUiState.glossarySuggestions = [...new Set([...(sidebarUiState.glossarySuggestions || []), ...terms])].slice(
+      0,
+      24
+    )
+    if (sidebarUiState.activeTab === "glossary") {
+      renderPanel()
+    }
+    setStatus(`Added ${terms.length} key terms`)
+  } catch (error) {
+    logger.warn("Key terms action failed", {
+      message: error?.message || "Unknown error"
+    })
+    setStatus(clampText(error?.message || "Unable to extract key terms right now.", 220))
   }
-  const snippet = truncateText(parts.join(" "), 1400)
-  if (!snippet) {
-    setStatus("No text available for key terms yet.")
-    return
-  }
-  const sections = getReadingMapSections()
-  const headings = sections
-    .filter((section) => (parseOptionalPageIndex(section?.pageIndex) ?? 0) <= currentPageIndex)
-    .map((section) => getSectionDisplayTitle(section))
-    .filter(Boolean)
-    .slice(0, 16)
-  const { response } = await generateLLM("orientation", {
-    title: currentPdf.filename || "Document",
-    contextWindow: snippet,
-    headings,
-    readingMode: getReadingModeOrDefault()
-  })
-  const terms = Array.isArray(response?.keyTerms)
-    ? response.keyTerms.map((term) => clampText(term, 48)).filter(Boolean).slice(0, 8)
-    : []
-  if (terms.length === 0) {
-    setStatus("No key terms generated.")
-    return
-  }
-  sidebarUiState.glossarySuggestions = [...new Set([...(sidebarUiState.glossarySuggestions || []), ...terms])].slice(
-    0,
-    24
-  )
-  if (sidebarUiState.activeTab === "glossary") {
-    renderPanel()
-  }
-  setStatus(`Added ${terms.length} key terms`)
 }
 
 async function handleLlmModeChange() {
@@ -12641,6 +13318,47 @@ async function handleLlmModeChange() {
   const settings = await setSettings({ llmMode: nextMode });
   applySettingsToUi(settings);
   logger.info(`LLM mode changed to ${settings.llmMode}`);
+}
+
+async function handleOpenAIModelPresetChange() {
+  if (!(openaiModelPresetSelect instanceof HTMLSelectElement)) {
+    return
+  }
+  const selectedPreset = sanitizeText(openaiModelPresetSelect.value)
+  if (selectedPreset === "custom") {
+    if (openaiModelCustomWrap instanceof HTMLElement) {
+      openaiModelCustomWrap.hidden = false
+    }
+    if (openaiModelCustomInput instanceof HTMLInputElement) {
+      const existingModel =
+        getOpenAIModelPreset(currentSettings?.openaiModel) === "custom"
+          ? normalizeOpenAIModelId(currentSettings?.openaiModel)
+          : ""
+      openaiModelCustomInput.hidden = false
+      openaiModelCustomInput.disabled = false
+      openaiModelCustomInput.value = existingModel
+      requestAnimationFrame(() => openaiModelCustomInput?.focus())
+    }
+    return
+  }
+  const nextModel = OPENAI_MODEL_PRESETS.includes(selectedPreset) ? selectedPreset : DEFAULT_OPENAI_MODEL
+  const settings = await setSettings({ openaiModel: nextModel })
+  applySettingsToUi(settings)
+  setStatus(`OpenAI model changed to ${settings.openaiModel}.`)
+}
+
+async function handleOpenAIModelCustomCommit() {
+  if (!(openaiModelPresetSelect instanceof HTMLSelectElement) || openaiModelPresetSelect.value !== "custom") {
+    return
+  }
+  const customModel = normalizeOpenAIModelId(openaiModelCustomInput?.value)
+  if (!customModel) {
+    setApiStatus("Enter a valid custom model id")
+    return
+  }
+  const settings = await setSettings({ openaiModel: customModel })
+  applySettingsToUi(settings)
+  setStatus(`OpenAI model changed to ${settings.openaiModel}.`)
 }
 
 async function handleContextScopeChange() {
@@ -12685,6 +13403,7 @@ async function handleSaveApiKey() {
   }
 
   const settings = await setSettings({ openaiApiKey: apiKey });
+  sessionFileIdByDocId.clear();
   openaiApiKeyInput.value = "";
   applySettingsToUi(settings);
   if (!settings.openaiApiKey) {
@@ -12698,6 +13417,7 @@ async function handleSaveApiKey() {
 
 async function handleClearApiKey() {
   await clearOpenAIKey();
+  sessionFileIdByDocId.clear();
 
   let settings = await getSettings();
   if (settings.llmMode === "openai") {
@@ -12881,12 +13601,61 @@ diagnosticsToggleBtn.addEventListener("click", (event) => {
   setDiagnosticsMenuOpen(diagnosticsMenu.hidden);
 });
 
+llmRuntimeFlag?.addEventListener("click", (event) => {
+  event.stopPropagation()
+  handleLlmRuntimeFlagShortcut()
+})
+
+llmRuntimeFlag?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault()
+    event.stopPropagation()
+    handleLlmRuntimeFlagShortcut()
+  }
+})
+
+activeProjectChip?.addEventListener("click", (event) => {
+  event.stopPropagation()
+  setProjectChipMenuOpen(projectChipMenu?.hidden)
+})
+
+projectChipMenu?.addEventListener("click", (event) => {
+  event.stopPropagation()
+})
+
+projectAddCurrentBtn?.addEventListener("click", () => {
+  void addCurrentDocumentToProject().then((added) => {
+    setStatus(added ? "Paper added to project." : "Unable to add paper to project.")
+    setProjectChipMenuOpen(false)
+  })
+})
+
+projectRemoveCurrentBtn?.addEventListener("click", () => {
+  void removeCurrentDocumentFromProject().then((didRemove) => {
+    setStatus(didRemove ? "Paper removed from project." : "Paper is not in project.")
+    setProjectChipMenuOpen(false)
+  })
+})
+
+projectRefreshFitBtn?.addEventListener("click", () => {
+  void refreshProjectFitForCurrentDocument().finally(() => {
+    setProjectChipMenuOpen(false)
+  })
+})
+
+projectOpenHomeBtn?.addEventListener("click", () => {
+  void chrome.runtime
+    .sendMessage({ type: "OPEN_HOME", projectId: getProjectState().projectId || "" })
+    .finally(() => setProjectChipMenuOpen(false))
+})
+
 diagnosticsMenu.addEventListener("click", (event) => {
   event.stopPropagation();
 });
 
 document.addEventListener("click", () => {
   setDiagnosticsMenuOpen(false);
+  setProjectChipMenuOpen(false)
 });
 
 verboseToggle.addEventListener("change", async () => {
@@ -12940,6 +13709,18 @@ toolbarModeWorksheetBtn?.addEventListener("click", (event) => {
   void handleToolbarModeToggle(event)
 });
 llmModeSelect.addEventListener("change", handleLlmModeChange);
+openaiModelPresetSelect?.addEventListener("change", () => {
+  void handleOpenAIModelPresetChange()
+})
+openaiModelCustomInput?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault()
+    void handleOpenAIModelCustomCommit()
+  }
+})
+openaiModelCustomInput?.addEventListener("blur", () => {
+  void handleOpenAIModelCustomCommit()
+})
 contextScopeSelect.addEventListener("change", () => {
   void handleContextScopeChange();
 });
@@ -12966,10 +13747,29 @@ autoOpenPdfToggle.addEventListener("change", async () => {
   applySettingsToUi(settings);
 });
 
+chrome.storage?.onChanged?.addListener((changes, areaName) => {
+  if (areaName !== "local") {
+    return
+  }
+  if (
+    changes?.activeProjectId ||
+    changes?.projects ||
+    changes?.projectPapersByProjectId ||
+    changes?.projectAnalysesByProjectId
+  ) {
+    void loadProjectContextState("")
+  }
+})
+
+globalThis.addEventListener?.(LLM_RUNTIME_STATUS_EVENT, (event) => {
+  renderLlmRuntimeFlag(event?.detail)
+})
+
 // Load optional ?src= URL.
 const params = new URLSearchParams(location.search);
 const srcParam = params.get("src");
 const src = normalizeRemotePdfSourceUrl(srcParam);
+const projectParam = normalizeProjectId(params.get("project"));
 if (src) {
   openedPdfSource = inferOpenedPdfSourceFromSrc(src);
   logger.info("?src parameter detected", { source: openedPdfSource });
@@ -12977,9 +13777,12 @@ if (src) {
 } else if (srcParam) {
   logger.warn("Rejected unsupported ?src parameter");
 }
+if (projectParam) {
+  logger.info("?project parameter detected", { projectId: projectParam })
+}
 
 logger.info("Viewer loaded");
-const startupStatePromise = Promise.all([loadVerboseState(), loadSettingsState()]);
+const startupStatePromise = Promise.all([loadVerboseState(), loadSettingsState(), loadProjectContextState(projectParam)]);
 void startupStatePromise.catch((error) => {
   logger.warn("Startup settings load failed", { message: error?.message || "Unknown error" })
 });

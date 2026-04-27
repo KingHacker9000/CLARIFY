@@ -2,6 +2,7 @@ import { createLogger } from "../shared/diagnostics.js";
 import { getSettings } from "../shared/storage.js";
 
 const viewerUrl = chrome.runtime.getURL("src/viewer/viewer.html");
+const homeUrl = chrome.runtime.getURL("src/home/home.html");
 const redirectTrampolineUrl = chrome.runtime.getURL("src/viewer/redirect.html");
 const SETTINGS_KEY = "settings";
 const CONTEXT_MENU_ID = "open_pdf_in_clarify";
@@ -30,8 +31,33 @@ let fileRedirectWarned = false;
 logger.info("Service worker startup");
 logger.debug("Service worker initialized");
 
-function buildViewerUrl(srcUrl) {
-  return `${viewerUrl}?src=${encodeURIComponent(srcUrl)}`;
+function normalizeProjectId(value) {
+  if (typeof value !== "string") {
+    return ""
+  }
+  const trimmed = value.trim()
+  return trimmed ? trimmed.slice(0, 120) : ""
+}
+
+function buildHomeUrl(projectId = "") {
+  const normalizedProjectId = normalizeProjectId(projectId)
+  if (!normalizedProjectId) {
+    return homeUrl
+  }
+  return `${homeUrl}?project=${encodeURIComponent(normalizedProjectId)}`
+}
+
+function buildViewerUrl(srcUrl, projectId = "") {
+  const params = new URLSearchParams()
+  if (srcUrl) {
+    params.set("src", srcUrl)
+  }
+  const normalizedProjectId = normalizeProjectId(projectId)
+  if (normalizedProjectId) {
+    params.set("project", normalizedProjectId)
+  }
+  const query = params.toString()
+  return query ? `${viewerUrl}?${query}` : viewerUrl
 }
 
 function normalizeViewerSourceUrl(url) {
@@ -174,7 +200,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     if (msg?.type === "OPEN_VIEWER") {
       logger.info("OPEN_VIEWER received");
-      await chrome.tabs.create({ url: viewerUrl });
+      const target = buildViewerUrl("", msg?.projectId || "")
+      await chrome.tabs.create({ url: target });
       return;
     }
 
@@ -182,9 +209,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       logger.info("OPEN_VIEWER_FROM_TAB received");
       const normalizedSourceUrl = normalizeViewerSourceUrl(msg?.url || "");
       const target = isLikelyPdfSourceUrl(normalizedSourceUrl)
-        ? buildViewerUrl(normalizedSourceUrl)
-        : viewerUrl;
+        ? buildViewerUrl(normalizedSourceUrl, msg?.projectId || "")
+        : buildViewerUrl("", msg?.projectId || "");
       await chrome.tabs.create({ url: target });
+      return;
+    }
+
+    if (msg?.type === "OPEN_HOME") {
+      logger.info("OPEN_HOME received");
+      await chrome.tabs.create({ url: buildHomeUrl(msg?.projectId || "") });
+      return;
+    }
+
+    if (msg?.type === "OPEN_VIEWER_WITH_SOURCE") {
+      logger.info("OPEN_VIEWER_WITH_SOURCE received");
+      const normalizedSourceUrl = normalizeViewerSourceUrl(msg?.src || "");
+      const target = normalizedSourceUrl
+        ? buildViewerUrl(normalizedSourceUrl, msg?.projectId || "")
+        : buildViewerUrl("", msg?.projectId || "");
+      await chrome.tabs.create({ url: target });
+      return;
     }
   })()
     .then(() => {

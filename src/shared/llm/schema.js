@@ -6,7 +6,13 @@ export const TASKS = Object.freeze([
   "section_intents",
   "section_intent",
   "worksheet_questions",
-  "worksheet_answer"
+  "worksheet_answer",
+  "project_relevance",
+  "project_compare_table",
+  "literature_import",
+  "project_matrix_row_fill",
+  "project_screening_suggest",
+  "project_contribution_map"
 ])
 
 const TASK_SET = new Set(TASKS)
@@ -183,6 +189,268 @@ function normalizeOrientation(resp) {
   }
 }
 
+function normalizeProjectRecommendation(value) {
+  const normalized = normalizeText(value).toLowerCase()
+  if (normalized === "include" || normalized === "exclude" || normalized === "review") {
+    return normalized
+  }
+  return "review"
+}
+
+function normalizeProjectRelevance(resp, limits) {
+  const source = resp && typeof resp === "object" ? resp : {}
+  return enforceGroundingLimits(
+    {
+      fitScore: normalizeNumber(source.fitScore, 0, 0, 100),
+      recommendation: normalizeProjectRecommendation(source.recommendation),
+      relevanceSummary: truncateText(source.relevanceSummary, 900),
+      methodMatch: truncateText(source.methodMatch, 700),
+      gapsOrRisks: normalizeStringList(source.gapsOrRisks, { maxItems: 12, maxLength: 260 }),
+      recommendedSections: normalizeStringList(source.recommendedSections, { maxItems: 12, maxLength: 180 }),
+      groundingPages: normalizeGroundingPages(source.groundingPages, limits.maxCitations),
+      groundingQuotes: normalizeGroundingQuotes(
+        source.groundingQuotes,
+        limits.maxCitations,
+        limits.maxQuoteChars
+      )
+    },
+    limits
+  )
+}
+
+function normalizeComparisonRows(rows) {
+  const source = Array.isArray(rows) ? rows : []
+  return source
+    .map((row) => {
+      const rowObj = row && typeof row === "object" ? row : {}
+      const criterion = truncateText(rowObj.criterion || rowObj.title, 180)
+      if (!criterion) {
+        return null
+      }
+      const cells = Array.isArray(rowObj.cells)
+        ? rowObj.cells
+            .map((cell) => {
+              const cellObj = cell && typeof cell === "object" ? cell : {}
+              const paperId = truncateText(cellObj.paperId, 120)
+              const value = truncateText(cellObj.value || cellObj.text, 420)
+              const groundingPage = Number.isFinite(Number(cellObj.groundingPage))
+                ? Math.max(0, Math.floor(Number(cellObj.groundingPage)))
+                : null
+              const groundingQuote = truncateText(cellObj.groundingQuote, 260)
+              if (!paperId && !value) {
+                return null
+              }
+              return {
+                paperId,
+                value,
+                groundingPage,
+                groundingQuote
+              }
+            })
+            .filter(Boolean)
+            .slice(0, 12)
+        : []
+      return { criterion, cells }
+    })
+    .filter(Boolean)
+    .slice(0, 64)
+}
+
+function normalizeProjectCompareTable(resp) {
+  const source = resp && typeof resp === "object" ? resp : {}
+  return {
+    columns: normalizeStringList(source.columns, { maxItems: 12, maxLength: 120 }),
+    rows: normalizeComparisonRows(source.rows),
+    crossPaperInsights: normalizeStringList(source.crossPaperInsights, { maxItems: 16, maxLength: 320 }),
+    contradictions: normalizeStringList(source.contradictions, { maxItems: 16, maxLength: 320 }),
+    evidenceGaps: normalizeStringList(source.evidenceGaps, { maxItems: 16, maxLength: 320 })
+  }
+}
+
+function normalizeProjectMatrixCells(value) {
+  const source = Array.isArray(value) ? value : []
+  return source
+    .map((cell) => {
+      const entry = cell && typeof cell === "object" ? cell : {}
+      const columnId = truncateText(entry.columnId, 80)
+      const valueText = truncateText(entry.value, 420)
+      const confidence = Math.max(0, Math.min(1, Number(entry.confidence) || 0))
+      const evidenceSnippet = truncateText(entry.evidenceSnippet || entry.evidenceQuote, 320)
+      const evidencePage = Number.isFinite(Number(entry.evidencePage))
+        ? Math.max(0, Math.floor(Number(entry.evidencePage)))
+        : null
+      const insufficientReason = truncateText(entry.insufficientReason, 180)
+      if (!columnId) {
+        return null
+      }
+      return {
+        columnId,
+        value: valueText,
+        confidence,
+        evidenceSnippet,
+        evidencePage,
+        insufficientReason
+      }
+    })
+    .filter(Boolean)
+    .slice(0, 220)
+}
+
+function normalizeProjectMatrixHiddenFeatures(value) {
+  const source = Array.isArray(value) ? value : []
+  return source
+    .map((item) => {
+      const entry = item && typeof item === "object" ? item : {}
+      const columnId = truncateText(entry.columnId, 80)
+      const tags = normalizeStringList(entry.tags, { maxItems: 6, maxLength: 60 })
+      if (!columnId) {
+        return null
+      }
+      return {
+        columnId,
+        tags
+      }
+    })
+    .filter(Boolean)
+    .slice(0, 120)
+}
+
+function normalizeProjectMatrixRowFill(resp) {
+  const source = resp && typeof resp === "object" ? resp : {}
+  return {
+    cells: normalizeProjectMatrixCells(source.cells),
+    hiddenFeatures: normalizeProjectMatrixHiddenFeatures(source.hiddenFeatures),
+    warnings: normalizeStringList(source.warnings, { maxItems: 20, maxLength: 220 })
+  }
+}
+
+function normalizeScreeningDecisionSuggestion(value) {
+  const normalized = normalizeText(value).toLowerCase()
+  if (
+    normalized === "include" ||
+    normalized === "exclude" ||
+    normalized === "needs_info" ||
+    normalized === "review"
+  ) {
+    return normalized
+  }
+  return "review"
+}
+
+function normalizeProjectScreeningSuggest(resp) {
+  const source = resp && typeof resp === "object" ? resp : {}
+  return {
+    decisionSuggestion: normalizeScreeningDecisionSuggestion(source.decisionSuggestion),
+    confidence: Math.max(0, Math.min(1, Number(source.confidence) || 0)),
+    reasonCandidates: normalizeStringList(source.reasonCandidates, { maxItems: 12, maxLength: 80 }),
+    evidenceSnippet: truncateText(source.evidenceSnippet, 360),
+    evidencePage: Number.isFinite(Number(source.evidencePage))
+      ? Math.max(0, Math.floor(Number(source.evidencePage)))
+      : null,
+    insufficientReason: truncateText(source.insufficientReason, 180)
+  }
+}
+
+function normalizeContributionItem(entry) {
+  const source = entry && typeof entry === "object" ? entry : {}
+  const label = truncateText(source.label || source.name || source.title, 120)
+  const summary = truncateText(source.summary || source.description || source.detail, 420)
+  const confidence = Math.max(0, Math.min(1, Number(source.confidence) || 0))
+  return {
+    label,
+    summary,
+    confidence
+  }
+}
+
+function normalizeContributionList(value, maxItems = 16) {
+  const source = Array.isArray(value) ? value : []
+  return source
+    .map((entry) => normalizeContributionItem(entry))
+    .filter((item) => item.label || item.summary)
+    .slice(0, maxItems)
+}
+
+function normalizeEvidenceLinks(value) {
+  const source = Array.isArray(value) ? value : []
+  return source
+    .map((entry) => {
+      const item = entry && typeof entry === "object" ? entry : {}
+      return {
+        label: truncateText(item.label || item.title, 140),
+        rowId: truncateText(item.rowId, 80),
+        clusterId: Number.isFinite(Number(item.clusterId)) ? Math.max(0, Math.floor(Number(item.clusterId))) : null,
+        columnId: truncateText(item.columnId, 80),
+        value: truncateText(item.value, 220)
+      }
+    })
+    .filter((item) => item.label || item.rowId || item.value)
+    .slice(0, 36)
+}
+
+function normalizeProjectContributionMap(resp) {
+  const source = resp && typeof resp === "object" ? resp : {}
+  return {
+    clustersSummary: normalizeContributionList(source.clustersSummary, 20),
+    underexploredZones: normalizeContributionList(source.underexploredZones, 20),
+    differentiationIdeas: normalizeContributionList(source.differentiationIdeas, 24),
+    evidenceLinks: normalizeEvidenceLinks(source.evidenceLinks)
+  }
+}
+
+const IMPORT_PAPER_STATUSES = new Set(["queued", "reading", "included", "excluded"])
+const IMPORT_PAPER_CONFIDENCE = new Set(["high", "medium", "low", "unknown"])
+
+function normalizeImportProject(entry) {
+  const source = entry && typeof entry === "object" ? entry : {}
+  return {
+    name: truncateText(source.name, 140),
+    researchQuestion: truncateText(source.researchQuestion, 900),
+    objective: truncateText(source.objective, 900),
+    scopeNotes: truncateText(source.scopeNotes, 2200),
+    keyTerms: normalizeStringList(source.keyTerms, { maxItems: 32, maxLength: 80 }),
+    rubric: normalizeStringList(source.rubric, { maxItems: 24, maxLength: 120 })
+  }
+}
+
+function normalizeImportPaper(entry) {
+  const source = entry && typeof entry === "object" ? entry : {}
+  const statusRaw = normalizeText(source.status).toLowerCase()
+  const status = IMPORT_PAPER_STATUSES.has(statusRaw) ? statusRaw : "queued"
+  const priority = normalizeNumber(source.priority, 2, 1, 5)
+  const yearRaw = Number(source.year)
+  const year = Number.isFinite(yearRaw) && yearRaw >= 1800 && yearRaw <= 2100 ? Math.floor(yearRaw) : null
+  const confidenceRaw = normalizeText(source.confidence).toLowerCase()
+  const confidence = IMPORT_PAPER_CONFIDENCE.has(confidenceRaw) ? confidenceRaw : "unknown"
+  return {
+    title: truncateText(source.title, 260),
+    url: truncateText(source.url, 2200),
+    authors: normalizeStringList(source.authors, { maxItems: 12, maxLength: 120 }),
+    year,
+    venue: truncateText(source.venue, 160),
+    tags: normalizeStringList(source.tags, { maxItems: 20, maxLength: 44 }),
+    status,
+    priority,
+    notes: truncateText(source.notes, 700),
+    arxivId: truncateText(source.arxivId, 48),
+    doi: truncateText(source.doi, 120),
+    confidence,
+    searchQuery: truncateText(source.searchQuery, 260)
+  }
+}
+
+function normalizeLiteratureImport(resp) {
+  const source = resp && typeof resp === "object" ? resp : {}
+  const papers = Array.isArray(source.papers)
+    ? source.papers.map((paper) => normalizeImportPaper(paper)).filter((paper) => paper.title).slice(0, 180)
+    : []
+  return {
+    project: normalizeImportProject(source.project),
+    papers,
+    warnings: normalizeStringList(source.warnings, { maxItems: 28, maxLength: 220 })
+  }
+}
+
 function normalizeWorksheetQuestions(resp) {
   const source = resp && typeof resp === "object" ? resp : {}
   const validKinds = new Set(["question", "part", "item", "term", "prompt"])
@@ -279,6 +547,24 @@ function enforceGroundingLimits(response, limits) {
 export function normalizeLLMResponse(task, resp, options = {}) {
   const normalizedTask = normalizeTask(task)
   const limits = normalizeLimits(options)
+  if (normalizedTask === "literature_import") {
+    return normalizeLiteratureImport(resp)
+  }
+  if (normalizedTask === "project_relevance") {
+    return normalizeProjectRelevance(resp, limits)
+  }
+  if (normalizedTask === "project_compare_table") {
+    return normalizeProjectCompareTable(resp)
+  }
+  if (normalizedTask === "project_matrix_row_fill") {
+    return normalizeProjectMatrixRowFill(resp)
+  }
+  if (normalizedTask === "project_screening_suggest") {
+    return normalizeProjectScreeningSuggest(resp)
+  }
+  if (normalizedTask === "project_contribution_map") {
+    return normalizeProjectContributionMap(resp)
+  }
   if (normalizedTask === "worksheet_questions") {
     return normalizeWorksheetQuestions(resp)
   }

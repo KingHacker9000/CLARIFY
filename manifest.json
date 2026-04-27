@@ -15,11 +15,12 @@
   "permissions": [
     "storage",
     "tabs",
+    "identity",
     "declarativeNetRequest",
     "declarativeNetRequestWithHostAccess",
     "contextMenus"
   ],
-  "host_permissions": ["http://*/*", "https://*/*", "file://*/*"],
+  "host_permissions": ["http://*/*", "https://*/*", "https://www.googleapis.com/*", "https://accounts.google.com/*", "file://*/*"],
   "icons": {
     "48": "assets/icons/icon48.png"
   },
